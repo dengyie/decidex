@@ -58,13 +58,18 @@ jobs:
 
             if [ ! -d .git ]; then
               git init
+            fi
+
+            if ! git remote | grep -q "^origin$"; then
               git remote add origin https://github.com/dengyie/decidex.git
+            else
+              git remote set-url origin https://github.com/dengyie/decidex.git
             fi
 
             # Fetch and align with latest main
-            git remote set-url origin https://github.com/dengyie/decidex.git
             git fetch origin main
-            git checkout -B main origin/main
+            git reset --hard origin/main
+            git branch -M main
 
             # Install/update package in existing virtual environment
             if [ -f .venv/bin/pip ]; then
