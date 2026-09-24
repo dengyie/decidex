@@ -1,0 +1,79 @@
+name: DecideX CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run Pytest Suite
+        run: |
+          pytest -v tests
+
+  deploy:
+    name: Deploy to Production
+    needs: test
+    if: github.repository == 'dengyie/decidex' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger Remote Deployment via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          port: ${{ secrets.PROD_PORT || 22 }}
+          script: |
+            set -e
+            echo "🚀 Starting automated deployment for DecideX..."
+            TARGET_DIR="${{ secrets.DEPLOY_PATH || '/data/decidex' }}"
+            mkdir -p "$TARGET_DIR"
+            cd "$TARGET_DIR"
+
+            if [ ! -d .git ]; then
+              git init
+              git remote add origin https://github.com/dengyie/decidex.git
+            fi
+
+            # Fetch and align with latest main
+            git remote set-url origin https://github.com/dengyie/decidex.git
+            git fetch origin main
+            git checkout -B main origin/main
+
+            # Install/update package in existing virtual environment
+            if [ -f .venv/bin/pip ]; then
+              .venv/bin/pip install -e . --no-deps
+            fi
+
+            # Run production verification tests
+            echo "🧪 Running remote verification test suite..."
+            if [ -f .venv/bin/pytest ]; then
+              .venv/bin/pytest tests
+            fi
+            echo "✅ DecideX production deployment completed successfully!"

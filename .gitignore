@@ -1,0 +1,25 @@
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Sensitive API keys & pool states
+*keys*.json*
+*keys*.txt
+*pool_state*.json*
+.env
+.env.*
+
+# Journals and telemetry artifacts
+*.jsonl
+*.sqlite
+*.log
