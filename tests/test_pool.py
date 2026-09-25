@@ -262,6 +262,101 @@ async def test_typesafe_provider_warmup():
     await provider.aclose()
 
 
+@pytest.mark.asyncio
+async def test_typesafe_provider_decisions_endpoint_passthrough():
+    """MindsHub-style base_url ending in /decisions must be posted to as-is (no /systemone suffix)."""
+    pool = KeyPool.from_keys(["mh_key"])
+    provider = TypeSafeJevProvider(
+        base_url="https://api.mindshub.ai/v1/decisions",
+        model="jev",
+        key_pool=pool,
+    )
+    payload = ObservationPayload(domain="test", observation={})
+    questions = [
+        QuestionSpec(id="q1", primitive=PrimitiveType.CHOICE, description="Test", options=["A", "B"])
+    ]
+
+    captured_urls = []
+
+    async def mock_post(url, json, headers):
+        captured_urls.append(url)
+        req = httpx.Request("POST", url)
+        return httpx.Response(200, request=req, json={
+            "model": "jev-1.13.0",
+            "answers": {
+                "q1": {"type": "choice", "choice": "A", "probabilities": {"A": 0.7, "B": 0.3}}
+            }
+        })
+
+    with patch.object(httpx.AsyncClient, "post", side_effect=mock_post):
+        verdicts = await provider.infer(payload, questions)
+
+    assert len(verdicts) == 1
+    assert captured_urls == ["https://api.mindshub.ai/v1/decisions"]
+    await provider.aclose()
+
+
+def test_provider_base_url_env_override(monkeypatch):
+    monkeypatch.setenv("DECIDEX_BASE_URL", "https://api.mindshub.ai/v1/decisions")
+    provider = TypeSafeJevProvider()
+    assert provider.base_url == "https://api.mindshub.ai/v1/decisions"
+
+    # Explicit constructor argument wins over the environment
+    provider = TypeSafeJevProvider(base_url="https://api.typesafe.ai/v1")
+    assert provider.base_url == "https://api.typesafe.ai/v1"
+
+
+def test_from_default_locations_ignores_mindshub_credentials(tmp_path, monkeypatch):
+    """from_default_locations is the OFFICIAL pool locator: mindshub-tagged keys
+    (env or org=mindshub file entries) must never be returned, even alone."""
+    monkeypatch.setenv("MINDSHUB_API_KEY", "mdb_env_key")
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.delenv("DECIDEX_API_KEY", raising=False)
+    monkeypatch.setattr(
+        KeyPool, "default_key_file_candidates",
+        classmethod(lambda cls: [str(tmp_path / "keys.jsonl")]),
+    )
+    monkeypatch.setattr(KeyPool, "vault_key_note_candidates", classmethod(lambda cls: []))
+    (tmp_path / "keys.jsonl").write_text('{"key": "mdb_file_key", "org": "mindshub"}\n', encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError):
+        KeyPool.from_default_locations()
+
+
+def test_from_default_locations_filters_tagged_mindshub_keys(tmp_path, monkeypatch):
+    """A mixed keys file contributes only its official (untagged) entries."""
+    monkeypatch.delenv("MINDSHUB_API_KEY", raising=False)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.delenv("DECIDEX_API_KEY", raising=False)
+    monkeypatch.setattr(
+        KeyPool, "default_key_file_candidates",
+        classmethod(lambda cls: [str(tmp_path / "keys.jsonl")]),
+    )
+    monkeypatch.setattr(KeyPool, "vault_key_note_candidates", classmethod(lambda cls: []))
+    (tmp_path / "keys.jsonl").write_text(
+        '{"key": "mdb_file_key", "org": "mindshub"}\n'
+        '{"key": "apikey_official_1"}\n',
+        encoding="utf-8",
+    )
+
+    pool = KeyPool.from_default_locations()
+    assert set(pool._key_map) == {"apikey_official_1"}
+
+
+def test_default_key_file_candidates_prefers_env_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("DECIDEX_KEY_FILE", str(tmp_path / "custom.txt"))
+    assert KeyPool.default_key_file_candidates()[0] == str(tmp_path / "custom.txt")
+
+    monkeypatch.delenv("DECIDEX_KEY_FILE", raising=False)
+    assert KeyPool.default_key_file_candidates()[0] == "keys.jsonl"
+
+
+def test_vault_key_note_candidates_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("DECIDEX_VAULT", str(tmp_path))
+    notes = KeyPool.vault_key_note_candidates()
+    assert notes == [str(tmp_path / "Note" / "accounts" / "ai" / "typesafe API keys.md")]
+
+
 def test_keypool_exponential_backoff_and_cooldown_recovery():
     pool = KeyPool.from_keys(["rate_key"], default_cooldown_s=10.0)
     entry = pool.get_entry("rate_key")

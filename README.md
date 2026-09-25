@@ -179,6 +179,49 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+### 3. 接入真实 Jev 模型（MindsHub 免费通道 / TypeSafe 官方）
+`TypeSafeJevProvider` 支持 System One 决策协议（`state` + `questions` → `answers`），可直连 TypeSafe 官方 API，也可走 **MindsHub 聚合网关**（OpenAI 兼容 `POST /v1/decisions` 端点，无需 TypeSafe key，上线期免费）：
+
+```bash
+# MindsHub 免费通道：控制台 (console.mindshub.ai) 领取 key
+export MINDSHUB_API_KEY="mdb_..."
+```
+
+```python
+import os
+from decidex.providers.typesafe import TypeSafeJevProvider
+
+# MindsHub 通道：显式传 api_key + base_url。
+# mindshub key 不会被官方号池定位器（KeyPool.from_default_locations）自动识别——
+# 防止它被默认打到 api.typesafe.ai 后 401 熔断。
+provider = TypeSafeJevProvider(
+    api_key=os.environ["MINDSHUB_API_KEY"],
+    base_url="https://api.mindshub.ai/v1/decisions",
+    model="jev",
+)
+verdicts = await provider.infer(payload, questions)
+
+# 官方 TypeSafe 号池：默认构造即可
+provider = TypeSafeJevProvider()
+```
+
+base_url 解析优先级：构造参数 `base_url` > 环境变量 `DECIDEX_BASE_URL` > 官方 `https://api.typesafe.ai/v1`（自动追加 `/systemone`）。以 `/systemone`、`/decide`、`/decisions` 结尾的 base_url 视为完整端点直连。官方号池读取优先级：`DECIDEX_KEY_FILE` > `TYPESAFE_API_KEY` / `DECIDEX_API_KEY` > 本地 `keys.jsonl|keys.json|keys.txt`（已被 .gitignore 排除；`org=mindshub` 标记的条目仅由故障转移构建器识别）。
+
+### 4. 优先级故障转移（MindsHub 免费额度优先，官方号池兜底）
+`PriorityFailoverProvider` 按优先级逐路由尝试：主路由 429 限流按 `Retry-After` 冷却并自动回落下一路由；402（钱包/额度耗尽）、401（key 吊销）与 400/403/404/422（确定性配置错误）直接熔断该路由；官方号池内部的单 key 429/401 仍由 `KeyPool` 原生治理。MindsHub 当前 org 级限流：**60 RPM / 1M TPM / 20 并发**（全模型共享，未设 RPD；2026-09-25 实测 30 并发脉冲全 200）。
+
+```python
+from decidex.providers import PriorityFailoverProvider
+
+provider = PriorityFailoverProvider.from_default_routes()
+# 路由 1 "mindshub-free"：MINDSHUB_API_KEY env + keys 文件中 org=mindshub 标记的 key（max_retries=0，限流即时上抛）
+# 路由 2 "typesafe-pool"：TYPESAFE_API_KEY / DECIDEX_API_KEY env + keys 文件中未标记 org 的 key + Obsidian typesafe 账号库笔记（DECIDEX_VAULT 可覆盖 vault 根路径；生产 pxed 的 1171+ 号池）
+verdicts = await provider.infer(payload, questions)
+print(provider.stats())  # 每路由健康度遥测（active/cooldown/dead、错误与冷却剩余）
+```
+
+也可手工编排任意路由顺序：`PriorityFailoverProvider([("mindshub", p1), ("typesafe", p2)])`。全部路由不可用时抛 `NoAvailableProvidersError`，`DecisionEngine` 会自动进入确定性保底分支。
+
 ---
 
 ## 模块结构

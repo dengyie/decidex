@@ -28,14 +28,17 @@ class TypeSafeJevProvider(BaseInferenceProvider):
         api_key: Optional[str] = None,
         key_pool: Optional[KeyPool] = None,
         api_keys: Optional[List[str]] = None,
-        base_url: str = "https://api.typesafe.ai/v1",
+        base_url: Optional[str] = None,
         model: str = "jev-latest",
         timeout_s: float = 2.0,
         max_retries: int = 3,
         auto_rotate_on_rate_limit: bool = True,
         auto_quarantine_on_unauthorized: bool = True
     ):
-        self.base_url = base_url.rstrip("/")
+        # Explicit base_url wins; otherwise DECIDEX_BASE_URL (e.g. MindsHub free gateway
+        # https://api.mindshub.ai/v1/decisions); otherwise official TypeSafe API.
+        resolved_base = base_url or os.environ.get("DECIDEX_BASE_URL") or "https://api.typesafe.ai/v1"
+        self.base_url = resolved_base.rstrip("/")
         self.model = model
         self.timeout_s = timeout_s
         self.max_retries = max_retries
@@ -243,8 +246,8 @@ class TypeSafeJevProvider(BaseInferenceProvider):
         payload: ObservationPayload,
         questions: List[QuestionSpec]
     ) -> List[DecisionVerdict]:
-        # Determine endpoint URL
-        if self.base_url.endswith("/systemone") or self.base_url.endswith("/decide"):
+        # Determine endpoint URL (explicit full-path bases pass through untouched)
+        if self.base_url.endswith(("/systemone", "/decide", "/decisions")):
             url = self.base_url
         else:
             url = f"{self.base_url}/systemone"

@@ -486,34 +486,69 @@ class KeyPool:
         note_rel_path: str = "Note/accounts/ai/typesafe API keys.md",
         strategy: RotationStrategy = RotationStrategy.ROUND_ROBIN,
         default_cooldown_s: float = 60.0
-    ) -> KeyPool:
+    ) -> "KeyPool":
         """
-        Convenience builder resolving the standard iCloud Obsidian note location.
+        Convenience builder resolving the standard Obsidian vault location
+        (DECIDEX_VAULT env overrides the vault root).
         """
         if vault_path is None:
-            vault_path = os.path.expanduser(
+            vault_path = os.environ.get("DECIDEX_VAULT") or os.path.expanduser(
                 "~/Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-note"
             )
         full_path = os.path.join(vault_path, note_rel_path)
         return cls.from_markdown(full_path, strategy=strategy, default_cooldown_s=default_cooldown_s)
 
     @classmethod
+    def default_key_file_candidates(cls) -> List[str]:
+        """
+        Key file paths scanned for the official TypeSafe pool, highest priority first.
+        Single source of truth shared by from_default_locations and the failover builder.
+        """
+        candidates: List[str] = []
+        env_file = os.environ.get("DECIDEX_KEY_FILE")
+        if env_file:
+            candidates.append(env_file)
+        candidates.extend(["keys.jsonl", "keys.json", "keys.txt", "/data/decidex/keys.jsonl", "/data/decidex/keys.txt"])
+        return candidates
+
+    @classmethod
+    def vault_key_note_candidates(cls) -> List[str]:
+        """
+        Obsidian notes holding the official TypeSafe key table across known vault
+        layouts. DECIDEX_VAULT overrides the vault root on non-standard machines.
+        """
+        note_rel = os.path.join("Note", "accounts", "ai", "typesafe API keys.md")
+        vault = os.environ.get("DECIDEX_VAULT")
+        if vault:
+            return [os.path.join(vault, note_rel)]
+        return [
+            os.path.expanduser(os.path.join("~", "Library", "Mobile Documents", "iCloud~md~obsidian", "Documents", "obsidian-note", note_rel)),
+            os.path.join("E:", os.sep, "profile", "note", "note", note_rel),
+        ]
+
+    @classmethod
     def from_default_locations(
         cls,
         strategy: RotationStrategy = RotationStrategy.ROUND_ROBIN,
         default_cooldown_s: float = 60.0
-    ) -> KeyPool:
+    ) -> "KeyPool":
         """
-        Attempts to locate and load the key pool from standard runtime candidates:
+        Attempts to locate and load the OFFICIAL TypeSafe key pool from standard runtime
+        candidates. Keys tagged org=mindshub are excluded everywhere: they route to the
+        MindsHub gateway and must only be consumed via
+        PriorityFailoverProvider.from_default_routes.
         1. DECIDEX_KEY_FILE environment variable
-        2. Local working directory './keys.jsonl', './keys.json', './keys.txt'
-        3. Standard Linux / server path '/data/decidex/keys.jsonl'
-        4. Standard macOS Obsidian vault path
+        2. TYPESAFE_API_KEY / DECIDEX_API_KEY environment variable
+        3. Local working directory './keys.jsonl', './keys.json', './keys.txt'
+           and the standard server path '/data/decidex/keys.jsonl'
+        4. Obsidian vault key notes
         """
-        # 1. Key file path via DECIDEX_KEY_FILE environment variable
+        # 1. Key file path via DECIDEX_KEY_FILE environment variable (explicit operator choice)
         env_file = os.environ.get("DECIDEX_KEY_FILE")
         if env_file and os.path.exists(env_file):
-            return cls.from_file(env_file, strategy=strategy, default_cooldown_s=default_cooldown_s)
+            pool = cls.from_file(env_file, strategy=strategy, default_cooldown_s=default_cooldown_s)
+            return cls(entries=[e for e in pool._entries if e.org != "mindshub"],
+                       strategy=strategy, default_cooldown_s=default_cooldown_s)
 
         # 2. Direct API key environment variable (Docker, CI/CD, Serverless, single or comma-separated)
         env_key = os.environ.get("TYPESAFE_API_KEY") or os.environ.get("DECIDEX_API_KEY")
@@ -522,20 +557,23 @@ class KeyPool:
             if keys:
                 return cls.from_keys(keys, strategy=strategy, default_cooldown_s=default_cooldown_s)
 
-        # 3. Local working directory or server candidates
-        for candidate in ("keys.jsonl", "keys.json", "keys.txt", "/data/decidex/keys.jsonl", "/data/decidex/keys.txt"):
-            if os.path.exists(candidate):
-                return cls.from_file(candidate, strategy=strategy, default_cooldown_s=default_cooldown_s)
+        # 3. Local working directory or server candidates (skip candidates holding no official keys)
+        for candidate in cls.default_key_file_candidates():
+            if os.path.isfile(candidate):
+                pool = cls.from_file(candidate, strategy=strategy, default_cooldown_s=default_cooldown_s)
+                official = [e for e in pool._entries if e.org != "mindshub"]
+                if official:
+                    return cls(entries=official, strategy=strategy, default_cooldown_s=default_cooldown_s)
 
-        # 4. Standard macOS Obsidian vault path
-        obsidian_path = os.path.expanduser(
-            "~/Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-note/Note/accounts/ai/typesafe API keys.md"
-        )
-        if os.path.exists(obsidian_path):
-            return cls.from_markdown(obsidian_path, strategy=strategy, default_cooldown_s=default_cooldown_s)
+        # 4. Obsidian vault key notes
+        for note in cls.vault_key_note_candidates():
+            if os.path.isfile(note):
+                pool = cls.from_markdown(note, strategy=strategy, default_cooldown_s=default_cooldown_s)
+                if len(pool) > 0:
+                    return pool
 
         raise FileNotFoundError(
-            "Could not automatically locate Jev key pool. Please provide an explicit path via "
+            "Could not automatically locate the official Jev key pool. Please provide an explicit path via "
             "KeyPool.from_file(path), set the DECIDEX_KEY_FILE env var, or run 'python -m decidex.tools.pool_manager export --out keys.jsonl'."
         )
 
