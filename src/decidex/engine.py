@@ -297,7 +297,7 @@ class DecisionEngine:
         elif q.primitive == PrimitiveType.NOUL:
             return False
         else:
-            return q.scale[0]
+            return q.scale[0] if q.scale else 0.0
 
     def _flush_locked(self) -> None:
         """Internal helper to flush buffered journal lines while holding _journal_lock."""

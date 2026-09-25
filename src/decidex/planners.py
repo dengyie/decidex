@@ -207,3 +207,14 @@ class PredictiveFrameController:
         if self._current_task and not self._current_task.done():
             self._current_task.cancel()
             self._current_task = None
+
+    async def aclose(self) -> None:
+        """Asynchronously cancels and awaits completion of any in-flight task."""
+        if self._current_task and not self._current_task.done():
+            self._current_task.cancel()
+            try:
+                await self._current_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._current_task = None
+
