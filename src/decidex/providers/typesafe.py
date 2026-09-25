@@ -17,6 +17,16 @@ from decidex.providers.base import BaseInferenceProvider
 from decidex.types import DecisionVerdict, ObservationPayload, PrimitiveType, QuestionSpec
 
 
+def _safe_float(val: Any, default: float = 1.0) -> float:
+    """Safely converts val to float, with fallback to default on None or parsing errors."""
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
 class TypeSafeJevProvider(BaseInferenceProvider):
     """
     HTTP client for the TypeSafe Jev cloud decision API (System One).
@@ -118,7 +128,7 @@ class TypeSafeJevProvider(BaseInferenceProvider):
                     q_item["criteria"] = {opt: opt for opt in q.options}
             elif q.primitive == PrimitiveType.SCORE:
                 if q.criteria and isinstance(q.criteria, dict):
-                    q_item["criteria"] = [f"{k}: {v}" for k, v in q.criteria.items()]
+                    q_item["criteria"] = q.criteria
                 elif q.criteria and isinstance(q.criteria, list):
                     q_item["criteria"] = [str(x) for x in q.criteria]
                 elif q.scale:
@@ -173,9 +183,9 @@ class TypeSafeJevProvider(BaseInferenceProvider):
                     # TypeSafe Jev returns margin/entropy in ans["confidence"],
                     # whereas dist[selected] represents the actual class posterior probability.
                     if isinstance(dist, dict) and selected in dist:
-                        raw_conf = float(dist[selected])
+                        raw_conf = _safe_float(dist[selected], default=1.0)
                     else:
-                        raw_conf = float(ans.get("confidence") or 1.0)
+                        raw_conf = _safe_float(ans.get("confidence"), default=1.0)
                 elif q.primitive == PrimitiveType.NOUL:
                     noul_raw = ans.get("noul", 0.5)
                     try:
@@ -191,11 +201,11 @@ class TypeSafeJevProvider(BaseInferenceProvider):
                         continue
                     dist = ans.get("probabilities", {})
                     if isinstance(dist, dict) and str(selected) in dist:
-                        raw_conf = float(dist[str(selected)])
+                        raw_conf = _safe_float(dist[str(selected)], default=1.0)
                     elif isinstance(dist, dict) and selected in dist:
-                        raw_conf = float(dist[selected])
+                        raw_conf = _safe_float(dist[selected], default=1.0)
                     else:
-                        raw_conf = float(ans.get("confidence") or 1.0)
+                        raw_conf = _safe_float(ans.get("confidence"), default=1.0)
                 else:
                     continue
 
@@ -223,9 +233,9 @@ class TypeSafeJevProvider(BaseInferenceProvider):
                     continue
                 dist = item.get("distribution", {})
                 if isinstance(dist, dict) and selected in dist:
-                    raw_conf = float(dist[selected])
+                    raw_conf = _safe_float(dist[selected], default=1.0)
                 else:
-                    raw_conf = float(item.get("confidence") or 1.0)
+                    raw_conf = _safe_float(item.get("confidence"), default=1.0)
 
                 verdicts.append(DecisionVerdict(
                     id=q.id,

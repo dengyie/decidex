@@ -40,13 +40,16 @@ class DecisionEngine:
         memory: Optional[MemoryHarness] = None,
         journal_path: Optional[str] = None,
         fallback_resolver: Optional[Callable[..., Any]] = None,
+        journal_buffer_limit: int = 16,
     ):
         self.provider = provider
         self.guard = guard or CalibratedDecisionGuard()
         self.memory = memory or MemoryHarness()
         self.journal_path = journal_path
         self.fallback_resolver = fallback_resolver
+        self.journal_buffer_limit = max(1, journal_buffer_limit)
         self._journal_file = None
+        self._journal_buffer: List[str] = []
         self._journal_lock = threading.Lock()
 
         if self.journal_path:
@@ -262,7 +265,7 @@ class DecisionEngine:
                 "outcome": outcome,
                 "metadata": metadata or {}
             }
-            self._write_journal_record(feedback_record)
+            self._write_journal_record(feedback_record, immediate=True)
 
     def _resolve_fallback(
         self,
@@ -296,22 +299,41 @@ class DecisionEngine:
         else:
             return q.scale[0]
 
-    def _write_journal_record(self, record: Dict[str, Any]) -> None:
-        """Writes and flushes one journal record with thread lock and process flock."""
+    def _flush_locked(self) -> None:
+        """Internal helper to flush buffered journal lines while holding _journal_lock."""
+        if self._journal_file is None or not self._journal_buffer:
+            return
+        content = "".join(self._journal_buffer)
+        self._journal_buffer.clear()
+        try:
+            import fcntl
+            fcntl.flock(self._journal_file.fileno(), fcntl.LOCK_EX)
+            try:
+                self._journal_file.write(content)
+                self._journal_file.flush()
+            finally:
+                fcntl.flock(self._journal_file.fileno(), fcntl.LOCK_UN)
+        except (ImportError, AttributeError, OSError):
+            self._journal_file.write(content)
+            self._journal_file.flush()
+
+    def flush(self) -> None:
+        """Flushes in-memory journal records to disk."""
+        with self._journal_lock:
+            self._flush_locked()
+
+    async def flush_async(self) -> None:
+        """Non-blocking asynchronous journal flush."""
+        await asyncio.to_thread(self.flush)
+
+    def _write_journal_record(self, record: Dict[str, Any], immediate: bool = False) -> None:
+        """Buffers journal record in memory and writes batch to disk under file lock."""
         with self._journal_lock:
             if self._journal_file is not None:
                 line = json.dumps(record, ensure_ascii=False, default=str) + "\n"
-                try:
-                    import fcntl
-                    fcntl.flock(self._journal_file.fileno(), fcntl.LOCK_EX)
-                    try:
-                        self._journal_file.write(line)
-                        self._journal_file.flush()
-                    finally:
-                        fcntl.flock(self._journal_file.fileno(), fcntl.LOCK_UN)
-                except (ImportError, AttributeError, OSError):
-                    self._journal_file.write(line)
-                    self._journal_file.flush()
+                self._journal_buffer.append(line)
+                if immediate or len(self._journal_buffer) >= self.journal_buffer_limit:
+                    self._flush_locked()
 
     def _journal_decision(
         self,
@@ -340,9 +362,9 @@ class DecisionEngine:
 
     def close(self) -> None:
         with self._journal_lock:
+            self._flush_locked()
             if self._journal_file is not None:
                 try:
-                    self._journal_file.flush()
                     self._journal_file.close()
                 finally:
                     self._journal_file = None

@@ -383,6 +383,97 @@ def test_keypool_exponential_backoff_and_cooldown_recovery():
 
 
 @pytest.mark.asyncio
+async def test_keypool_acquire_retry_after_header():
+    pool = KeyPool.from_keys(["rate_key"])
+    entry = pool.get_entry("rate_key")
+
+    req = httpx.Request("POST", "https://api.typesafe.ai/v1/systemone")
+    resp_429 = httpx.Response(429, headers={"Retry-After": "75"}, request=req)
+    err = httpx.HTTPStatusError("429 Too Many Requests", request=req, response=resp_429)
+
+    now = time.time()
+    with pytest.raises(httpx.HTTPStatusError):
+        async with pool.acquire():
+            raise err
+
+    assert entry.state == KeyState.COOLDOWN
+    assert 73.0 <= (entry.cooldown_until - now) <= 77.0
+
+
+def test_keypool_atomic_save_and_corrupted_load(tmp_path):
+    state_file = str(tmp_path / "pool_state.json")
+    pool = KeyPool.from_keys(["key_1", "key_2"])
+    pool.record_rate_limit("key_1", cooldown_s=300.0)
+    pool.record_revoked("key_2", reason="Token expired")
+
+    # 1. Atomic save
+    pool.save_state(state_file)
+    assert os.path.exists(state_file)
+
+    # 2. Fresh pool loads state correctly
+    fresh_pool = KeyPool.from_keys(["key_1", "key_2"])
+    fresh_pool.load_state(state_file)
+    assert fresh_pool.get_entry("key_1").state == KeyState.COOLDOWN
+    assert fresh_pool.get_entry("key_2").state == KeyState.DEAD
+
+    # 3. Corrupt file does not crash load_state
+    with open(state_file, "w", encoding="utf-8") as f:
+        f.write("{invalid_json_content: corrupt")
+
+    pool_survivor = KeyPool.from_keys(["key_1"])
+    pool_survivor.load_state(state_file)
+    assert pool_survivor.get_entry("key_1").state == KeyState.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_typesafe_provider_safe_float_none_and_zero_confidence():
+    pool = KeyPool.from_keys(["test_key"])
+    provider = TypeSafeJevProvider(key_pool=pool)
+    payload = ObservationPayload(domain="test", observation={})
+    questions = [
+        QuestionSpec(id="q_none", primitive=PrimitiveType.CHOICE, description="None conf", options=["A", "B"]),
+        QuestionSpec(id="q_zero", primitive=PrimitiveType.CHOICE, description="Zero conf", options=["X", "Y"])
+    ]
+
+    async def mock_post(url, json, headers):
+        req = httpx.Request("POST", url)
+        return httpx.Response(200, request=req, json={
+            "answers": {
+                "q_none": {"choice": "A", "confidence": None},
+                "q_zero": {"choice": "X", "confidence": 0.0}
+            }
+        })
+
+    with patch.object(httpx.AsyncClient, "post", side_effect=mock_post):
+        verdicts = await provider.infer(payload, questions)
+
+    assert len(verdicts) == 2
+    v_none = next(v for v in verdicts if v.id == "q_none")
+    v_zero = next(v for v in verdicts if v.id == "q_zero")
+    assert v_none.selected == "A"
+    assert v_none.raw_confidence == 1.0  # Safe default on None
+    assert v_zero.selected == "X"
+    assert v_zero.raw_confidence == 0.0  # Preserves actual 0.0 float without converting to 1.0
+
+
+def test_typesafe_provider_score_dictionary_criteria():
+    provider = TypeSafeJevProvider(api_key="dummy_key")
+    payload = ObservationPayload(domain="game", observation={"step": 1})
+    q_score = QuestionSpec(
+        id="score_head",
+        primitive=PrimitiveType.SCORE,
+        description="Rate game state",
+        scale=(1.0, 5.0),
+        criteria={"1": "Critical state", "5": "Excellent state"}
+    )
+    body = provider._format_request_body(payload, [q_score])
+    q_out = body["questions"]["score_head"]
+    assert q_out["type"] == "score"
+    assert q_out["criteria"] == {"1": "Critical state", "5": "Excellent state"}
+
+
+
+@pytest.mark.asyncio
 async def test_typesafe_provider_retry_after_header():
     pool = KeyPool.from_keys(["k429"])
     provider = TypeSafeJevProvider(key_pool=pool, max_retries=1)

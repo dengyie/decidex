@@ -202,7 +202,8 @@ class CalibratedDecisionGuard:
             if self.max_consecutive_action > 0:
                 consecutive = memory.count_consecutive_action(
                     selected_str,
-                    unproductive_only=self.consecutive_unproductive_only
+                    unproductive_only=self.consecutive_unproductive_only,
+                    question_id=verdict.id
                 )
                 if consecutive >= self.max_consecutive_action:
                     return (
@@ -215,7 +216,7 @@ class CalibratedDecisionGuard:
                 period = memory.get_oscillation_period(question_id=verdict.id)
                 if period > 0:
                     hist = [
-                        e["action"] for e in memory.action_history
+                        str(e["action"]) for e in memory.action_history
                         if verdict.id is None or e.get("question_id") in (verdict.id, None)
                     ]
                     # In period-2 oscillation [..., A, B, A, B], action hist[-2] is 'A'.
@@ -223,7 +224,7 @@ class CalibratedDecisionGuard:
                     if period == 2 and len(hist) >= 2 and selected_str == hist[-2]:
                         return False, f"ANTI_OSCILLATION_TRIPPED: action '{verdict.selected}' continues oscillatory pattern"
                     # In period-3 oscillation [..., A, B, C, A, B, C], action hist[-3] is 'A'.
-                    if period == 3 and len(hist) >= 3 and selected_str == hist[-3]:
+                    elif period == 3 and len(hist) >= 3 and selected_str == hist[-3]:
                         return False, f"ANTI_OSCILLATION_TRIPPED: action '{verdict.selected}' continues period-3 oscillatory pattern"
 
         return True, None

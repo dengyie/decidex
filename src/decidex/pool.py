@@ -361,8 +361,16 @@ class KeyPool:
             err_msg = str(exc)
             # Only quarantine on explicit HTTP 401 Unauthorized status
             status_code = None
+            retry_after_s = None
             if hasattr(exc, "response"):
                 status_code = getattr(exc.response, "status_code", None)
+                if hasattr(exc.response, "headers") and exc.response.headers:
+                    ra = exc.response.headers.get("Retry-After")
+                    if ra:
+                        try:
+                            retry_after_s = float(ra)
+                        except (ValueError, TypeError):
+                            pass
             elif hasattr(exc, "status_code"):
                 status_code = getattr(exc, "status_code", None)
 
@@ -372,7 +380,7 @@ class KeyPool:
             if is_401:
                 self.record_revoked(entry.key, reason=err_msg)
             elif is_429:
-                self.record_rate_limit(entry.key, reason=err_msg)
+                self.record_rate_limit(entry.key, cooldown_s=retry_after_s, reason=err_msg)
             else:
                 self.record_failure(entry.key, error=err_msg, is_transient=True)
             raise

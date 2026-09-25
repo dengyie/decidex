@@ -3,6 +3,7 @@ Unit tests for the central DecisionEngine orchestrator.
 """
 
 import json
+import os
 from typing import Any, List
 import pytest
 
@@ -379,6 +380,66 @@ async def test_engine_raw_matrix_domain_state(tmp_path):
         records = [json.loads(line) for line in f]
     assert len(records) == 1
     assert records[0]["observation"] == raw_grid
+
+
+@pytest.mark.asyncio
+async def test_engine_journal_buffering_and_flush(tmp_path):
+    """Verifies that journal records are buffered in memory and flushed in batches or upon flush/close."""
+    journal_file = str(tmp_path / "buffered_journal.jsonl")
+    provider = MockReplayProvider(preset_verdicts={"act": "jump"})
+    engine = DecisionEngine(provider=provider, journal_path=journal_file, journal_buffer_limit=5)
+
+    q = QuestionSpec(id="act", primitive=PrimitiveType.CHOICE, description="Move", options=["jump", "walk"])
+
+    # 1. First two steps: buffered, not yet written to disk
+    await engine.step({"x": 1}, [q], ["jump", "walk"])
+    await engine.step({"x": 2}, [q], ["jump", "walk"])
+
+    assert os.path.exists(journal_file)
+    with open(journal_file, "r", encoding="utf-8") as f:
+        lines_before = f.readlines()
+    assert len(lines_before) == 0
+
+    # 2. Explicit async flush writes buffered lines to disk
+    await engine.flush_async()
+    with open(journal_file, "r", encoding="utf-8") as f:
+        lines_after_flush = f.readlines()
+    assert len(lines_after_flush) == 2
+
+    # 3. Third step buffered, then closing engine flushes remaining lines
+    await engine.step({"x": 3}, [q], ["jump", "walk"])
+    engine.close()
+    with open(journal_file, "r", encoding="utf-8") as f:
+        lines_final = f.readlines()
+    assert len(lines_final) == 3
+
+
+@pytest.mark.asyncio
+async def test_engine_multi_head_consecutive_action_isolation():
+    """Verifies that interleaving multi-head actions do not disrupt per-head consecutive count."""
+    provider = MockReplayProvider(
+        preset_verdicts={
+            "hand": {"selected": "rock"},
+            "stance": {"selected": "defend"}
+        }
+    )
+    engine = DecisionEngine(provider=provider)
+    questions = [
+        QuestionSpec(id="hand", primitive=PrimitiveType.CHOICE, description="Hand", options=["rock", "paper"]),
+        QuestionSpec(id="stance", primitive=PrimitiveType.CHOICE, description="Stance", options=["attack", "defend"])
+    ]
+
+    for _ in range(3):
+        await engine.step({"turn": 1}, questions)
+
+    # In memory history, 6 total entries: hand, stance, hand, stance, hand, stance
+    assert len(engine.memory.action_history) == 6
+    assert engine.memory.count_consecutive_action("rock", question_id="hand") == 3
+    assert engine.memory.count_consecutive_action("defend", question_id="stance") == 3
+    # Across heads without question_id filter, consecutive count is broken by interleaving
+    assert engine.memory.count_consecutive_action("rock") == 0
+    assert engine.memory.count_consecutive_action("defend") == 1
+
 
 
 

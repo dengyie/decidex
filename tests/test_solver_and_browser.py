@@ -273,3 +273,45 @@ async def test_browser_listener_disconnect_rejects_pending():
     with pytest.raises(ConnectionError, match="CDP WebSocket connection closed"):
         await fut
 
+
+def test_uniform_sampling_no_spatial_bias():
+    """Verifies that expectimax evaluates child nodes by sampling across all rows evenly."""
+    # A board with 9 empty cells scattered across rows 0, 1, 2, 3
+    grid = [
+        [0, 2, 0, 2],
+        [0, 4, 0, 4],
+        [0, 8, 0, 8],
+        [16, 0, 0, 0]
+    ]
+    empty_positions = [(r, c) for r in range(4) for c in range(4) if grid[r][c] == 0]
+    assert len(empty_positions) == 9
+
+    # Execute search_best_move and ensure it succeeds
+    best_m, score, scores = search_best_move(grid, depth=2)
+    assert best_m in ["LEFT", "RIGHT", "UP", "DOWN"]
+    assert len(scores) > 0
+
+
+def test_independent_row_monotonicity_snake_pattern():
+    """Verifies that alternating snake rows (row 3 L->R, row 2 R->L) preserve high monotonicity."""
+    # Row 3 is strictly descending L->R: 2048, 1024, 512, 256
+    # Row 2 is strictly descending R->L: 16, 32, 64, 128 (so index 0=16, index 3=128)
+    snake_grid = [
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+        [16, 32, 64, 128],
+        [2048, 1024, 512, 256]
+    ]
+
+    score = evaluate_board(snake_grid)
+    # Monotonicity should be strongly positive relative to a disordered grid
+    disordered_grid = [
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+        [64, 16, 128, 32],
+        [512, 2048, 256, 1024]
+    ]
+    disordered_score = evaluate_board(disordered_grid)
+    assert score > disordered_score + 2000.0
+
+

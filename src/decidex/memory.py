@@ -86,15 +86,23 @@ class MemoryHarness:
         """
         return self.get_oscillation_period(question_id=question_id) > 0
 
-    def count_consecutive_action(self, action: str, unproductive_only: bool = False) -> int:
+    def count_consecutive_action(
+        self,
+        action: str,
+        unproductive_only: bool = False,
+        question_id: Optional[str] = None
+    ) -> int:
         """
         Returns the number of consecutive recent executions of the specified action.
         If unproductive_only is True, only counts executions whose outcome indicates a stall,
         failure, or lack of progress (e.g. BLOCKED, NOOP, UNCHANGED, STUCK, COLLIDED, FAILED).
+        If question_id is specified, only counts actions associated with that question head.
         """
         count = 0
         unproductive_outcomes = {"BLOCKED", "NOOP", "UNCHANGED", "STUCK", "COLLIDED", "FAILED", "FALLBACK"}
         for entry in reversed(self.action_history):
+            if question_id is not None and entry.get("question_id") not in (question_id, None):
+                continue
             if entry["action"] == action:
                 if unproductive_only:
                     outcome = str(entry.get("outcome", "")).upper()
