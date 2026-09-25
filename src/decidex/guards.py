@@ -124,14 +124,27 @@ class CalibratedDecisionGuard:
         if not raw_dist:
             return {}, 1.0
         if self.temperature == 1.0:
-            top_val = max(raw_dist.values()) if raw_dist else 1.0
-            return raw_dist, top_val
+            sanitized: Dict[str, float] = {}
+            for k, v in raw_dist.items():
+                try:
+                    fv = float(v)
+                    sanitized[k] = 0.0 if (math.isnan(fv) or math.isinf(fv)) else fv
+                except (ValueError, TypeError):
+                    sanitized[k] = 0.0
+            top_val = max(sanitized.values()) if sanitized else 1.0
+            return sanitized, top_val
 
         eps = 1e-12
         eff_temp = max(self.temperature, 0.001)
         logits: Dict[str, float] = {}
         for k, v in raw_dist.items():
-            prob = max(float(v), eps)
+            try:
+                fv = float(v)
+                if math.isnan(fv) or math.isinf(fv):
+                    fv = eps
+            except (ValueError, TypeError):
+                fv = eps
+            prob = max(fv, eps)
             logits[k] = math.log(prob) / eff_temp
 
         max_logit = max(logits.values())

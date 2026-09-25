@@ -246,3 +246,25 @@ def test_state_settlement_guard_anti_ghost_transition():
     assert guard.is_state_settled(new_hash, current_time=0.04) is True
 
 
+def test_calibrate_distribution_nan_and_inf_safe():
+    """Verifies that calibrate_distribution handles NaN, Inf, and invalid types without crashing."""
+    guard_scaled = CalibratedDecisionGuard(temperature=0.5)
+    raw_dist_with_nan = {"UP": float("nan"), "DOWN": 0.8, "LEFT": float("inf"), "RIGHT": "invalid"}
+
+    calibrated, top_p = guard_scaled.calibrate_distribution(raw_dist_with_nan)
+    assert not math.isnan(top_p)
+    assert 0.0 <= top_p <= 1.0
+    for k, v in calibrated.items():
+        assert not math.isnan(v)
+        assert 0.0 <= v <= 1.0
+    assert math.isclose(sum(calibrated.values()), 1.0, rel_tol=1e-5)
+
+    # Also test temperature == 1.0 fast path
+    guard_t1 = CalibratedDecisionGuard(temperature=1.0)
+    calibrated_t1, top_p1 = guard_t1.calibrate_distribution(raw_dist_with_nan)
+    assert not math.isnan(top_p1)
+    for k, v in calibrated_t1.items():
+        assert not math.isnan(v)
+
+
+

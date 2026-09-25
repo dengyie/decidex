@@ -638,5 +638,40 @@ async def test_least_used_rotation_single_pass():
     assert entry2.key == "k_busy"
 
 
+def test_keypool_save_state_temp_cleanup_on_exception(tmp_path):
+    """Verifies that save_state cleans up orphan temporary file if os.replace fails."""
+    pool = KeyPool.from_keys(["k1", "k2"])
+    target_path = str(tmp_path / "subdir" / "state.json")
+
+    with patch("os.replace", side_effect=OSError("Disk full or permission denied")):
+        with pytest.raises(OSError):
+            pool.save_state(target_path)
+
+    # Confirm no temp files remain in target directory
+    sub_dir = tmp_path / "subdir"
+    assert sub_dir.exists()
+    assert list(sub_dir.glob("tmp*")) == []
+    assert not os.path.exists(target_path)
+
+
+def test_keypool_record_rate_limit_clamps_cooldown():
+    """Verifies that record_rate_limit clamps excessive Retry-After to 3600s and lower bound to 1.0s."""
+    pool = KeyPool.from_keys(["k_clamp"])
+    entry = pool.get_entry("k_clamp")
+    now = time.time()
+
+    # Huge cooldown 1,000,000s should be clamped to 3600s
+    pool.record_rate_limit("k_clamp", cooldown_s=1_000_000.0)
+    assert 3590.0 <= (entry.cooldown_until - now) <= 3605.0
+
+    # Negative or tiny cooldown should be clamped to at least 1.0s
+    pool.record_rate_limit("k_clamp", cooldown_s=-50.0)
+    # Consecutive failures is now 2, so backoff kicks in when cooldown_s <= 0
+    # But if positive tiny e.g. 0.2s is passed:
+    pool.record_rate_limit("k_clamp", cooldown_s=0.2)
+    assert 0.9 <= (entry.cooldown_until - time.time()) <= 1.5
+
+
+
 
 

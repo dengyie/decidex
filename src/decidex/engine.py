@@ -306,16 +306,19 @@ class DecisionEngine:
         content = "".join(self._journal_buffer)
         self._journal_buffer.clear()
         try:
-            import fcntl
-            fcntl.flock(self._journal_file.fileno(), fcntl.LOCK_EX)
             try:
+                import fcntl
+                fcntl.flock(self._journal_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    self._journal_file.write(content)
+                    self._journal_file.flush()
+                finally:
+                    fcntl.flock(self._journal_file.fileno(), fcntl.LOCK_UN)
+            except (ImportError, AttributeError, OSError):
                 self._journal_file.write(content)
                 self._journal_file.flush()
-            finally:
-                fcntl.flock(self._journal_file.fileno(), fcntl.LOCK_UN)
-        except (ImportError, AttributeError, OSError):
-            self._journal_file.write(content)
-            self._journal_file.flush()
+        except OSError as e:
+            logger.warning(f"Failed to flush journal records to disk: {e}")
 
     def flush(self) -> None:
         """Flushes in-memory journal records to disk."""
@@ -362,9 +365,15 @@ class DecisionEngine:
 
     def close(self) -> None:
         with self._journal_lock:
-            self._flush_locked()
-            if self._journal_file is not None:
-                try:
-                    self._journal_file.close()
-                finally:
-                    self._journal_file = None
+            try:
+                self._flush_locked()
+            except Exception as e:
+                logger.warning(f"Error flushing journal during engine.close(): {e}")
+            finally:
+                if self._journal_file is not None:
+                    try:
+                        self._journal_file.close()
+                    except Exception:
+                        pass
+                    finally:
+                        self._journal_file = None

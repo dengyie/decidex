@@ -5,6 +5,7 @@ Unit tests for the central DecisionEngine orchestrator.
 import json
 import os
 from typing import Any, List
+from unittest.mock import patch
 import pytest
 
 from decidex.engine import DecisionEngine
@@ -439,6 +440,20 @@ async def test_engine_multi_head_consecutive_action_isolation():
     # Across heads without question_id filter, consecutive count is broken by interleaving
     assert engine.memory.count_consecutive_action("rock") == 0
     assert engine.memory.count_consecutive_action("defend") == 1
+
+
+def test_engine_close_resilient_to_flush_errors(tmp_path):
+    """Verifies that engine.close() cleans up journal handle even if flush throws OSError."""
+    journal_file = str(tmp_path / "failing_journal.jsonl")
+    provider = MockReplayProvider()
+    engine = DecisionEngine(provider=provider, journal_path=journal_file)
+
+    with patch.object(engine, "_flush_locked", side_effect=OSError("Disk failure")):
+        # close() must not raise and must close the handle
+        engine.close()
+
+    assert engine._journal_file is None
+
 
 
 

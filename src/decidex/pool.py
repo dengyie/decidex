@@ -260,7 +260,7 @@ class KeyPool:
             entry.state = KeyState.COOLDOWN
 
             if cooldown_s is not None and cooldown_s > 0:
-                duration = cooldown_s
+                duration = min(3600.0, max(1.0, float(cooldown_s)))
             else:
                 # Exponential backoff capped at 600s
                 multiplier = min(10, 2 ** min(5, entry.consecutive_failures - 1))
@@ -592,12 +592,21 @@ class KeyPool:
         target_dir = os.path.dirname(os.path.abspath(path))
         os.makedirs(target_dir, exist_ok=True)
         # Atomic write pattern: write to temporary file in same filesystem, fsync, then atomic rename
-        with tempfile.NamedTemporaryFile("w", dir=target_dir, delete=False, encoding="utf-8") as tf:
-            json.dump(data, tf, indent=2, ensure_ascii=False)
-            tf.flush()
-            os.fsync(tf.fileno())
-            temp_path = tf.name
-        os.replace(temp_path, path)
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile("w", dir=target_dir, delete=False, encoding="utf-8") as tf:
+                temp_path = tf.name
+                json.dump(data, tf, indent=2, ensure_ascii=False)
+                tf.flush()
+                os.fsync(tf.fileno())
+            os.replace(temp_path, path)
+            temp_path = None
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
 
     def load_state(self, path: str) -> None:
         """Loads state back into existing keys in the pool with corruption recovery."""
