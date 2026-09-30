@@ -343,6 +343,69 @@ def test_from_default_locations_filters_tagged_mindshub_keys(tmp_path, monkeypat
     assert set(pool._key_map) == {"apikey_official_1"}
 
 
+def test_from_default_locations_ignores_futureppo_credentials(tmp_path, monkeypatch):
+    """from_default_locations is the OFFICIAL pool locator: futureppo-tagged keys
+    must never be returned, even alone."""
+    monkeypatch.delenv("FUTUREPPO_API_KEY", raising=False)
+    monkeypatch.delenv("DECIDEX_FUTUREPPO_KEY", raising=False)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.delenv("DECIDEX_API_KEY", raising=False)
+    monkeypatch.setattr(
+        KeyPool, "default_key_file_candidates",
+        classmethod(lambda cls: [str(tmp_path / "keys.jsonl")]),
+    )
+    monkeypatch.setattr(KeyPool, "vault_key_note_candidates", classmethod(lambda cls: []))
+    (tmp_path / "keys.jsonl").write_text('{"key": "fpp_file_key", "org": "futureppo"}\n', encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError):
+        KeyPool.from_default_locations()
+
+
+def test_from_default_locations_filters_tagged_futureppo_keys(tmp_path, monkeypatch):
+    """A mixed keys file contributes only its official entries and drops futureppo keys."""
+    monkeypatch.delenv("FUTUREPPO_API_KEY", raising=False)
+    monkeypatch.delenv("DECIDEX_FUTUREPPO_KEY", raising=False)
+    monkeypatch.delenv("MINDSHUB_API_KEY", raising=False)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.delenv("DECIDEX_API_KEY", raising=False)
+    monkeypatch.setattr(
+        KeyPool, "default_key_file_candidates",
+        classmethod(lambda cls: [str(tmp_path / "keys.jsonl")]),
+    )
+    monkeypatch.setattr(KeyPool, "vault_key_note_candidates", classmethod(lambda cls: []))
+    (tmp_path / "keys.jsonl").write_text(
+        '{"key": "fpp_file_key", "org": "futureppo"}\n'
+        '{"key": "mdb_file_key", "org": "mindshub"}\n'
+        '{"key": "apikey_official_1"}\n',
+        encoding="utf-8",
+    )
+
+    pool = KeyPool.from_default_locations()
+    assert set(pool._key_map) == {"apikey_official_1"}
+
+
+def test_from_default_locations_candidate_4_filters_non_official_notes(tmp_path, monkeypatch):
+    """Candidate 4 (vault markdown notes) must filter out mindshub and futureppo entries."""
+    for var in ("FUTUREPPO_API_KEY", "DECIDEX_FUTUREPPO_KEY", "MINDSHUB_API_KEY", "TYPESAFE_API_KEY", "DECIDEX_API_KEY", "DECIDEX_KEY_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(KeyPool, "default_key_file_candidates", classmethod(lambda cls: []))
+
+    note_file = tmp_path / "note.md"
+    note_file.write_text(
+        "| # | Email | Key | key id | org |\n"
+        "|---|---|---|---|---|\n"
+        "| 1 | `u1@test.com` | `apikey_11111111111111111111111111111111_2222222222222222222222222222222222222222222222222222222222222222` | `id1` | `futureppo` |\n"
+        "| 2 | `u2@test.com` | `apikey_33333333333333333333333333333333_4444444444444444444444444444444444444444444444444444444444444444` | `id2` | `mindshub` |\n"
+        "| 3 | `u3@test.com` | `apikey_55555555555555555555555555555555_6666666666666666666666666666666666666666666666666666666666666666` | `id3` | `official` |\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(KeyPool, "vault_key_note_candidates", classmethod(lambda cls: [str(note_file)]))
+
+    pool = KeyPool.from_default_locations()
+    assert len(pool) == 1
+    assert "apikey_55555555555555555555555555555555_6666666666666666666666666666666666666666666666666666666666666666" in pool._key_map
+
+
 def test_default_key_file_candidates_prefers_env_file(tmp_path, monkeypatch):
     monkeypatch.setenv("DECIDEX_KEY_FILE", str(tmp_path / "custom.txt"))
     assert KeyPool.default_key_file_candidates()[0] == str(tmp_path / "custom.txt")

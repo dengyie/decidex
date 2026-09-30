@@ -116,6 +116,59 @@ async def test_failover_on_402_marks_route_dead():
 
 
 @pytest.mark.asyncio
+async def test_failover_on_insufficient_user_quota_marks_route_dead():
+    req = httpx.Request("POST", "https://example.invalid/v1/systemone")
+    resp = httpx.Response(
+        403,
+        request=req,
+        json={"error": {"code": "insufficient_user_quota", "message": "Balance zero"}},
+    )
+    status_err = httpx.HTTPStatusError(
+        "Client error '403 Forbidden' for url 'https://example.invalid/v1/systemone'",
+        request=req,
+        response=resp,
+    )
+    exc = RuntimeError("TypeSafeJevProvider request failed after 1 attempts: Client error '403 Forbidden'")
+    exc.__cause__ = status_err
+
+    primary = StaticProvider(exc=exc)
+    secondary = StaticProvider(verdicts=_verdict("B"))
+    provider = PriorityFailoverProvider([("primary", primary), ("secondary", secondary)])
+
+    verdicts = await provider.infer(_payload(), _questions())
+    assert verdicts[0].selected == "B"
+    assert provider.stats()["routes"][0]["state"] == "dead"
+    assert "quota/wallet exhausted" in provider.stats()["routes"][0]["last_error"]
+
+
+@pytest.mark.asyncio
+async def test_three_tier_failover_cascade():
+    """FuturePPO (P1) rate-limits -> MindsHub (P2) quota exhausted -> TypeSafe (P3) succeeds."""
+    r1 = StaticProvider(exc=_http_failure(429, headers={"Retry-After": "30"}))
+    r2 = StaticProvider(exc=_http_failure(402, reason="insufficient_user_quota"))
+    r3 = StaticProvider(verdicts=_verdict("C"))
+    provider = PriorityFailoverProvider([
+        ("futureppo-pool", r1),
+        ("mindshub-free", r2),
+        ("typesafe-pool", r3),
+    ])
+
+    verdicts = await provider.infer(_payload(), _questions())
+    assert verdicts[0].selected == "C"
+    assert r1.calls == 1 and r2.calls == 1 and r3.calls == 1
+
+    stats = provider.stats()
+    assert stats["routes"][0]["state"] == "cooldown"
+    assert stats["routes"][1]["state"] == "dead"
+    assert stats["routes"][2]["state"] == "active"
+
+    # Second infer skips P1 (cooldown) and P2 (dead), routes straight to P3
+    verdicts2 = await provider.infer(_payload(), _questions())
+    assert verdicts2[0].selected == "C"
+    assert r1.calls == 1 and r2.calls == 1 and r3.calls == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", [400, 403, 422])
 async def test_route_key_level_4xx_cooldowns_then_recovers(status):
     """One key's 403 (risk control) or a single rejected payload must never kill a pool route."""
@@ -201,10 +254,12 @@ async def test_aclose_closes_inner_providers():
 def test_from_default_routes_splits_env_and_tagged_keys(tmp_path, monkeypatch):
     key_file = tmp_path / "keys.jsonl"
     key_file.write_text(
+        '{"key": "fpp_file_key", "org": "futureppo"}\n'
         '{"key": "mdb_file_key", "org": "mindshub"}\n'
         '{"key": "apikey_official_1"}\n',
         encoding="utf-8",
     )
+    monkeypatch.setenv("FUTUREPPO_API_KEY", "fpp_env_key")
     monkeypatch.setenv("MINDSHUB_API_KEY", "mdb_env_key")
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.delenv("DECIDEX_API_KEY", raising=False)
@@ -212,23 +267,41 @@ def test_from_default_routes_splits_env_and_tagged_keys(tmp_path, monkeypatch):
 
     provider = PriorityFailoverProvider.from_default_routes()
 
-    assert [r.name for r in provider.routes] == ["mindshub-free", "typesafe-pool"]
-    mindshub_route, typesafe_route = provider.routes
+    assert [r.name for r in provider.routes] == ["futureppo-pool", "mindshub-free", "typesafe-pool"]
+    fpp_route, mindshub_route, typesafe_route = provider.routes
+
+    assert isinstance(fpp_route.provider, TypeSafeJevProvider)
+    assert fpp_route.provider.base_url == "https://pool.futureppo.top/v1/systemone"
+    assert fpp_route.provider.model == "jev-latest"
+    assert fpp_route.provider.max_retries == 0
+    assert set(provider.routes[0].provider.key_pool._key_map) == {"fpp_env_key", "fpp_file_key"}
 
     assert isinstance(mindshub_route.provider, TypeSafeJevProvider)
     assert mindshub_route.provider.base_url == "https://api.mindshub.ai/v1/decisions"
     assert mindshub_route.provider.model == "jev"
     assert mindshub_route.provider.max_retries == 0
-    assert set(provider.routes[0].provider.key_pool._key_map) == {"mdb_env_key", "mdb_file_key"}
+    assert set(provider.routes[1].provider.key_pool._key_map) == {"mdb_env_key", "mdb_file_key"}
 
     assert isinstance(typesafe_route.provider, TypeSafeJevProvider)
     assert typesafe_route.provider.base_url == "https://api.typesafe.ai/v1"
-    assert set(provider.routes[1].provider.key_pool._key_map) == {"apikey_official_1"}
+    assert set(provider.routes[2].provider.key_pool._key_map) == {"apikey_official_1"}
+
+
+def test_from_default_routes_futureppo_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("FUTUREPPO_API_KEY", "fpp_only")
+    for var in ("DECIDEX_FUTUREPPO_KEY", "MINDSHUB_API_KEY", "TYPESAFE_API_KEY", "DECIDEX_API_KEY", "DECIDEX_KEY_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(failover_mod, "_key_source_candidates", lambda: [])
+
+    provider = PriorityFailoverProvider.from_default_routes()
+    assert len(provider.routes) == 1
+    assert provider.routes[0].name == "futureppo-pool"
+    assert "fpp_only" in provider.routes[0].provider.key_pool._key_map
 
 
 def test_from_default_routes_mindshub_only(tmp_path, monkeypatch):
     monkeypatch.setenv("MINDSHUB_API_KEY", "mdb_only")
-    for var in ("TYPESAFE_API_KEY", "DECIDEX_API_KEY", "DECIDEX_KEY_FILE"):
+    for var in ("FUTUREPPO_API_KEY", "DECIDEX_FUTUREPPO_KEY", "TYPESAFE_API_KEY", "DECIDEX_API_KEY", "DECIDEX_KEY_FILE"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(failover_mod, "_key_source_candidates", lambda: [])
 
@@ -239,7 +312,7 @@ def test_from_default_routes_mindshub_only(tmp_path, monkeypatch):
 
 
 def test_from_default_routes_without_credentials_raises(tmp_path, monkeypatch):
-    for var in ("MINDSHUB_API_KEY", "TYPESAFE_API_KEY", "DECIDEX_API_KEY", "DECIDEX_KEY_FILE"):
+    for var in ("FUTUREPPO_API_KEY", "DECIDEX_FUTUREPPO_KEY", "MINDSHUB_API_KEY", "TYPESAFE_API_KEY", "DECIDEX_API_KEY", "DECIDEX_KEY_FILE"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(failover_mod, "_key_source_candidates", lambda: [])
 

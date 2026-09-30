@@ -542,8 +542,8 @@ class KeyPool:
     ) -> "KeyPool":
         """
         Attempts to locate and load the OFFICIAL TypeSafe key pool from standard runtime
-        candidates. Keys tagged org=mindshub are excluded everywhere: they route to the
-        MindsHub gateway and must only be consumed via
+        candidates. Keys tagged org=mindshub or org=futureppo are excluded everywhere:
+        they route to third-party gateways and must only be consumed via
         PriorityFailoverProvider.from_default_routes.
         1. DECIDEX_KEY_FILE environment variable
         2. TYPESAFE_API_KEY / DECIDEX_API_KEY environment variable
@@ -555,7 +555,7 @@ class KeyPool:
         env_file = os.environ.get("DECIDEX_KEY_FILE")
         if env_file and os.path.exists(env_file):
             pool = cls.from_file(env_file, strategy=strategy, default_cooldown_s=default_cooldown_s)
-            return cls(entries=[e for e in pool._entries if e.org != "mindshub"],
+            return cls(entries=[e for e in pool._entries if e.org not in ("mindshub", "futureppo")],
                        strategy=strategy, default_cooldown_s=default_cooldown_s)
 
         # 2. Direct API key environment variable (Docker, CI/CD, Serverless, single or comma-separated)
@@ -569,7 +569,7 @@ class KeyPool:
         for candidate in cls.default_key_file_candidates():
             if os.path.isfile(candidate):
                 pool = cls.from_file(candidate, strategy=strategy, default_cooldown_s=default_cooldown_s)
-                official = [e for e in pool._entries if e.org != "mindshub"]
+                official = [e for e in pool._entries if e.org not in ("mindshub", "futureppo")]
                 if official:
                     return cls(entries=official, strategy=strategy, default_cooldown_s=default_cooldown_s)
 
@@ -577,8 +577,9 @@ class KeyPool:
         for note in cls.vault_key_note_candidates():
             if os.path.isfile(note):
                 pool = cls.from_markdown(note, strategy=strategy, default_cooldown_s=default_cooldown_s)
-                if len(pool) > 0:
-                    return pool
+                official = [e for e in pool._entries if e.org not in ("mindshub", "futureppo")]
+                if official:
+                    return cls(entries=official, strategy=strategy, default_cooldown_s=default_cooldown_s)
 
         raise FileNotFoundError(
             "Could not automatically locate the official Jev key pool. Please provide an explicit path via "

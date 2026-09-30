@@ -6,8 +6,9 @@ transparently degrades to lower-priority backends when the primary is
 rate-limited (429), quota/wallet-exhausted (402), revoked (401) or
 deterministically misconfigured (400/403/404/422).
 
-Typical wiring: MindsHub free Jev gateway first (consume the free
-promotion quota), official TypeSafe key pool as the durable fallback.
+Typical wiring: FuturePPO System One gateway first (primary data source),
+MindsHub free Jev gateway as secondary fallback (consume free promotion quota),
+official TypeSafe key pool as the durable tertiary fallback.
 """
 
 from __future__ import annotations
@@ -24,6 +25,9 @@ from decidex.pool import KeyPool
 from decidex.providers.base import BaseInferenceProvider
 from decidex.providers.typesafe import TypeSafeJevProvider
 from decidex.types import DecisionVerdict, ObservationPayload, QuestionSpec
+
+DEFAULT_FUTUREPPO_BASE_URL = "https://pool.futureppo.top/v1/systemone"
+DEFAULT_FUTUREPPO_MODEL = "jev-latest"
 
 
 class RouteState(str, Enum):
@@ -149,22 +153,52 @@ class PriorityFailoverProvider(BaseInferenceProvider):
             hops += 1
         return None
 
+    @staticmethod
+    def _find_http_response_text(exc: BaseException) -> str:
+        current: Optional[BaseException] = exc
+        hops = 0
+        while current is not None and hops < 8:
+            if isinstance(current, httpx.HTTPStatusError):
+                try:
+                    return current.response.text or ""
+                except Exception:
+                    return ""
+            current = current.__cause__ or current.__context__
+            hops += 1
+        return ""
+
     def _classify_failure(self, route: ProviderRoute, exc: Exception) -> None:
         status = self._find_http_status(exc)
         retry_after = self._find_retry_after_s(exc)
-        err_summary = str(exc).splitlines()[0][:160] if str(exc) else exc.__class__.__name__
+        resp_text = self._find_http_response_text(exc)
+        err_text = str(exc)
+        err_summary = err_text.splitlines()[0][:160] if err_text else exc.__class__.__name__
+        combined_text = f"{err_text} {resp_text}".lower()
+
+        # Check for quota exhaustion signatures across HTTP status and error body
+        is_quota_exhausted = (
+            status == 402
+            or any(term in combined_text for term in (
+                "insufficient_user_quota",
+                "quota_exhausted",
+                "insufficient quota",
+                "balance_exhausted",
+                "wallet_empty",
+                "out of quota",
+            ))
+        )
 
         if status == 401:
             # Surfaces only after the inner pool rotated through several revoked keys
             # (see TypeSafeJevProvider retry loop): pool-wide revocation, futile until
             # credentials are replaced.
             route.mark_dead("401 Unauthorized (credentials revoked)")
-        elif status == 402:
+        elif is_quota_exhausted:
             # Wallet / included allowance exhausted: cannot succeed until reset or top-up.
-            route.mark_dead("402 quota/wallet exhausted")
+            route.mark_dead("quota/wallet exhausted")
         elif status == 404:
-            # Endpoint URL misconfiguration is request-independent.
-            route.mark_dead("404 endpoint not found (base_url misconfigured)")
+            # Endpoint URL or model misconfiguration is request-independent.
+            route.mark_dead("404 endpoint not found (base_url or model misconfigured)")
         elif status == 429:
             cooldown = min(retry_after if retry_after else self.default_cooldown_s, self.cooldown_cap_s)
             source = f"Retry-After {retry_after:.0f}s" if retry_after else "exponential backoff"
@@ -243,25 +277,34 @@ class PriorityFailoverProvider(BaseInferenceProvider):
     @classmethod
     def from_default_routes(
         cls,
+        futureppo_base_url: str = DEFAULT_FUTUREPPO_BASE_URL,
+        futureppo_model: str = DEFAULT_FUTUREPPO_MODEL,
         mindshub_base_url: str = "https://api.mindshub.ai/v1/decisions",
         mindshub_model: str = "jev",
         typesafe_base_url: str = "https://api.typesafe.ai/v1",
         typesafe_model: str = "jev-latest",
-        default_cooldown_s: float = 60.0
+        default_cooldown_s: float = 60.0,
     ) -> "PriorityFailoverProvider":
         """
-        Builds the standard two-route setup without touching DECIDEX_BASE_URL
-        (which only applies to a standalone TypeSafeJevProvider):
-          1. "mindshub-free": MindsHub gateway keys (MINDSHUB_API_KEY env, or
+        Builds the standard three-tier priority failover setup:
+          1. "futureppo-pool": FuturePPO gateway keys (FUTUREPPO_API_KEY /
+             DECIDEX_FUTUREPPO_KEY env, or keys tagged org=futureppo in keys files),
+             max_retries=0 so 429 or quota issues immediately surface and failover.
+          2. "mindshub-free": MindsHub gateway keys (MINDSHUB_API_KEY env, or
              keys tagged org=mindshub in keys files), max_retries=0 so 429
              surfaces to this layer immediately.
-          2. "typesafe-pool": every other key (TYPESAFE_API_KEY /
+          3. "typesafe-pool": official TypeSafe key pool (TYPESAFE_API_KEY /
              DECIDEX_API_KEY env, untagged entries in keys files, the Obsidian
-             typesafe API keys note).
+             typesafe API keys note), max_retries=2 for pool rotation.
         Routes without any key are skipped.
         """
+        futureppo_keys: List[str] = []
         mindshub_keys: List[str] = []
         typesafe_keys: List[str] = []
+
+        env_futureppo = os.environ.get("FUTUREPPO_API_KEY") or os.environ.get("DECIDEX_FUTUREPPO_KEY")
+        if env_futureppo:
+            futureppo_keys.extend(k.strip() for k in env_futureppo.split(",") if k.strip())
 
         env_mindshub = os.environ.get("MINDSHUB_API_KEY")
         if env_mindshub:
@@ -279,7 +322,9 @@ class PriorityFailoverProvider(BaseInferenceProvider):
             except Exception:
                 continue
             for entry in pool._entries:
-                if entry.org == "mindshub":
+                if entry.org == "futureppo":
+                    futureppo_keys.append(entry.key)
+                elif entry.org == "mindshub":
                     mindshub_keys.append(entry.key)
                 else:
                     typesafe_keys.append(entry.key)
@@ -292,22 +337,36 @@ class PriorityFailoverProvider(BaseInferenceProvider):
                     out.append(k)
             return out
 
+        futureppo_keys = _dedup(futureppo_keys)
+        mindshub_keys = _dedup(mindshub_keys)
+        typesafe_keys = _dedup(typesafe_keys)
+
         routes: List[Tuple[str, BaseInferenceProvider]] = []
-        if _dedup(mindshub_keys):
+        if futureppo_keys:
+            routes.append((
+                "futureppo-pool",
+                TypeSafeJevProvider(
+                    api_keys=futureppo_keys,
+                    base_url=futureppo_base_url,
+                    model=futureppo_model,
+                    max_retries=0
+                )
+            ))
+        if mindshub_keys:
             routes.append((
                 "mindshub-free",
                 TypeSafeJevProvider(
-                    api_keys=_dedup(mindshub_keys),
+                    api_keys=mindshub_keys,
                     base_url=mindshub_base_url,
                     model=mindshub_model,
                     max_retries=0
                 )
             ))
-        if _dedup(typesafe_keys):
+        if typesafe_keys:
             routes.append((
                 "typesafe-pool",
                 TypeSafeJevProvider(
-                    api_keys=_dedup(typesafe_keys),
+                    api_keys=typesafe_keys,
                     base_url=typesafe_base_url,
                     model=typesafe_model,
                     max_retries=2
@@ -316,7 +375,7 @@ class PriorityFailoverProvider(BaseInferenceProvider):
 
         if not routes:
             raise NoAvailableProvidersError(
-                "No Jev credentials found for any route. Set MINDSHUB_API_KEY (free gateway) "
+                "No Jev credentials found for any route. Set FUTUREPPO_API_KEY, MINDSHUB_API_KEY, "
                 "or provide a TypeSafe key pool via DECIDEX_KEY_FILE / keys.jsonl."
             )
 
