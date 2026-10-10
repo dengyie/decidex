@@ -326,3 +326,114 @@ def test_from_default_routes_uses_pool_candidate_sources(monkeypatch):
     assert failover_mod._key_source_candidates() == (
         KeyPool.default_key_file_candidates() + KeyPool.vault_key_note_candidates()
     )
+
+
+@pytest.mark.asyncio
+async def test_failover_on_429_honors_retry_after_ms():
+    """Nace Drex reports cooldowns as retry-after-ms on 429."""
+    primary = StaticProvider(exc=_http_failure(429, headers={"retry-after-ms": "3000"}))
+    secondary = StaticProvider(verdicts=_verdict("B"))
+    provider = PriorityFailoverProvider([("nace", primary), ("secondary", secondary)])
+
+    verdicts = await provider.infer(_payload(), _questions())
+
+    assert verdicts[0].selected == "B"
+    route = provider.stats()["routes"][0]
+    assert route["state"] == "cooldown"
+    assert 2.5 <= route["cooldown_remaining_s"] <= 3.5
+
+
+@pytest.mark.asyncio
+async def test_retry_after_ms_used_when_retry_after_is_not_numeric():
+    """A non-numeric Retry-After (HTTP-date) must not suppress the ms fallback."""
+    primary = StaticProvider(exc=_http_failure(
+        429, headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT", "retry-after-ms": "4000"}
+    ))
+    secondary = StaticProvider(verdicts=_verdict("B"))
+    provider = PriorityFailoverProvider([("nace", primary), ("secondary", secondary)])
+
+    await provider.infer(_payload(), _questions())
+
+    route = provider.stats()["routes"][0]
+    assert route["state"] == "cooldown"
+    assert 3.5 <= route["cooldown_remaining_s"] <= 4.5
+
+
+@pytest.mark.asyncio
+async def test_failover_on_529_capacity_cools_down():
+    """Nace returns 529 "at capacity" when the shared pool is full; treat as transient."""
+    primary = StaticProvider(exc=_http_failure(529, headers={"retry-after-ms": "2000"}, reason="at capacity"))
+    secondary = StaticProvider(verdicts=_verdict("B"))
+    provider = PriorityFailoverProvider([("nace", primary), ("secondary", secondary)])
+
+    verdicts = await provider.infer(_payload(), _questions())
+
+    assert verdicts[0].selected == "B"
+    route = provider.stats()["routes"][0]
+    assert route["state"] == "cooldown"
+    assert "529" in route["last_error"]
+    assert 1.5 <= route["cooldown_remaining_s"] <= 2.5
+
+
+@pytest.mark.asyncio
+async def test_failover_on_503_stays_on_generic_transient_path():
+    """Generic 503 must NOT cool a whole route down on the first hit (only 529 does);
+    it accumulates until max_consecutive_failures."""
+    primary = StaticProvider(exc=_http_failure(503))
+    secondary = StaticProvider(verdicts=_verdict("B"))
+    provider = PriorityFailoverProvider([("typesafe", primary), ("secondary", secondary)])
+
+    verdicts = await provider.infer(_payload(), _questions())
+
+    assert verdicts[0].selected == "B"
+    # A single 503 is transient: route stays active (not cooled down).
+    assert provider.stats()["routes"][0]["state"] == "active"
+
+
+def test_from_default_routes_non_gateway_tags_belong_to_official_pool(tmp_path, monkeypatch):
+    """Only known gateway orgs (GATEWAY_ORGS) are diverted. Any other tag -- a
+    rollout/infra label on an official key -- must land in the official pool, not
+    be silently dropped."""
+    key_file = tmp_path / "keys.jsonl"
+    key_file.write_text(
+        '{"key": "nace_file_key", "org": "nace"}\n'
+        '{"key": "pxed_rollout_key", "org": "pxed"}\n'
+        '{"key": "apikey_official_1"}\n',
+        encoding="utf-8",
+    )
+    for var in ("NACE_API_KEY", "DREX_API_KEY", "MINDSHUB_API_KEY", "TYPESAFE_API_KEY",
+                "DECIDEX_API_KEY", "FUTUREPPO_API_KEY", "DECIDEX_FUTUREPPO_KEY", "DECIDEX_KEY_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(failover_mod, "_key_source_candidates", lambda: [str(key_file)])
+
+    provider = PriorityFailoverProvider.from_default_routes()
+
+    assert [r.name for r in provider.routes] == ["nace-decision", "typesafe-pool"]
+    assert set(provider.routes[0].provider.key_pool._key_map) == {"nace_file_key"}
+    assert set(provider.routes[1].provider.key_pool._key_map) == {"pxed_rollout_key", "apikey_official_1"}
+
+
+def test_from_default_routes_includes_nace_route(tmp_path, monkeypatch):
+    key_file = tmp_path / "keys.jsonl"
+    key_file.write_text(
+        '{"key": "nace_file_key", "org": "nace"}\n'
+        '{"key": "mdb_file_key", "org": "mindshub"}\n'
+        '{"key": "apikey_official_1"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DREX_API_KEY", "nace_env_key")
+    for var in ("NACE_API_KEY", "MINDSHUB_API_KEY", "TYPESAFE_API_KEY", "DECIDEX_API_KEY",
+                "FUTUREPPO_API_KEY", "DECIDEX_FUTUREPPO_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(failover_mod, "_key_source_candidates", lambda: [str(key_file)])
+
+    provider = PriorityFailoverProvider.from_default_routes()
+
+    assert [r.name for r in provider.routes] == ["nace-decision", "mindshub-free", "typesafe-pool"]
+
+    nace_route = provider.routes[0]
+    assert isinstance(nace_route.provider, TypeSafeJevProvider)
+    assert nace_route.provider.base_url == "https://console.nace.ai/v1"
+    assert nace_route.provider.model == "drex-latest"
+    assert nace_route.provider.max_retries == 0
+    assert set(nace_route.provider.key_pool._key_map) == {"nace_env_key", "nace_file_key"}

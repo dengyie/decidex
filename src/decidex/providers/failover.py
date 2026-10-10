@@ -6,9 +6,10 @@ transparently degrades to lower-priority backends when the primary is
 rate-limited (429), quota/wallet-exhausted (402), revoked (401) or
 deterministically misconfigured (400/403/404/422).
 
-Typical wiring: FuturePPO System One gateway first (primary data source),
-MindsHub free Jev gateway as secondary fallback (consume free promotion quota),
-official TypeSafe key pool as the durable tertiary fallback.
+Typical wiring: FuturePPO System One gateway first (free primary data source),
+Nace Drex hosted decisions next (cheap paid tier), MindsHub free Jev gateway
+after that (consume free promotion quota), official TypeSafe key pool as the
+durable fallback.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from decidex.pool import KeyPool
+from decidex.pool import GATEWAY_ORGS, KeyPool
 from decidex.providers.base import BaseInferenceProvider
 from decidex.providers.typesafe import TypeSafeJevProvider
 from decidex.types import DecisionVerdict, ObservationPayload, QuestionSpec
@@ -143,12 +144,19 @@ class PriorityFailoverProvider(BaseInferenceProvider):
         hops = 0
         while current is not None and hops < 8:
             if isinstance(current, httpx.HTTPStatusError):
-                raw = current.response.headers.get("Retry-After")
-                if raw:
+                headers = current.response.headers
+                # Standard seconds header first, then Nace Drex's millisecond variant
+                # ("retry-after-ms"). A non-numeric standard header (HTTP-date) must not
+                # abort the search: fall through to the next candidate.
+                for header, scale in (("Retry-After", 1.0), ("Retry-After-Ms", 0.001)):
+                    raw = headers.get(header)
+                    if not raw:
+                        continue
                     try:
-                        return max(1.0, float(raw))
+                        return max(1.0, float(raw) * scale)
                     except ValueError:
-                        return None
+                        continue
+                return None
             current = current.__cause__ or current.__context__
             hops += 1
         return None
@@ -203,6 +211,13 @@ class PriorityFailoverProvider(BaseInferenceProvider):
             cooldown = min(retry_after if retry_after else self.default_cooldown_s, self.cooldown_cap_s)
             source = f"Retry-After {retry_after:.0f}s" if retry_after else "exponential backoff"
             route.mark_cooldown(cooldown, f"429 rate limited ({source})")
+        elif status == 529:
+            # Nace Drex "at capacity" (shared upstream pool full): transient, so pause
+            # the route before retrying. Other 5xx (e.g. 503) stay on the generic
+            # multi-strike transient path below instead of cooling down on first hit.
+            cooldown = min(retry_after if retry_after else self.default_cooldown_s, self.cooldown_cap_s)
+            source = f"Retry-After {retry_after:.0f}s" if retry_after else "exponential backoff"
+            route.mark_cooldown(cooldown, f"529 upstream capacity ({source})")
         elif status in (400, 403, 422):
             # Key-level or payload-dependent rejections (e.g. one risk-controlled key
             # returning 403 out of a large pool, or a single payload failing semantic
@@ -279,6 +294,8 @@ class PriorityFailoverProvider(BaseInferenceProvider):
         cls,
         futureppo_base_url: str = DEFAULT_FUTUREPPO_BASE_URL,
         futureppo_model: str = DEFAULT_FUTUREPPO_MODEL,
+        nace_base_url: str = "https://console.nace.ai/v1",
+        nace_model: str = "drex-latest",
         mindshub_base_url: str = "https://api.mindshub.ai/v1/decisions",
         mindshub_model: str = "jev",
         typesafe_base_url: str = "https://api.typesafe.ai/v1",
@@ -286,33 +303,43 @@ class PriorityFailoverProvider(BaseInferenceProvider):
         default_cooldown_s: float = 60.0,
     ) -> "PriorityFailoverProvider":
         """
-        Builds the standard three-tier priority failover setup:
+        Builds the standard priority failover chain without touching
+        DECIDEX_BASE_URL (which only applies to a standalone TypeSafeJevProvider):
           1. "futureppo-pool": FuturePPO gateway keys (FUTUREPPO_API_KEY /
              DECIDEX_FUTUREPPO_KEY env, or keys tagged org=futureppo in keys files),
              max_retries=0 so 429 or quota issues immediately surface and failover.
-          2. "mindshub-free": MindsHub gateway keys (MINDSHUB_API_KEY env, or
-             keys tagged org=mindshub in keys files), max_retries=0 so 429
-             surfaces to this layer immediately.
-          3. "typesafe-pool": official TypeSafe key pool (TYPESAFE_API_KEY /
+          2. "nace-decision": Nace Drex hosted API (NACE_API_KEY / DREX_API_KEY env,
+             or keys tagged org=nace in keys files). Wire-compatible with System One.
+          3. "mindshub-free": MindsHub gateway keys (MINDSHUB_API_KEY env, or
+             keys tagged org=mindshub in keys files), max_retries=0.
+          4. "typesafe-pool": every other key (TYPESAFE_API_KEY /
              DECIDEX_API_KEY env, untagged entries in keys files, the Obsidian
              typesafe API keys note), max_retries=2 for pool rotation.
         Routes without any key are skipped.
         """
-        futureppo_keys: List[str] = []
-        mindshub_keys: List[str] = []
-        typesafe_keys: List[str] = []
+        # Route order = priority. Each entry: (route name, key bucket, base_url, model, max_retries).
+        # A bucket's keys come from its env vars (first set wins) or from key-file entries
+        # whose org tag matches the bucket. Untagged / non-gateway-tagged keys -> "typesafe".
+        route_specs = [
+            ("futureppo-pool", "futureppo", futureppo_base_url, futureppo_model, 0),
+            ("nace-decision", "nace", nace_base_url, nace_model, 0),
+            ("mindshub-free", "mindshub", mindshub_base_url, mindshub_model, 0),
+            ("typesafe-pool", "typesafe", typesafe_base_url, typesafe_model, 2),
+        ]
+        env_vars = {
+            "futureppo": ("FUTUREPPO_API_KEY", "DECIDEX_FUTUREPPO_KEY"),
+            "nace": ("NACE_API_KEY", "DREX_API_KEY"),
+            "mindshub": ("MINDSHUB_API_KEY",),
+            "typesafe": ("TYPESAFE_API_KEY", "DECIDEX_API_KEY"),
+        }
 
-        env_futureppo = os.environ.get("FUTUREPPO_API_KEY") or os.environ.get("DECIDEX_FUTUREPPO_KEY")
-        if env_futureppo:
-            futureppo_keys.extend(k.strip() for k in env_futureppo.split(",") if k.strip())
-
-        env_mindshub = os.environ.get("MINDSHUB_API_KEY")
-        if env_mindshub:
-            mindshub_keys.extend(k.strip() for k in env_mindshub.split(",") if k.strip())
-
-        env_typesafe = os.environ.get("TYPESAFE_API_KEY") or os.environ.get("DECIDEX_API_KEY")
-        if env_typesafe:
-            typesafe_keys.extend(k.strip() for k in env_typesafe.split(",") if k.strip())
+        buckets: Dict[str, List[str]] = {bucket: [] for bucket in env_vars}
+        for bucket, names in env_vars.items():
+            for name in names:
+                value = os.environ.get(name)
+                if value:
+                    buckets[bucket].extend(k.strip() for k in value.split(",") if k.strip())
+                    break
 
         for path in _key_source_candidates():
             if not path or not os.path.isfile(path):
@@ -322,12 +349,14 @@ class PriorityFailoverProvider(BaseInferenceProvider):
             except Exception:
                 continue
             for entry in pool._entries:
-                if entry.org == "futureppo":
-                    futureppo_keys.append(entry.key)
-                elif entry.org == "mindshub":
-                    mindshub_keys.append(entry.key)
-                else:
-                    typesafe_keys.append(entry.key)
+                if entry.org in buckets:
+                    buckets[entry.org].append(entry.key)
+                elif entry.org not in GATEWAY_ORGS:
+                    # Everything not bound to a known gateway belongs to the official
+                    # pool: untagged keys, or official keys carrying an internal tag
+                    # (e.g. a rollout name). Dropping unknown tags here would silently
+                    # discard legitimate official credentials.
+                    buckets["typesafe"].append(entry.key)
 
         def _dedup(keys: List[str]) -> List[str]:
             seen, out = set(), []
@@ -337,46 +366,26 @@ class PriorityFailoverProvider(BaseInferenceProvider):
                     out.append(k)
             return out
 
-        futureppo_keys = _dedup(futureppo_keys)
-        mindshub_keys = _dedup(mindshub_keys)
-        typesafe_keys = _dedup(typesafe_keys)
-
         routes: List[Tuple[str, BaseInferenceProvider]] = []
-        if futureppo_keys:
+        for name, bucket, base_url, model, max_retries in route_specs:
+            keys = _dedup(buckets[bucket])
+            if not keys:
+                continue
             routes.append((
-                "futureppo-pool",
+                name,
                 TypeSafeJevProvider(
-                    api_keys=futureppo_keys,
-                    base_url=futureppo_base_url,
-                    model=futureppo_model,
-                    max_retries=0
-                )
-            ))
-        if mindshub_keys:
-            routes.append((
-                "mindshub-free",
-                TypeSafeJevProvider(
-                    api_keys=mindshub_keys,
-                    base_url=mindshub_base_url,
-                    model=mindshub_model,
-                    max_retries=0
-                )
-            ))
-        if typesafe_keys:
-            routes.append((
-                "typesafe-pool",
-                TypeSafeJevProvider(
-                    api_keys=typesafe_keys,
-                    base_url=typesafe_base_url,
-                    model=typesafe_model,
-                    max_retries=2
+                    api_keys=keys,
+                    base_url=base_url,
+                    model=model,
+                    max_retries=max_retries
                 )
             ))
 
         if not routes:
             raise NoAvailableProvidersError(
-                "No Jev credentials found for any route. Set FUTUREPPO_API_KEY, MINDSHUB_API_KEY, "
-                "or provide a TypeSafe key pool via DECIDEX_KEY_FILE / keys.jsonl."
+                "No Jev credentials found for any route. Set FUTUREPPO_API_KEY (free primary), "
+                "NACE_API_KEY (Drex hosted), MINDSHUB_API_KEY (free gateway), or provide a "
+                "TypeSafe key pool via DECIDEX_KEY_FILE / keys.jsonl."
             )
 
         return cls(routes, default_cooldown_s=default_cooldown_s)

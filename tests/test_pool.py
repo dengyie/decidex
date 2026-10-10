@@ -406,6 +406,42 @@ def test_from_default_locations_candidate_4_filters_non_official_notes(tmp_path,
     assert "apikey_55555555555555555555555555555555_6666666666666666666666666666666666666666666666666666666666666666" in pool._key_map
 
 
+def test_from_default_locations_filters_tagged_nace_keys(tmp_path, monkeypatch):
+    """Regression: org=nace keys are gateway-bound and must never leak into the
+    official TypeSafe pool (they would 401 against api.typesafe.ai)."""
+    for var in ("NACE_API_KEY", "DREX_API_KEY", "MINDSHUB_API_KEY", "TYPESAFE_API_KEY", "DECIDEX_API_KEY", "DECIDEX_KEY_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(
+        KeyPool, "default_key_file_candidates",
+        classmethod(lambda cls: [str(tmp_path / "keys.jsonl")]),
+    )
+    monkeypatch.setattr(KeyPool, "vault_key_note_candidates", classmethod(lambda cls: []))
+    (tmp_path / "keys.jsonl").write_text(
+        '{"key": "nace_file_key", "org": "nace"}\n'
+        '{"key": "mdb_file_key", "org": "mindshub"}\n'
+        '{"key": "apikey_official_1"}\n',
+        encoding="utf-8",
+    )
+
+    pool = KeyPool.from_default_locations()
+    assert set(pool._key_map) == {"apikey_official_1"}
+
+
+def test_from_default_locations_nace_only_raises(tmp_path, monkeypatch):
+    """A pool holding only gateway-tagged keys has no official keys -> FileNotFoundError."""
+    for var in ("NACE_API_KEY", "DREX_API_KEY", "MINDSHUB_API_KEY", "TYPESAFE_API_KEY", "DECIDEX_API_KEY", "DECIDEX_KEY_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(
+        KeyPool, "default_key_file_candidates",
+        classmethod(lambda cls: [str(tmp_path / "keys.jsonl")]),
+    )
+    monkeypatch.setattr(KeyPool, "vault_key_note_candidates", classmethod(lambda cls: []))
+    (tmp_path / "keys.jsonl").write_text('{"key": "nace_file_key", "org": "nace"}\n', encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError):
+        KeyPool.from_default_locations()
+
+
 def test_default_key_file_candidates_prefers_env_file(tmp_path, monkeypatch):
     monkeypatch.setenv("DECIDEX_KEY_FILE", str(tmp_path / "custom.txt"))
     assert KeyPool.default_key_file_candidates()[0] == str(tmp_path / "custom.txt")

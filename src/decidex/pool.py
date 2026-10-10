@@ -18,7 +18,14 @@ import re
 import tempfile
 import threading
 import time
-from typing import Any, AsyncIterator, Dict, List, Optional, Union
+from typing import Any, AsyncIterator, Dict, FrozenSet, List, Optional, Union
+
+
+# Third-party gateway orgs. A key tagged with any of these is bound to that
+# gateway's own base_url and must NEVER be loaded into the official TypeSafe
+# pool. Single source of truth shared by KeyPool.from_default_locations and the
+# failover route builder -- add a new gateway here when onboarding one.
+GATEWAY_ORGS: FrozenSet[str] = frozenset({"mindshub", "futureppo", "nace"})
 
 
 class KeyState(str, Enum):
@@ -542,8 +549,9 @@ class KeyPool:
     ) -> "KeyPool":
         """
         Attempts to locate and load the OFFICIAL TypeSafe key pool from standard runtime
-        candidates. Keys tagged org=mindshub or org=futureppo are excluded everywhere:
-        they route to third-party gateways and must only be consumed via
+        candidates. Keys tagged with a third-party gateway org (GATEWAY_ORGS:
+        mindshub / futureppo / nace) are excluded everywhere: they route to that
+        gateway's own endpoint and must only be consumed via
         PriorityFailoverProvider.from_default_routes.
         1. DECIDEX_KEY_FILE environment variable
         2. TYPESAFE_API_KEY / DECIDEX_API_KEY environment variable
@@ -555,7 +563,7 @@ class KeyPool:
         env_file = os.environ.get("DECIDEX_KEY_FILE")
         if env_file and os.path.exists(env_file):
             pool = cls.from_file(env_file, strategy=strategy, default_cooldown_s=default_cooldown_s)
-            return cls(entries=[e for e in pool._entries if e.org not in ("mindshub", "futureppo")],
+            return cls(entries=[e for e in pool._entries if e.org not in GATEWAY_ORGS],
                        strategy=strategy, default_cooldown_s=default_cooldown_s)
 
         # 2. Direct API key environment variable (Docker, CI/CD, Serverless, single or comma-separated)
@@ -569,7 +577,7 @@ class KeyPool:
         for candidate in cls.default_key_file_candidates():
             if os.path.isfile(candidate):
                 pool = cls.from_file(candidate, strategy=strategy, default_cooldown_s=default_cooldown_s)
-                official = [e for e in pool._entries if e.org not in ("mindshub", "futureppo")]
+                official = [e for e in pool._entries if e.org not in GATEWAY_ORGS]
                 if official:
                     return cls(entries=official, strategy=strategy, default_cooldown_s=default_cooldown_s)
 
@@ -577,7 +585,7 @@ class KeyPool:
         for note in cls.vault_key_note_candidates():
             if os.path.isfile(note):
                 pool = cls.from_markdown(note, strategy=strategy, default_cooldown_s=default_cooldown_s)
-                official = [e for e in pool._entries if e.org not in ("mindshub", "futureppo")]
+                official = [e for e in pool._entries if e.org not in GATEWAY_ORGS]
                 if official:
                     return cls(entries=official, strategy=strategy, default_cooldown_s=default_cooldown_s)
 

@@ -149,7 +149,7 @@ from decidex.providers.typesafe import TypeSafeJevProvider
 
 async def main():
     # 1. 初始化引擎（自动加载本地 keys.jsonl 号池）
-    provider = TypeSafeJevProvider(temperature=0.3)
+    provider = TypeSafeJevProvider()
     engine = DecisionEngine(
         provider=provider,
         guard=CalibratedDecisionGuard(min_confidence=0.6, enforce_legal=True)
@@ -205,20 +205,47 @@ verdicts = await provider.infer(payload, questions)
 provider = TypeSafeJevProvider()
 ```
 
-base_url 解析优先级：构造参数 `base_url` > 环境变量 `DECIDEX_BASE_URL` > 官方 `https://api.typesafe.ai/v1`（自动追加 `/systemone`）。以 `/systemone`、`/decide`、`/decisions` 结尾的 base_url 视为完整端点直连。官方号池读取优先级：`DECIDEX_KEY_FILE` > `TYPESAFE_API_KEY` / `DECIDEX_API_KEY` > 本地 `keys.jsonl|keys.json|keys.txt`（已被 .gitignore 排除；`org=mindshub` 标记的条目仅由故障转移构建器识别）。
+base_url 解析优先级：构造参数 `base_url` > 环境变量 `DECIDEX_BASE_URL` > 官方 `https://api.typesafe.ai/v1`（自动追加 `/systemone`）。以 `/systemone`、`/decide`、`/decisions` 结尾的 base_url 视为完整端点直连。官方号池读取优先级：`DECIDEX_KEY_FILE` > `TYPESAFE_API_KEY` / `DECIDEX_API_KEY` > 本地 `keys.jsonl|keys.json|keys.txt`（已被 .gitignore 排除；`org=mindshub` / `org=nace` 标记的条目仅由故障转移构建器识别）。
 
-### 4. 优先级故障转移（MindsHub 免费额度优先，官方号池兜底）
-`PriorityFailoverProvider` 按优先级逐路由尝试：主路由 429 限流按 `Retry-After` 冷却并自动回落下一路由；402（钱包/额度耗尽）、401（key 吊销）与 400/403/404/422（确定性配置错误）直接熔断该路由；官方号池内部的单 key 429/401 仍由 `KeyPool` 原生治理。MindsHub 当前 org 级限流：**60 RPM / 1M TPM / 20 并发**（全模型共享，未设 RPD；2026-09-25 实测 30 并发脉冲全 200）。
+### 3b. 接入 Nace Drex（与 Jev 线协议兼容）
+**Nace Drex**（[console.nace.ai](https://console.nace.ai)，[drex.nace.ai](https://drex.nace.ai)）是官方明示“wire-compatible with TypeSafe's Jev”的决策模型（`drex-latest` = `drex-v1.5`，131K 上下文）。其 `POST /v1/systemone` 的 `state`/`questions`/`answers` 结构与 decidex 客户端完全一致，因此**无需新增 provider**，直接复用 `TypeSafeJevProvider` 换 `base_url` + `model` 即可：
+
+```bash
+# Nace 控制台（drex.nace.ai/login → API Keys）领取 key
+export NACE_API_KEY="nace_sk_..."   # 亦可用 DREX_API_KEY
+```
+
+```python
+from decidex.providers.typesafe import TypeSafeJevProvider
+
+provider = TypeSafeJevProvider(
+    api_key=os.environ["NACE_API_KEY"],
+    base_url="https://console.nace.ai/v1",   # 自动追加 /systemone
+    model="drex-latest",                     # 必须改：默认是 jev-latest
+    timeout_s=3.0,                           # Nace 上游超时 55s，建议放宽
+)
+verdicts = await provider.infer(payload, questions)
+```
+
+要点：Nace 按**输入 token** 计费（输出不计费；$0.051/1M input tokens，注册送 $25 + 每月 $5），免费档 120 RPM / 8 并发，付费档 600 RPM / 16 并发；`state` 可传字符串、对象或列表，decidex 发送的 dict（`observation`/`memory`/…）被渲染为缩进文本。Nace 的 `score` 返回概率加权的**档位索引**，decidex 会自动把索引映射回问题的 `[min, max]` 数值域（默认 5 档，或按 `criteria` 档位数），并从 `probabilities` 取众数档位后验作为置信度，因此 SCORE verdict 的 `selected` 始终是 scale 域内的真实分数；`choice`/`noul` 与现有解析完全兼容。自托管开源权重（`nace-ai/drex-decision-models`，llama.cpp/Ollama）服务同一 `/v1/systemone`，把 `base_url` 指向本地即可（注意 v1.5 权重为 Nace.AI Open RAIL-M 许可）。
+
+### 4. 优先级故障转移（FuturePPO 免费主源优先，依次 Nace Drex / MindsHub / 官方号池）
+`PriorityFailoverProvider` 按优先级逐路由尝试：主路由 429 限流按 `Retry-After`（或 Nace 的 `Retry-After-Ms`）冷却并自动回落下一路由；402（钱包/额度耗尽）、401（key 吊销）与 400/403/404/422（确定性配置错误）直接熔断该路由；529（Nace 上游容量已满）与 429 同等对待，冷却后重试；官方号池内部的单 key 429/401 仍由 `KeyPool` 原生治理。MindsHub 当前 org 级限流：**60 RPM / 1M TPM / 20 并发**（全模型共享，未设 RPD；2026-09-25 实测 30 并发脉冲全 200）。
 
 ```python
 from decidex.providers import PriorityFailoverProvider
 
 provider = PriorityFailoverProvider.from_default_routes()
-# 路由 1 "mindshub-free"：MINDSHUB_API_KEY env + keys 文件中 org=mindshub 标记的 key（max_retries=0，限流即时上抛）
-# 路由 2 "typesafe-pool"：TYPESAFE_API_KEY / DECIDEX_API_KEY env + keys 文件中未标记 org 的 key + Obsidian typesafe 账号库笔记（DECIDEX_VAULT 可覆盖 vault 根路径；生产 pxed 的 1171+ 号池）
+# 路由 1 "futureppo-pool"：FUTUREPPO_API_KEY / DECIDEX_FUTUREPPO_KEY env + keys 文件中 org=futureppo 标记的 key（免费主源，max_retries=0）
+# 路由 2 "nace-decision"：NACE_API_KEY / DREX_API_KEY env + keys 文件中 org=nace 标记的 key
+#                       （base_url=https://console.nace.ai/v1，model=drex-latest，max_retries=0）
+# 路由 3 "mindshub-free"：MINDSHUB_API_KEY env + keys 文件中 org=mindshub 标记的 key（max_retries=0，限流即时上抛）
+# 路由 4 "typesafe-pool"：TYPESAFE_API_KEY / DECIDEX_API_KEY env + keys 文件中未标记 org 的 key + Obsidian typesafe 账号库笔记（DECIDEX_VAULT 可覆盖 vault 根路径；生产 pxed 的 1171+ 号池）
 verdicts = await provider.infer(payload, questions)
 print(provider.stats())  # 每路由健康度遥测（active/cooldown/dead、错误与冷却剩余）
 ```
+
+> 排序原则：先用免费额度（FuturePPO 内置全局降级凭据、MindsHub 推广期免费），免费通道限流后回落到低成本托管 Drex，官方 1171+ 号池作为最终稳定兜底。第三方网关 org 词表统一为 `decidex.pool.GATEWAY_ORGS`（mindshub / futureppo / nace），单一事实来源，新增网关只需在此登记。
 
 也可手工编排任意路由顺序：`PriorityFailoverProvider([("mindshub", p1), ("typesafe", p2)])`。全部路由不可用时抛 `NoAvailableProvidersError`，`DecisionEngine` 会自动进入确定性保底分支。
 

@@ -27,6 +27,40 @@ def _safe_float(val: Any, default: float = 1.0) -> float:
         return default
 
 
+# Number of evenly spaced levels used to discretize a continuous SCORE range
+# when the caller supplies no explicit criteria.
+DEFAULT_SCORE_LEVELS = 5
+
+
+def _score_levels(scale: Any, criteria: Any = None) -> List[float]:
+    """
+    Ordered (lowest-first) score levels for a SCORE question.
+
+    System One `score` questions take an ordered level list and return a
+    probability-weighted expected level *index* (not a value in scale units).
+    DecideX's QuestionSpec only carries a continuous [min, max] scale, so the
+    level list is derived as:
+      - explicit dict/list criteria -> their numeric keys/values, or an even
+        spread across the scale when the labels are non-numeric (count preserved
+        so parsing matches what was sent);
+      - otherwise -> DEFAULT_SCORE_LEVELS evenly spaced levels across [min, max].
+    """
+    lo, hi = float(scale[0]), float(scale[1])
+    values = None
+    if isinstance(criteria, dict):
+        values = list(criteria.keys())
+    elif isinstance(criteria, (list, tuple)):
+        values = list(criteria)
+    if values and len(values) >= 2:
+        try:
+            return [float(v) for v in values]
+        except (ValueError, TypeError):
+            n = len(values)
+            return [lo + (hi - lo) * i / (n - 1) for i in range(n)]
+    n = DEFAULT_SCORE_LEVELS
+    return [lo + (hi - lo) * i / (n - 1) for i in range(n)]
+
+
 class TypeSafeJevProvider(BaseInferenceProvider):
     """
     HTTP client for the TypeSafe Jev cloud decision API (System One).
@@ -131,10 +165,8 @@ class TypeSafeJevProvider(BaseInferenceProvider):
                     q_item["criteria"] = q.criteria
                 elif q.criteria and isinstance(q.criteria, list):
                     q_item["criteria"] = [str(x) for x in q.criteria]
-                elif q.scale:
-                    q_item["criteria"] = [f"Rating level {x}" for x in q.scale]
                 else:
-                    q_item["criteria"] = ["Low", "Medium", "High"]
+                    q_item["criteria"] = [f"{v:g}" for v in _score_levels(q.scale)]
             questions_dict[q.id] = q_item
 
         state_dict: Dict[str, Any] = {
@@ -196,14 +228,27 @@ class TypeSafeJevProvider(BaseInferenceProvider):
                     raw_conf = noul_val if selected else (1.0 - noul_val)
                     dist = {"true": noul_val, "false": round(1.0 - noul_val, 4)}
                 elif q.primitive == PrimitiveType.SCORE:
-                    selected = ans.get("score")
-                    if selected is None:
+                    score_field = ans.get("score")
+                    if score_field is None:
                         continue
                     dist = ans.get("probabilities", {})
-                    if isinstance(dist, dict) and str(selected) in dist:
-                        raw_conf = _safe_float(dist[str(selected)], default=1.0)
-                    elif isinstance(dist, dict) and selected in dist:
-                        raw_conf = _safe_float(dist[selected], default=1.0)
+                    # System One returns `score` as a probability-weighted level INDEX.
+                    # Map it back into the question's [min, max] scale so `selected`
+                    # is a real score, matching the DecideX SCORE contract.
+                    levels = _score_levels(q.scale, q.criteria)
+                    idx = _safe_float(score_field, default=0.0)
+                    idx_clamped = min(max(idx, 0.0), float(len(levels) - 1))
+                    lo_idx, hi_idx = int(idx_clamped), min(int(idx_clamped) + 1, len(levels) - 1)
+                    frac = idx_clamped - lo_idx
+                    selected = levels[lo_idx] + (levels[hi_idx] - levels[lo_idx]) * frac
+                    # Confidence = posterior mass at the modal level the score landed on
+                    # (more robust than the API's concentration `confidence` field).
+                    modal_idx = min(int(round(idx_clamped)), len(levels) - 1)
+                    modal_key = str(modal_idx)
+                    if isinstance(dist, dict) and modal_key in dist:
+                        raw_conf = _safe_float(dist[modal_key], default=1.0)
+                    elif isinstance(dist, dict) and modal_idx in dist:
+                        raw_conf = _safe_float(dist[modal_idx], default=1.0)
                     else:
                         raw_conf = _safe_float(ans.get("confidence"), default=1.0)
                 else:

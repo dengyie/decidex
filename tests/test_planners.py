@@ -154,8 +154,10 @@ async def test_predictive_frame_controller_with_custom_head():
     m1 = await controller.advance_tick(engine, {"x": 10}, questions, ["idle", "RUN_RIGHT", "RUN_JUMP_RIGHT"])
     assert m1 == "idle"
 
-    # Wait for completion
-    await asyncio.sleep(0.02)
+    # Deterministically await the in-flight background task instead of racing a
+    # fixed sleep (a bare sleep is not enough on loaded CI runners).
+    assert controller._current_task is not None
+    await asyncio.wait_for(asyncio.shield(controller._current_task), timeout=5.0)
 
     # Tick 2: result harvested, returns updated macro
     m2 = await controller.advance_tick(engine, {"x": 15}, questions, ["idle", "RUN_RIGHT", "RUN_JUMP_RIGHT"])
