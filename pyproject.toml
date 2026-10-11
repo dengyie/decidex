@@ -34,4 +34,7 @@ packages = ["src/decidex"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["src"]
+# "." puts the repo root on sys.path so tests can import the `examples/`
+# modules; relying on cwd only worked under `python -m pytest`, not the
+# `pytest` console script CI uses.
+pythonpath = ["src", "."]
