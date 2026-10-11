@@ -156,8 +156,16 @@ class BalatroAdvisor:
             fallback_reason=reason,
             distribution=dict(getattr(verdict, "distribution", {})),
             legal_actions=[
-                {"id": c.candidate_id, "action_type": c.metadata.get("action_type"),
-                 "description": c.description}
+                {
+                    "id": c.candidate_id,
+                    "action_type": c.metadata.get("action_type"),
+                    "description": c.description,
+                    "indices": c.metadata.get("indices"),
+                    "cards": c.metadata.get("cards"),
+                    "chips": c.metadata.get("chips"),
+                    "mult": c.metadata.get("mult"),
+                    "score": c.metadata.get("score"),
+                }
                 for c in legal
             ],
         )

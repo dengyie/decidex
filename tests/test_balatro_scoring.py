@@ -92,3 +92,25 @@ def test_unknown_joker_no_effect():
     jokers = [Joker(name="Some Modded Joker", chips=0, mult=0)]
     r = simulate_play([hand[0], hand[1]], state(hand, jokers))
     assert (r.chips, r.mult) == (24, 2.0)
+
+
+def test_blackboard_checks_held_not_played():
+    """Blackboard x3 只看留下的手牌(原版语义),不看打出的牌。"""
+    hand = [
+        Card(rank="A", suit="S"),                      # 打出
+        Card(rank="7", suit="S"),                      # 打出
+        Card(rank="2", suit="H"),                      # 留手(红心)-> Blackboard 不触发
+        Card(rank="K", suit="C"),                      # 留手
+    ]
+    jokers = [Joker(name="Blackboard")]
+    r = simulate_play([hand[0], hand[1]], state(hand, jokers))
+    assert r.mult == 1.0                                # High Card 基础 1,无 x3
+
+    hand2 = [
+        Card(rank="A", suit="S"),
+        Card(rank="7", suit="S"),
+        Card(rank="2", suit="C"),                       # 留手全黑桃/梅花
+        Card(rank="K", suit="S"),
+    ]
+    r2 = simulate_play([hand2[0], hand2[1]], state(hand2, jokers))
+    assert r2.mult == 3.0                               # 1 x3

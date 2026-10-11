@@ -5,56 +5,127 @@
 <title>DecideX · 小丑牌顾问</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  :root { --bg:#0f1115; --panel:#171a21; --panel2:#1d212b; --line:#2a2f3c;
-          --text:#d8dde6; --dim:#8b93a3; --accent:#f2b134; --good:#5fd08a; --bad:#e06c6c; }
+  :root {
+    --felt1:#35654d; --felt2:#1e4433; --wood:#3a2a1c; --panel:#10141d;
+    --line:#2a2f3c; --text:#e8ecf3; --dim:#93a0b4; --accent:#f2b134;
+    --chip:#009dff; --mult:#fe5f55; --good:#5fd08a; --bad:#e06c6c;
+  }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--text);
-         font:14px/1.55 "Segoe UI",system-ui,sans-serif; }
-  header { position:sticky; top:0; z-index:5; background:var(--panel);
-           border-bottom:1px solid var(--line); padding:10px 16px;
-           display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
-  header h1 { font-size:16px; margin:0 12px 0 0; color:var(--accent); white-space:nowrap; }
-  select,button { background:var(--panel2); color:var(--text); border:1px solid var(--line);
-                  border-radius:6px; padding:6px 10px; font-size:13px; }
+  body { margin:0; color:var(--text); font:14px/1.5 "Segoe UI",system-ui,sans-serif;
+         background:
+           radial-gradient(ellipse at 50% 38%, var(--felt1) 0%, var(--felt2) 58%, #0e2419 100%)
+           fixed var(--panel);
+         min-height:100vh; }
+  body::after { content:""; position:fixed; inset:0; pointer-events:none;
+                box-shadow: inset 0 0 180px rgba(0,0,0,.55); }
+  header { position:sticky; top:0; z-index:6; background:rgba(10,14,20,.92);
+           border-bottom:1px solid var(--line); padding:9px 14px;
+           display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0 10px 0 0; color:var(--accent); white-space:nowrap; }
+  select,button { background:#1a212e; color:var(--text); border:1px solid var(--line);
+                  border-radius:7px; padding:6px 10px; font-size:13px; }
   button { cursor:pointer; } button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#20160a; font-weight:700; border:none; }
   #stats { color:var(--dim); font-size:12px; margin-left:auto; }
-  main { display:grid; grid-template-columns: 230px 1fr 360px; gap:12px; padding:12px; }
-  @media (max-width: 980px){ main { grid-template-columns: 1fr; } }
-  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; }
-  .panel h3 { margin:0 0 8px; font-size:13px; color:var(--accent); letter-spacing:.05em; }
-  .snap { padding:8px 10px; border:1px solid var(--line); border-radius:8px; margin-bottom:8px;
-          cursor:pointer; font-size:12px; color:var(--dim); }
-  .snap:hover { border-color:var(--accent); }
-  .snap.active { border-color:var(--accent); color:var(--text); background:var(--panel2); }
-  .blind { display:flex; gap:14px; align-items:baseline; flex-wrap:wrap; margin-bottom:10px; }
-  .blind b { font-size:15px; }
-  .blind .target { color:var(--accent); font-weight:600; }
-  .cards { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0; }
-  .card { width:52px; height:72px; border-radius:8px; background:#f4f1e8; color:#222;
-          display:flex; flex-direction:column; align-items:center; justify-content:center;
-          font-size:16px; font-weight:700; position:relative; border:2px solid #d8d3c4; }
-  .card .enh { position:absolute; bottom:3px; font-size:9px; font-weight:600; padding:1px 4px;
-               border-radius:4px; background:#333; color:#fff; }
-  .card.ed-foil { border-color:#7fd0ff; } .card.ed-holo { border-color:#c99cff; }
-  .card.ed-poly { border-color:linear-gradient; border-image:linear-gradient(45deg,#ff7f7f,#7fff9e,#7fb6ff) 1; }
-  .card.rec { outline:3px solid var(--good); outline-offset:1px; }
-  .card.act { outline:3px dashed var(--accent); outline-offset:1px; }
-  .row { display:flex; gap:8px; flex-wrap:wrap; }
-  .chip { background:var(--panel2); border:1px solid var(--line); border-radius:6px;
-          padding:4px 8px; font-size:12px; }
-  .chip b { color:var(--accent); }
-  #recBody .big { font-size:15px; font-weight:700; margin:6px 0; }
-  .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; margin-right:6px; }
-  .badge.ok { background:rgba(95,208,138,.15); color:var(--good); }
-  .badge.fb { background:rgba(224,108,108,.15); color:var(--bad); }
+  .layout { display:grid; grid-template-columns: 1fr 340px; gap:12px; padding:12px; max-width:1440px; margin:0 auto; }
+  @media (max-width: 1000px){ .layout { grid-template-columns: 1fr; } }
+  .panel { background:rgba(12,16,24,.88); border:1px solid var(--line); border-radius:12px; padding:12px; }
+  .panel h3 { margin:0 0 8px; font-size:12px; color:var(--accent); letter-spacing:.08em; text-transform:uppercase; }
+
+  /* ---- 牌桌 ---- */
+  .table { padding:14px; }
+  .topbar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:center; margin-bottom:12px; }
+  .blind-chip { width:110px; height:110px; border-radius:50%; display:flex; flex-direction:column;
+                align-items:center; justify-content:center; text-align:center; flex:0 0 auto;
+                background:radial-gradient(circle at 35% 30%, #6d7f8f, #2f3d49 70%);
+                border:6px solid #d9d2bd; box-shadow:0 6px 16px rgba(0,0,0,.5), inset 0 0 14px rgba(0,0,0,.5); }
+  .blind-chip .nm { font-size:11px; font-weight:800; color:#fff; text-shadow:0 1px 2px #000; padding:0 8px; line-height:1.15; }
+  .blind-chip .tgt { font-size:15px; font-weight:900; color:#fff; text-shadow:0 1px 2px #000; }
+  .blind-chip.t-big  { background:radial-gradient(circle at 35% 30%, #e0a23c, #8a5a13 70%); }
+  .blind-chip.t-boss { background:radial-gradient(circle at 35% 30%, #a44ab8, #4d1d63 70%); }
+  .stat { background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.12); border-radius:9px;
+          padding:5px 11px; font-size:12px; text-align:center; min-width:64px; }
+  .stat b { display:block; font-size:17px; }
+  .stat .lbl { color:var(--dim); font-size:10px; letter-spacing:.06em; }
+
+  /* 计分板: 筹码 × 倍率 = 分数 */
+  .scoreboard { display:flex; align-items:center; justify-content:center; gap:10px; margin:6px 0 14px; }
+  .orb { width:74px; height:74px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+         font-size:18px; font-weight:900; color:#fff; text-shadow:0 2px 3px rgba(0,0,0,.6);
+         box-shadow:0 5px 14px rgba(0,0,0,.45), inset 0 -8px 18px rgba(0,0,0,.35), inset 0 6px 12px rgba(255,255,255,.25); }
+  .orb.chips { background:radial-gradient(circle at 35% 30%, #6fc4ff, var(--chip) 60%, #005e8c); }
+  .orb.mult  { background:radial-gradient(circle at 35% 30%, #ff9c94, var(--mult) 60%, #a0231c); }
+  .op { font-size:26px; font-weight:900; color:#fff; text-shadow:0 2px 4px #000; }
+  .score-total { min-width:130px; text-align:center; font-size:26px; font-weight:900; color:#fff;
+                 text-shadow:0 2px 4px #000; background:rgba(0,0,0,.35); border-radius:10px; padding:14px 16px; }
+  .score-total small { display:block; font-size:10px; color:var(--dim); font-weight:600; letter-spacing:.08em; }
+
+  /* 牌 */
+  .playzone { min-height:112px; display:flex; gap:9px; justify-content:center; align-items:center;
+              margin-bottom:10px; border:2px dashed rgba(255,255,255,.14); border-radius:12px; padding:8px; }
+  .playzone .hint { color:rgba(255,255,255,.35); font-size:12px; }
+  .handrow { display:flex; gap:9px; justify-content:center; flex-wrap:wrap; padding:4px 0 2px; }
+  .card { width:64px; height:90px; border-radius:8px; background:linear-gradient(160deg,#fdfbf4,#e9e4d4);
+          position:relative; box-shadow:0 4px 10px rgba(0,0,0,.45); flex:0 0 auto;
+          font-family:Georgia,"Times New Roman",serif; transition:transform .12s; }
+  .card .rk { position:absolute; top:4px; left:6px; font-size:17px; font-weight:800; line-height:1; }
+  .card .st { position:absolute; top:20px; left:7px; font-size:13px; line-height:1; }
+  .card .big { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+               font-size:30px; opacity:.92; }
+  .card.red { color:#c0392b; } .card.blk { color:#242424; }
+  .card .tag { position:absolute; left:0; right:0; bottom:0; font-size:9px; font-weight:800; text-align:center;
+               color:#fff; padding:2px 0; border-radius:0 0 7px 7px; background:#555; font-family:"Segoe UI",sans-serif; }
+  .card.e-bonus { background:linear-gradient(160deg,#cfe6ff,#a8c8e8); }
+  .card.e-mult  { background:linear-gradient(160deg,#ffd2cb,#f3a49a); }
+  .card.e-wild  { background:linear-gradient(160deg,#ded1f5,#b9a7e0); }
+  .card.e-glass { background:linear-gradient(160deg,rgba(230,245,255,.85),rgba(190,220,240,.55)); }
+  .card.e-steel { background:linear-gradient(160deg,#e8ecf2,#aab6c4); }
+  .card.e-gold  { background:linear-gradient(160deg,#ffe9a8,#e8bd4a); }
+  .card.e-lucky { background:linear-gradient(160deg,#d8ffe0,#9fe0b4); }
+  .card.d-foil { box-shadow:0 4px 10px rgba(0,0,0,.45), 0 0 0 2px #58b6ff, 0 0 14px rgba(88,182,255,.55); }
+  .card.d-holo { box-shadow:0 4px 10px rgba(0,0,0,.45), 0 0 0 2px #e07bff, 0 0 14px rgba(224,123,255,.5); }
+  .card.d-poly { box-shadow:0 4px 10px rgba(0,0,0,.45), 0 0 0 2px transparent,
+                 0 0 16px rgba(255,120,120,.6), inset 0 0 0 2px #ffd76f, inset 0 0 0 4px #7fffa0; }
+  .card .seal { position:absolute; right:4px; bottom:4px; width:13px; height:13px; border-radius:50%;
+                border:1.5px solid rgba(255,255,255,.75); }
+  .seal.red{background:#d33;} .seal.blue{background:#39f;} .seal.gold{background:#e3b341;} .seal.purple{background:#9a5fd0;}
+  .card.rec { transform:translateY(-14px); box-shadow:0 8px 18px rgba(0,0,0,.5), 0 0 0 3px var(--good), 0 0 18px rgba(95,208,138,.7); }
+  .card.act { box-shadow:0 4px 10px rgba(0,0,0,.45), 0 0 0 3px var(--accent); }
+  .zone-label { text-align:center; color:rgba(255,255,255,.4); font-size:10px; letter-spacing:.15em; margin:2px 0 6px; }
+
+  /* 小丑/消耗品卡 */
+  .jokerrow { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; min-height:100px;
+              background:rgba(0,0,0,.22); border-radius:12px; padding:10px; }
+  .jcard { width:86px; height:116px; border-radius:9px; position:relative; padding:7px;
+           background:linear-gradient(165deg,#7d5bb5,#46246e); border:2px solid #2a163f;
+           box-shadow:0 4px 10px rgba(0,0,0,.45); display:flex; flex-direction:column; }
+  .jcard.ccard  { background:linear-gradient(165deg,#8a6a4f,#4a3220); border-color:#2b1c0f; }
+  .jcard.ccard.planet { background:linear-gradient(165deg,#4f6e8a,#22364a); border-color:#16222e; }
+  .jcard .jn { font-size:10.5px; font-weight:800; color:#ffe9b8; text-shadow:0 1px 2px #000; line-height:1.2; }
+  .jcard .jd { font-size:9px; color:#e8d9ff; margin-top:3px; flex:1; overflow:hidden; line-height:1.25; }
+  .jcard .jst { font-size:10px; font-weight:800; color:#fff; margin-top:2px; }
+  .jcard .jst .m { color:#ffb0a8; } .jcard .jst .c { color:#9fd4ff; }
+  .jcard.rec-j { box-shadow:0 4px 10px rgba(0,0,0,.45), 0 0 0 3px var(--good); }
+  .empty { color:rgba(255,255,255,.3); font-size:11px; align-self:center; }
+
+  /* 右栏 */
+  #recBody .big { font-size:14px; font-weight:800; margin:6px 0; color:#fff; }
+  .badge { display:inline-block; padding:2px 9px; border-radius:10px; font-size:11px; margin-right:6px; font-weight:700; }
+  .badge.ok { background:rgba(95,208,138,.16); color:var(--good); }
+  .badge.fb { background:rgba(224,108,108,.16); color:var(--bad); }
   .muted { color:var(--dim); font-size:12px; }
-  #legal { max-height:220px; overflow:auto; font-size:12px; }
+  #legal { max-height:180px; overflow:auto; font-size:12px; }
   #legal div { padding:3px 6px; border-bottom:1px dashed var(--line); color:var(--dim); }
-  #legal div.best { color:var(--good); }
+  #legal div.best { color:var(--good); font-weight:700; }
   table { width:100%; border-collapse:collapse; font-size:12px; }
   td,th { padding:4px 6px; border-bottom:1px solid var(--line); text-align:left; }
   th { color:var(--dim); font-weight:600; }
   .match { color:var(--good); } .diff { color:var(--bad); }
+  .snap { padding:7px 9px; border:1px solid var(--line); border-radius:8px; margin-bottom:7px;
+          cursor:pointer; font-size:12px; color:var(--dim); }
+  .snap:hover { border-color:var(--accent); }
+  .snap.active { border-color:var(--accent); color:var(--text); background:#1a212e; }
+  .snap .src { float:right; font-size:10px; color:var(--dim); }
 </style>
 </head>
 <body>
@@ -65,39 +136,57 @@
     <option value="heuristic">启发式(计分模拟)</option>
     <option value="model" disabled>真实模型(未接入)</option>
   </select>
-  <button id="recBtn">推荐</button>
+  <button id="recBtn" class="primary">推荐</button>
   <button id="runAll">跑整局</button>
   <span id="stats"></span>
 </header>
 
-<main>
-  <section class="panel" id="snapPanel">
-    <h3>决策点</h3>
-    <div id="snapList"><div class="muted">加载中…</div></div>
-  </section>
+<div class="layout">
+  <div>
+    <div class="panel table">
+      <div class="topbar">
+        <div class="blind-chip" id="blindChip">
+          <div class="nm" id="blindName">-</div>
+          <div class="tgt" id="blindTarget">-</div>
+        </div>
+        <div class="stat"><b id="stHands">-</b><span class="lbl">手牌次数</span></div>
+        <div class="stat"><b id="stDiscards">-</b><span class="lbl">弃牌次数</span></div>
+        <div class="stat"><b id="stMoney">-</b><span class="lbl">金钱</span></div>
+        <div class="stat"><b id="stAnte">-</b><span class="lbl">底注 / 局</span></div>
+        <div class="stat"><b id="stScored">-</b><span class="lbl">本盲注已得</span></div>
+      </div>
 
-  <section class="panel">
-    <h3>局面</h3>
-    <div class="blind">
-      <b id="blindName">-</b>
-      <span>目标 <span class="target" id="blindTarget">-</span></span>
-      <span>已得 <span id="blindScored">0</span></span>
-      <span>剩余 <span id="blindRemain">-</span></span>
+      <div class="scoreboard">
+        <div class="orb chips" id="orbChips">—</div>
+        <div class="op">×</div>
+        <div class="orb mult" id="orbMult">—</div>
+        <div class="op">=</div>
+        <div class="score-total" id="orbScore"><small>PROJ. SCORE</small>—</div>
+      </div>
+
+      <div class="zone-label">PLAY AREA</div>
+      <div class="playzone" id="playzone"><span class="hint">点「推荐」后,顾问要打的牌会浮到这里</span></div>
+
+      <div class="zone-label">HAND</div>
+      <div class="handrow" id="hand"></div>
+
+      <div class="zone-label" style="margin-top:12px">JOKERS</div>
+      <div class="jokerrow" id="jokers"></div>
+
+      <div class="zone-label" style="margin-top:8px">CONSUMABLES</div>
+      <div class="jokerrow" id="consumables" style="min-height:64px"></div>
     </div>
-    <div class="row" id="resRow"></div>
-    <h3 style="margin-top:12px">手牌</h3>
-    <div class="cards" id="hand"></div>
-    <h3 style="margin-top:12px">小丑</h3>
-    <div class="row" id="jokers"></div>
-    <h3 style="margin-top:12px">消耗品</h3>
-    <div class="row" id="consumables"></div>
-  </section>
+  </div>
 
-  <section>
-    <div class="panel" id="recPanel">
+  <div>
+    <div class="panel">
+      <h3>决策点</h3>
+      <div id="snapList"><div class="muted">加载中…</div></div>
+    </div>
+    <div class="panel" style="margin-top:12px">
       <h3>优秀操作推荐</h3>
       <div id="recBody"><div class="muted">点「推荐」或「跑整局」。</div></div>
-      <h3 style="margin-top:12px">合法动作包络</h3>
+      <h3 style="margin-top:12px">合法动作包络(TOP-10)</h3>
       <div id="legal"></div>
     </div>
     <div class="panel" style="margin-top:12px">
@@ -105,103 +194,200 @@
       <table id="cmpTable"><thead><tr><th>决策点</th><th>顾问</th><th>玩家</th></tr></thead>
         <tbody></tbody></table>
     </div>
-  </section>
-</main>
+  </div>
+</div>
 
 <script>
+"use strict";
 const $ = id => document.getElementById(id);
 let GAMES = [], CURRENT = null, LAST = null;
 
 async function jget(u){ const r = await fetch(u); if(!r.ok) throw new Error(await r.text()); return r.json(); }
 async function jpost(u,b){ const r = await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); if(!r.ok) throw new Error(await r.text()); return r.json(); }
 
-async function boot(){
-  const h = await jget('/api/health');
-  GAMES = h.games;
-  $('gameSel').innerHTML = GAMES.map(g=>`<option value="${g.name}">${g.name} (${g.size_kb}K)</option>`).join('');
-  $('stats').textContent = `${GAMES.length} 快照 · bridge: ${h.bridge_dir}`;
-  if(GAMES.length){ await loadGame(GAMES[0].name); }
+/* XSS 安全:一律 textContent 建节点 */
+function el(tag, cls, text){
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined && text !== null) n.textContent = String(text);
+  return n;
 }
-
-async function loadGame(name){
-  CURRENT = name;
-  const s = await jget('/api/game?name='+encodeURIComponent(name));
-  render(s);
-  $('recBody').innerHTML = '<div class="muted">点「推荐」。</div>';
-  $('legal').innerHTML = '';
-}
-
+function suitSym(s){ return {S:'♠',H:'♥',D:'♦',C:'♣'}[s]||s; }
+const SUIT_RED = s => s==='H'||s==='D';
 const ENH_CN = {bonus:'筹码',mult:'倍率',wild:'万能',glass:'玻璃',steel:'钢铁',gold:'黄金',lucky:'幸运'};
 const ED_CN = {foil:'铝箔',holo:'全息',poly:'多彩'};
 
+async function boot(){
+  const h = await jget('/api/health');
+  GAMES = h.games;
+  const sel = $('gameSel');
+  while (sel.firstChild) sel.removeChild(sel.firstChild);
+  GAMES.forEach(g=>{
+    const o = el('option', null, `${g.name} (${g.size_kb}K${g.source? ' · '+g.source:''})`);
+    o.value = g.name; sel.appendChild(o);
+  });
+  $('stats').textContent = `${GAMES.length} 快照 · ${h.bridge_dir}`;
+  renderSnapList();
+  if(GAMES.length) await loadGame(GAMES[0].name);
+}
+
+function renderSnapList(){
+  const list = $('snapList'); while (list.firstChild) list.removeChild(list.firstChild);
+  if (!GAMES.length){ list.appendChild(el('div','muted','(无快照)')); return; }
+  GAMES.forEach(g=>{
+    const d = el('div', 'snap' + (g.name===CURRENT ? ' active' : ''));
+    d.appendChild(el('span', null, g.name));
+    d.appendChild(el('span','src', g.source || ''));
+    d.onclick = () => loadGame(g.name);
+    list.appendChild(d);
+  });
+}
+
+async function loadGame(name){
+  CURRENT = name; LAST = null;
+  const s = await jget('/api/game?name='+encodeURIComponent(name));
+  render(s);
+  renderSnapList();
+  const rb = $('recBody');
+  while (rb.firstChild) rb.removeChild(rb.firstChild);
+  rb.appendChild(el('div','muted','点「推荐」。'));
+  const lg = $('legal'); while (lg.firstChild) lg.removeChild(lg.firstChild);
+}
+
 function render(s){
+  // 盲注筹码
   $('blindName').textContent = s.blind.name;
   $('blindTarget').textContent = s.blind.chips;
-  $('blindScored').textContent = s.blind.scored;
-  $('blindRemain').textContent = Math.max(0, s.blind.chips - s.blind.scored);
-  $('resRow').innerHTML =
-    `<span class="chip">手牌次数 <b>${s.hands_left}</b></span>`+
-    `<span class="chip">弃牌次数 <b>${s.discards_left}</b></span>`+
-    `<span class="chip">金钱 <b>$${s.money}</b></span>`+
-    `<span class="chip">底注 <b>${s.ante}</b> · 局 <b>${s.round}</b></span>`;
-  const recIdx = new Set(LAST && LAST.candidate_id.startsWith('play:')
-      ? LAST.candidate_id.slice(5).split('-').map(Number) : []);
+  const chip = $('blindChip');
+  chip.className = 'blind-chip' + (s.blind.type==='big' ? ' t-big' : s.blind.type==='boss' ? ' t-boss' : '');
+  $('stHands').textContent = s.hands_left;
+  $('stDiscards').textContent = s.discards_left;
+  $('stMoney').textContent = '$'+s.money;
+  $('stAnte').textContent = `${s.ante} / ${s.round}`;
+  $('stScored').textContent = s.blind.scored;
+
+  // 算分板
+  const recIdx = new Set(LAST && LAST.indices ? LAST.indices : []);
   const actIdx = new Set(s.actual ? s.actual.cards : []);
-  $('hand').innerHTML = s.hand.map((c,i)=>{
-    const cls = ['card', c.edition?('ed-'+c.edition):'',
-                 recIdx.has(i)?'rec':'', actIdx.has(i)?'act':''].join(' ');
-    const color = (c.suit==='H'||c.suit==='D') ? '#c0392b' : '#222';
-    const enh = c.enhancement ? `<span class="enh">${ENH_CN[c.enhancement]||c.enhancement}</span>` : '';
-    const ed = c.edition ? `<span class="enh" style="top:3px;bottom:auto">${ED_CN[c.edition]||c.edition}</span>` : '';
-    const seal = c.seal ? `<span class="enh" style="top:3px;bottom:auto;left:3px;right:auto;background:#6c5ce7">${c.seal}</span>` : '';
-    return `<div class="${cls}" style="color:${color}" title="${c.rank}${c.suit}">${c.rank}${suitSym(c.suit)}${enh}${ed}${seal}</div>`;
-  }).join('');
-  $('jokers').innerHTML = s.jokers.length
-    ? s.jokers.map(j=>`<span class="chip" title="${JSON.stringify(j.extra)}"><b>${j.name}</b>${stat(j)}</span>`).join('')
-    : '<span class="muted">无</span>';
-  $('consumables').innerHTML = s.consumables.length
-    ? s.consumables.map(c=>`<span class="chip"><b>${c.name}</b>(${c.type})</span>`).join('')
-    : '<span class="muted">无</span>';
-}
-function suitSym(s){ return {S:'♠',H:'♥',D:'♦',C:'♣'}[s]||s; }
-function stat(j){
-  const p=[]; if(j.chips) p.push('+'+j.chips+' 筹码'); if(j.mult) p.push('+'+j.mult+' 倍率');
-  if(j.xmult && j.xmult!==1) p.push('×'+j.xmult);
-  return p.length? ' '+p.join(' '):'';
+  $('orbChips').textContent = LAST && LAST.chips != null ? LAST.chips : '—';
+  $('orbMult').textContent  = LAST && LAST.mult  != null ? LAST.mult  : '—';
+  $('orbScore').textContent = '';
+  $('orbScore').appendChild(el('small', null, 'PROJ. SCORE'));
+  $('orbScore').appendChild(document.createTextNode(
+    LAST && LAST.expected_score != null ? Math.round(LAST.expected_score) : '—'));
+
+  // 手牌
+  const hand = $('hand'); while (hand.firstChild) hand.removeChild(hand.firstChild);
+  s.hand.forEach((c,i)=>{
+    const d = el('div', 'card ' + (SUIT_RED(c.suit)?'red':'blk')
+      + (c.enhancement? ' e-'+c.enhancement : '')
+      + (c.edition? ' d-'+c.edition : '')
+      + (recIdx.has(i)? ' rec':'') + (actIdx.has(i)? ' act':''));
+    d.appendChild(el('div','rk', c.rank));
+    d.appendChild(el('div','st', suitSym(c.suit)));
+    d.appendChild(el('div','big', suitSym(c.suit)));
+    if (c.enhancement) d.appendChild(el('div','tag', ENH_CN[c.enhancement]||c.enhancement));
+    if (c.edition && !c.enhancement) d.appendChild(el('div','tag', ED_CN[c.edition]||c.edition));
+    if (c.seal) d.appendChild(el('div','seal '+c.seal));
+    d.title = `${c.rank}${suitSym(c.suit)}${c.enhancement? ' · '+c.enhancement:''}${c.edition? ' · '+c.edition:''}${c.seal? ' · '+c.seal+' seal':''}`;
+    hand.appendChild(d);
+  });
+
+  // 打牌区:推荐要打的牌
+  const pz = $('playzone'); while (pz.firstChild) pz.removeChild(pz.firstChild);
+  if (LAST && LAST.indices && LAST.action_type === 'play'){
+    LAST.indices.forEach(i=>{
+      const c = s.hand[i]; if (!c) return;
+      const d = el('div', 'card ' + (SUIT_RED(c.suit)?'red':'blk')
+        + (c.enhancement? ' e-'+c.enhancement : '') + (c.edition? ' d-'+c.edition : ''));
+      d.appendChild(el('div','rk', c.rank));
+      d.appendChild(el('div','st', suitSym(c.suit)));
+      d.appendChild(el('div','big', suitSym(c.suit)));
+      if (c.enhancement) d.appendChild(el('div','tag', ENH_CN[c.enhancement]||c.enhancement));
+      pz.appendChild(d);
+    });
+  } else if (LAST && LAST.action_type === 'discard'){
+    pz.appendChild(el('span','hint', `建议弃掉 ${(LAST.indices||[]).map(i=>s.hand[i] && (s.hand[i].rank+suitSym(s.hand[i].suit))).join(' ')},再抽新牌`));
+  } else if (LAST && LAST.action_type === 'use_consumable'){
+    pz.appendChild(el('span','hint', '建议先使用消耗品再行动'));
+  } else {
+    pz.appendChild(el('span','hint','点「推荐」后,顾问要打的牌会浮到这里'));
+  }
+
+  // 小丑卡
+  const js = $('jokers'); while (js.firstChild) js.removeChild(js.firstChild);
+  if (!s.jokers.length) js.appendChild(el('span','empty','(无小丑)'));
+  s.jokers.forEach(j=>{
+    const d = el('div','jcard');
+    d.appendChild(el('div','jn', j.name));
+    const st = el('div','jst');
+    if (j.chips) st.appendChild(el('span','c', `+${j.chips} 筹码 `));
+    if (j.mult)  st.appendChild(el('span','m', `+${j.mult} 倍率 `));
+    if (j.xmult && j.xmult !== 1) st.appendChild(el('span','m', `×${j.xmult}`));
+    d.appendChild(st);
+    d.appendChild(el('div','jd', j.counter != null ? `累计: ${j.counter}` : ''));
+    d.title = j.name;
+    js.appendChild(d);
+  });
+
+  // 消耗品
+  const cs = $('consumables'); while (cs.firstChild) cs.removeChild(cs.firstChild);
+  if (!s.consumables.length) cs.appendChild(el('span','empty','(无消耗品)'));
+  s.consumables.forEach(c=>{
+    const d = el('div','jcard ccard' + (c.type==='planet'?' planet':''));
+    d.appendChild(el('div','jn', c.name));
+    d.appendChild(el('div','jd', c.type==='planet'?'行星牌(升级牌型)':'塔罗牌'));
+    cs.appendChild(d);
+  });
 }
 
 async function recommend(){
   if(!CURRENT) return;
-  $('recBody').innerHTML = '<div class="muted">计算中…</div>';
+  const rb = $('recBody'); while (rb.firstChild) rb.removeChild(rb.firstChild);
+  rb.appendChild(el('div','muted','计算中…'));
   try{
     const r = await jpost('/api/recommend',{name:CURRENT, kind:$('provSel').value});
-    LAST = r; render(await jget('/api/game?name='+encodeURIComponent(CURRENT)));
-    $('recBody').innerHTML =
-      `<div class="big">${r.description}</div>`+
-      `<div><span class="badge ${r.is_fallback?'fb':'ok'}">${r.is_fallback?'回落':'模型'}</span>`+
-      `<span class="muted">置信度 ${(r.confidence*100).toFixed(0)}% · ${r.candidate_id}</span></div>`+
-      (r.expected_score!=null? `<div class="muted">模拟得分 ${Math.round(r.expected_score)} · ${r.clears_blind?'足够过关':'未达目标'}</div>`:'')+
-      (r.fallback_reason? `<div class="muted">回落原因: ${r.fallback_reason}</div>`:'');
-    $('legal').innerHTML = r.legal_actions.map(a=>
-      `<div class="${a.id===r.candidate_id?'best':''}">[${a.action_type}] ${a.description}</div>`).join('');
-  }catch(e){ $('recBody').innerHTML = `<div class="muted">失败: ${e.message}</div>`; }
+    LAST = r;
+    render(await jget('/api/game?name='+encodeURIComponent(CURRENT)));
+    const big = el('div','big', r.description);
+    const meta = el('div');
+    meta.appendChild(el('span', 'badge '+(r.is_fallback?'fb':'ok'), r.is_fallback?'回落':'模型'));
+    meta.appendChild(el('span','muted', `置信度 ${(r.confidence*100).toFixed(0)}% · ${r.candidate_id}`));
+    rb.appendChild(big); rb.appendChild(meta);
+    if (r.expected_score != null){
+      rb.appendChild(el('div','muted',
+        `模拟得分 ${Math.round(r.expected_score)} · ${r.clears_blind?'足够过关':'未达目标'}`));
+    }
+    if (r.fallback_reason) rb.appendChild(el('div','muted', '回落原因: '+r.fallback_reason));
+    const lg = $('legal'); while (lg.firstChild) lg.removeChild(lg.firstChild);
+    r.legal_actions.forEach(a=>{
+      const row = el('div', a.id===r.candidate_id?'best':null, `[${a.action_type}] ${a.description}`);
+      lg.appendChild(row);
+    });
+  }catch(e){ const rb2=$('recBody'); while(rb2.firstChild) rb2.removeChild(rb2.firstChild);
+    rb2.appendChild(el('div','muted','失败: '+e.message)); }
 }
 
 async function runAll(){
-  $('recBody').innerHTML = '<div class="muted">整局计算中…</div>';
+  const rb = $('recBody'); while (rb.firstChild) rb.removeChild(rb.firstChild);
+  rb.appendChild(el('div','muted','整局计算中…'));
   try{
     const r = await jpost('/api/replay',{kind:$('provSel').value});
     const tb = $('cmpTable').querySelector('tbody');
-    tb.innerHTML = r.reports.map(x=>{
-      const m = x.human && x.advisor === x.human;
-      return `<tr><td>${x.name}</td><td>${x.advisor}</td>`+
-             `<td class="${m?'match':(x.human?'diff':'muted')}">${x.human||'(未记录)'}</td></tr>`;
-    }).join('');
-    const n = r.reports.length;
-    $('recBody').innerHTML = `<div class="big">整局完成:${n} 个决策点</div>`+
-      `<div class="muted">逐点对比见下表;单点详情回到左侧点选。</div>`;
-    $('stats').textContent = `整局 ${n} 点 · ${new Date().toLocaleTimeString()}`;
-  }catch(e){ $('recBody').innerHTML = `<div class="muted">失败: ${e.message}</div>`; }
+    while (tb.firstChild) tb.removeChild(tb.firstChild);
+    r.reports.forEach(x=>{
+      const tr = document.createElement('tr');
+      tr.appendChild(el('td',null,x.name));
+      tr.appendChild(el('td',null,x.advisor));
+      const hcls = x.human ? (x.advisor===x.human?'match':'diff') : 'muted';
+      tr.appendChild(el('td',hcls, x.human || '(未记录)'));
+      tb.appendChild(tr);
+    });
+    rb.appendChild(el('div','big', `整局完成:${r.reports.length} 个决策点`));
+    rb.appendChild(el('div','muted','逐点对比见下表;单点详情回到左侧点选。'));
+    $('stats').textContent = `整局 ${r.reports.length} 点 · ${new Date().toLocaleTimeString()}`;
+  }catch(e){ const rb2=$('recBody'); while(rb2.firstChild) rb2.removeChild(rb2.firstChild);
+    rb2.appendChild(el('div','muted','失败: '+e.message)); }
 }
 
 $('gameSel').onchange = e => loadGame(e.target.value);

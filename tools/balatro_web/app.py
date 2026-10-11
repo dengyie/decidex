@@ -107,6 +107,7 @@ async def _recommend(name: str, kind: str) -> Dict[str, Any]:
     state = get_state(name)
     advisor = get_advisor(kind)
     rec = await advisor.recommend(state)
+    chosen = next((a for a in rec.legal_actions if a["id"] == rec.candidate_id), None)
     return {
         "log": name,
         "candidate_id": rec.candidate_id,
@@ -118,6 +119,9 @@ async def _recommend(name: str, kind: str) -> Dict[str, Any]:
         "is_fallback": rec.is_fallback,
         "fallback_reason": rec.fallback_reason,
         "distribution": rec.distribution,
+        "indices": (chosen or {}).get("indices"),
+        "chips": (chosen or {}).get("chips"),
+        "mult": (chosen or {}).get("mult"),
         "legal_actions": rec.legal_actions,
     }
 

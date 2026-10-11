@@ -7,6 +7,7 @@ import pytest
 
 from decidex.balatro import (
     BalatroAdvisor,
+    Blind,
     BalatroState,
     enumerate_legal_actions,
     choose_safe_default,
@@ -115,3 +116,39 @@ async def test_real_replay_pairs_human_action():
     rec = await advisor.recommend(pres[0])
     assert rec.candidate_id == "play:0-1-2-3-4"           # matches the human
     advisor.close()
+
+
+def test_weak_hand_still_sees_plays_in_envelope():
+    """P1 回归: 低底注弱牌时,最佳出牌必须仍高于所有弃牌,不被 top_k 剪掉。"""
+    st = BalatroState(
+        hand=plain([("2", "H"), ("5", "D"), ("9", "C"), ("3", "S"),
+                    ("6", "H"), ("J", "S"), ("4", "D"), ("K", "H")]),
+        jokers=[],
+        blind=Blind(name="Small Blind", type="small", chips=300, scored=0),
+        hands_left=4, discards_left=3,
+    )
+    acts = enumerate_legal_actions(st)
+    top = [c.candidate_id for c in sorted(acts, key=lambda c: -c.heuristic_score)[:10]]
+    plays = [c for c in acts if c.metadata["action_type"] == "play"]
+    best_play = max(plays, key=lambda c: c.heuristic_score)
+    assert best_play.candidate_id in top, "最佳出牌被弃牌挤出 top-10"
+    best_discard = max((c for c in acts if c.metadata["action_type"] == "discard"),
+                       key=lambda c: c.heuristic_score)
+    assert best_play.heuristic_score > best_discard.heuristic_score
+
+
+def test_hopeless_hand_prefers_discards():
+    """P1 回归: 无论怎么打都到不了目标时,弃牌应排到出牌前面。"""
+    st = BalatroState(
+        hand=plain([("2", "H"), ("3", "D"), ("5", "C"), ("7", "S"),
+                    ("8", "H"), ("9", "D"), ("4", "C"), ("6", "S")]),
+        jokers=[],
+        blind=Blind(name="Boss", type="boss", chips=100000, scored=0),
+        hands_left=1, discards_left=3,
+    )
+    acts = enumerate_legal_actions(st)
+    best_discard = max((c for c in acts if c.metadata["action_type"] == "discard"),
+                       key=lambda c: c.heuristic_score)
+    best_play = max((c for c in acts if c.metadata["action_type"] == "play"),
+                    key=lambda c: c.heuristic_score)
+    assert best_discard.heuristic_score > best_play.heuristic_score

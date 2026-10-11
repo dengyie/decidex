@@ -123,6 +123,8 @@ def simulate_play(
     n_by_rank: Dict[str, int] = {}
     for c in played:
         n_by_rank[c.rank] = n_by_rank.get(c.rank, 0) + 1
+    played_set = {id(c) for c in played}
+    held_cards = [c for c in state.hand if id(c) not in played_set]
     ctx = {
         "hand_type": hand_type,
         "n_played": len(played),
@@ -132,7 +134,9 @@ def simulate_play(
         "money": state.money,
         "n_jokers": len(state.jokers),
         "cards_in_deck": 52 - 8,   # vanilla full-deck approximation
-        "all_played_spades_clubs": all(set(c.suits()) <= {"S", "C"} for c in played) if played else False,
+        # Blackboard: ALL cards *held in hand* (not the played ones) spades/clubs.
+        "all_played_spades_clubs": bool(held_cards) and all(
+            set(c.suits()) <= {"S", "C"} for c in held_cards),
     }
 
     known = [KNOWN_JOKERS.get(j.name, {}) for j in state.jokers]
