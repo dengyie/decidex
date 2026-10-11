@@ -44,6 +44,9 @@ from decidex.providers.mock import MockReplayProvider  # noqa: E402
 logging.getLogger().setLevel(logging.ERROR)
 
 BRIDGE_DIR = Path(os.environ.get("BALATRO_BRIDGE_DIR", ROOT / "data" / "balatro_bridge"))
+VNC_TARGET = os.environ.get("BALATRO_VNC_TARGET", "10.144.144.8::5900")
+VNC_PASSWORD = os.environ.get("BALATRO_VNC_PASSWORD", "")
+FRAME_PATH = Path(os.environ.get("BALATRO_FRAME_PATH", "/tmp/balatro_live_frame.jpg"))
 ADVISOR: Optional[BalatroAdvisor] = None
 _CACHE: Dict[str, Any] = {}
 
@@ -179,6 +182,12 @@ class Handler(BaseHTTPRequestHandler):
             if self.path in ("/", "/index.html"):
                 page = (Path(__file__).parent / "index.html").read_bytes()
                 return self._send(200, page, "text/html; charset=utf-8")
+            if self.path.startswith("/api/frame.jpg"):
+                if not FRAME_PATH.exists():
+                    return self._json({"error": "no frame yet"}, 503)
+                data = FRAME_PATH.read_bytes()
+                self._send(200, data, "image/jpeg")
+                return
             if self.path == "/api/health":
                 return self._json({
                     "ok": True, "engine": "balatro-advisor",
@@ -218,6 +227,34 @@ class Handler(BaseHTTPRequestHandler):
 _LOOP = None
 
 
+def _frame_worker() -> None:
+    """Connect to the live game's VNC server and keep the latest frame JPEG
+    on disk so /api/frame.jpg can serve the real game feed. One persistent
+    client, ~2 fps, auto-reconnect on failure."""
+    global _FRAME_MTIME
+    while True:
+        client = None
+        try:
+            from vncdotool import api
+            client = api.connect(VNC_TARGET, password=VNC_PASSWORD or None)
+            logging.getLogger().info("live feed: connected to %s", VNC_TARGET)
+            while True:
+                client.captureScreen(str(FRAME_PATH))
+                if FRAME_PATH.exists():
+                    mtime = FRAME_PATH.stat().st_mtime
+                    if mtime != _FRAME_MTIME:
+                        _FRAME_MTIME = mtime
+                time.sleep(0.45)
+        except Exception as e:  # noqa: BLE001 - keep the feed alive forever
+            logging.getLogger().warning("live feed: %s; reconnecting", e)
+            try:
+                if client is not None:
+                    client.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(2.0)
+
+
 def main():
     global _LOOP
     ap = argparse.ArgumentParser(description="DecideX Balatro advisor web viewer")
@@ -229,6 +266,7 @@ def main():
     _LOOP = asyncio.new_event_loop()
     threading.Thread(target=_LOOP.run_forever, daemon=True).start()
     time.sleep(0.1)
+    threading.Thread(target=_frame_worker, daemon=True).start()
 
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     srv.daemon_threads = True

@@ -28,6 +28,14 @@
   button.primary { background:var(--accent); color:#20160a; font-weight:700; border:none; }
   #stats { color:var(--dim); font-size:12px; margin-left:auto; }
   .layout { display:grid; grid-template-columns: 1fr 340px; gap:12px; padding:12px; max-width:1440px; margin:0 auto; }
+  .live-wrap { max-width:1440px; margin:0 auto; padding:12px 12px 0; }
+  .live-panel { padding:10px; }
+  .live-panel img { display:block; width:100%; max-height:62vh; object-fit:contain;
+                    background:#000; border-radius:8px; }
+  .live-dot { display:inline-block; width:9px; height:9px; border-radius:50%;
+              background:#ff4d4d; margin-right:6px; animation:pulse 1.4s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
+  .live-panel img.down { display:none; }
   @media (max-width: 1000px){ .layout { grid-template-columns: 1fr; } }
   .panel { background:rgba(12,16,24,.88); border:1px solid var(--line); border-radius:12px; padding:12px; }
   .panel h3 { margin:0 0 8px; font-size:12px; color:var(--accent); letter-spacing:.08em; text-transform:uppercase; }
@@ -140,6 +148,13 @@
   <button id="runAll">跑整局</button>
   <span id="stats"></span>
 </header>
+
+<div class="live-wrap">
+  <div class="panel live-panel">
+    <h3><span class="live-dot"></span> 游戏实况 · LIVE(广州CVM 真机)</h3>
+    <img id="liveFeed" src="/api/frame.jpg" alt="live" onerror="this.classList.add('down')">
+  </div>
+</div>
 
 <div class="layout">
   <div>
@@ -395,6 +410,10 @@ async function runAll(){
     rb2.appendChild(el('div','muted','失败: '+e.message)); }
 }
 
+setInterval(() => {
+  const img = $('liveFeed');
+  if (img && document.visibilityState === 'visible') img.src = '/api/frame.jpg?t=' + Date.now();
+}, 600);
 $('gameSel').onchange = e => loadGame(e.target.value);
 $('recBtn').onclick = recommend;
 $('runAll').onclick = runAll;
