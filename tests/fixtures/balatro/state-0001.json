@@ -1,0 +1,21 @@
+{
+  "hand": [
+    {"rank": "A", "suit": "S", "enhancement": null, "edition": null, "seal": null},
+    {"rank": "K", "suit": "S", "enhancement": null, "edition": null, "seal": null},
+    {"rank": "Q", "suit": "S", "enhancement": null, "edition": null, "seal": null},
+    {"rank": "J", "suit": "S", "enhancement": null, "edition": null, "seal": null},
+    {"rank": "10", "suit": "S", "enhancement": null, "edition": null, "seal": null},
+    {"rank": "7", "suit": "H", "enhancement": null, "edition": null, "seal": null},
+    {"rank": "7", "suit": "D", "enhancement": null, "edition": null, "seal": null},
+    {"rank": "2", "suit": "C", "enhancement": null, "edition": null, "seal": null}
+  ],
+  "blind": {"name": "The Pillar", "type": "big", "chips": 600, "scored": 0},
+  "jokers": [
+    {"name": "Joker", "chips": 0, "mult": 4, "xmult": 1, "extra": {}},
+    {"name": "Greedy Joker", "chips": 0, "mult": 0, "xmult": 1, "extra": {"money": 3}}
+  ],
+  "consumables": [{"name": "The Hermit", "type": "tarot"}],
+  "hands_left": 4, "discards_left": 3, "hand_size": 8,
+  "money": 8, "ante": 2, "round": 5,
+  "actual": null
+}

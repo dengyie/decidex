@@ -4,6 +4,7 @@ DecideX: High-performance decision layer foundation for System One AI models.
 
 from decidex.engine import DecisionEngine
 from decidex.guards import CalibratedDecisionGuard, StateSettlementGuard
+from decidex.hearthstone import BoardState, HandCard, HearthstoneAdvisor, Hero, Minion, Recommendation
 from decidex.lookahead import LookaheadEvaluator
 from decidex.memory import MemoryHarness
 from decidex.planners import (
@@ -42,6 +43,12 @@ __all__ = [
     "MemoryHarness",
     "CalibratedDecisionGuard",
     "StateSettlementGuard",
+    "HearthstoneAdvisor",
+    "Recommendation",
+    "BoardState",
+    "HandCard",
+    "Hero",
+    "Minion",
     "CandidatePruner",
     "LookaheadEvaluator",
     "SequentialTurnPlanner",

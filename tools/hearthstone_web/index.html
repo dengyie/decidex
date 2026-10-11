@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DecideX · 炉石顾问 优秀操作回放</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2430; --line:#2b3644;
+    --gold:#e3b341; --gold2:#f0c860; --txt:#e6edf3; --dim:#8b98a5;
+    --green:#3fb950; --red:#f85149; --blue:#58a6ff; --purple:#a371f7;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 50% -10%,#1b2432 0%,var(--bg) 60%);
+       color:var(--txt);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;}
+  a{color:var(--blue)}
+  header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+         padding:14px 20px;border-bottom:1px solid var(--line);background:rgba(13,17,23,.85);
+         position:sticky;top:0;z-index:10;backdrop-filter:blur(8px)}
+  .logo{font-size:18px;font-weight:700;letter-spacing:.5px}
+  .logo b{color:var(--gold)}
+  .badge{font-size:12px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
+  .badge.on{color:var(--green);border-color:#1f6f34;background:#0f2417}
+  .grow{flex:1}
+  select,button{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
+                border-radius:8px;padding:7px 12px;font-size:13px;cursor:pointer}
+  button.primary{background:linear-gradient(180deg,var(--gold2),var(--gold));color:#20160a;font-weight:700;border:none}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .wrap{display:grid;grid-template-columns:270px minmax(380px,1fr) 420px;gap:14px;padding:14px 20px;align-items:start}
+  @media(max-width:1100px){.wrap{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .card h2{margin:0;padding:10px 14px;font-size:13px;letter-spacing:.6px;text-transform:uppercase;
+           color:var(--dim);border-bottom:1px solid var(--line);background:var(--panel2)}
+  .card .body{padding:12px 14px}
+  /* decision list */
+  .turns{max-height:70vh;overflow:auto}
+  .turn{padding:9px 14px;border-bottom:1px solid var(--line);cursor:pointer;display:flex;
+        align-items:center;gap:10px;font-size:13px}
+  .turn:hover{background:var(--panel2)}
+  .turn.sel{background:#20303f;box-shadow:inset 3px 0 0 var(--gold)}
+  .turn .t{font-weight:700;color:var(--gold);min-width:34px}
+  .turn .m{color:var(--dim);font-size:12px}
+  .dot{margin-left:auto;width:9px;height:9px;border-radius:50%}
+  .dot.ok{background:var(--green)} .dot.no{background:var(--red)} .dot.na{background:var(--dim)}
+  /* board */
+  .side{margin-bottom:14px}
+  .side .label{font-size:11px;letter-spacing:.5px;color:var(--dim);text-transform:uppercase;margin-bottom:6px}
+  .heroRow{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;
+           border:1px solid var(--line);background:linear-gradient(180deg,#1a2230,#141a24)}
+  .heroRow.opp{background:linear-gradient(180deg,#2a1a1f,#1a1215)}
+  .portrait{width:44px;height:44px;border-radius:50%;display:grid;place-items:center;font-weight:800;
+            background:#0b0f14;border:2px solid var(--line);color:var(--gold);font-size:16px}
+  .heroRow.opp .portrait{color:#ff9d9d}
+  .hp{font-size:20px;font-weight:800;color:var(--red)}
+  .atk{font-size:13px;color:var(--gold)}
+  .minions{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;min-height:8px}
+  .minion{width:74px;border-radius:9px;border:1px solid var(--line);background:#0f1520;padding:6px 6px 4px;
+          text-align:center;position:relative}
+  .minion .nm{font-size:11px;line-height:1.2;height:26px;overflow:hidden;color:#cdd9e5}
+  .minion .stats{display:flex;justify-content:space-between;margin-top:3px;font-weight:800;font-size:13px}
+  .minion .a{color:var(--gold)} .minion .h{color:var(--red)}
+  .minion.taunt{border-color:#6b5a2a;box-shadow:0 0 0 1px #6b5a2a inset}
+  .minion.sick{opacity:.55}
+  .hand{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  .hcard{width:80px;border-radius:9px;border:1px solid #2f4a6b;background:linear-gradient(180deg,#12202f,#0d1620);
+         padding:6px;text-align:center}
+  .hcard .nm{font-size:11px;height:26px;overflow:hidden;color:#bfe0ff}
+  .hcard .cost{position:absolute;margin-top:-2px;margin-left:-2px;width:18px;height:18px;border-radius:50%;
+               background:var(--blue);color:#04101f;font-weight:800;font-size:12px;display:grid;place-items:center}
+  .hcard .ty{font-size:10px;color:var(--dim);margin-top:3px}
+  .mana{display:flex;gap:3px;align-items:center;margin:2px 0 10px}
+  .crystal{width:11px;height:11px;border-radius:50%;background:#123a63;border:1px solid #2b6fb0}
+  .crystal.full{background:#58a6ff;box-shadow:0 0 6px #58a6ff88}
+  /* recommendation */
+  .rec{font-size:15px}
+  .rec .big{font-size:16px;font-weight:700;color:var(--gold2);word-break:break-word}
+  .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);
+        color:var(--dim);margin-left:6px}
+  .pill.fb{color:var(--gold);border-color:#6b5a2a;background:#241d0c}
+  .pill.model{color:var(--purple);border-color:#4b3a78;background:#1b1530}
+  .conf{margin:10px 0}
+  .bar{height:8px;border-radius:6px;background:#0b0f14;border:1px solid var(--line);overflow:hidden}
+  .bar>i{display:block;height:100%;background:linear-gradient(90deg,#2ea043,#3fb950)}
+  .cmp{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0}
+  .cmp .box{border:1px solid var(--line);border-radius:9px;padding:8px 10px;background:#101620}
+  .cmp .box .h{font-size:11px;color:var(--dim);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px}
+  .cmp .box .v{font-size:12.5px;word-break:break-word}
+  .verdict{margin-top:6px;font-weight:700}
+  .verdict.ok{color:var(--green)} .verdict.no{color:var(--red)}
+  .env{max-height:230px;overflow:auto;border-top:1px solid var(--line);margin-top:10px}
+  .opt{display:flex;gap:8px;padding:6px 4px;border-bottom:1px solid #1d2632;font-size:12px;align-items:baseline}
+  .opt .tag{font-size:10px;color:var(--dim);min-width:66px}
+  .opt.pick{background:#152a1a;box-shadow:inset 2px 0 0 var(--green)}
+  .opt .id{color:#9fb0c0;word-break:break-all}
+  .stat{display:flex;gap:18px;padding:10px 14px;flex-wrap:wrap}
+  .stat .k{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+  .stat .v{font-size:20px;font-weight:800}
+  .muted{color:var(--dim)}
+  .spin{display:inline-block;width:13px;height:13px;border:2px solid #ffffff33;border-top-color:var(--gold);
+        border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .note{font-size:12px;color:var(--dim);padding:0 20px 18px}
+  code{background:#0b0f14;border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">DecideX · <b>炉石顾问</b> 优秀操作回放</div>
+  <span id="provBadge" class="badge">provider: —</span>
+  <span id="hsBadge" class="badge">hslog: —</span>
+  <div class="grow"></div>
+  <label class="muted" style="font-size:12px">对局</label>
+  <select id="gameSel"></select>
+  <label class="muted" style="font-size:12px">引擎</label>
+  <select id="provSel">
+    <option value="heuristic">启发式（离线·秒出）</option>
+    <option value="model">真实模型（Jev 网关）</option>
+  </select>
+  <button class="primary" id="runAll">跑整局</button>
+</header>
+
+<div class="wrap">
+  <!-- LEFT: decision points -->
+  <div class="card">
+    <h2>决策点</h2>
+    <div class="body stat" id="stats" style="padding:10px 14px">
+      <div><div class="k">决策点</div><div class="v" id="sCount">–</div></div>
+      <div><div class="k">一致率</div><div class="v" id="sAgree">–</div></div>
+      <div><div class="k">保底</div><div class="v" id="sFallback">–</div></div>
+    </div>
+    <div class="turns" id="turns"><div class="muted" style="padding:14px">加载中…</div></div>
+  </div>
+
+  <!-- CENTER: board -->
+  <div class="card">
+    <h2>棋盘（Power.log 重建）</h2>
+    <div class="body" id="board"><div class="muted">选择一个决策点…</div></div>
+  </div>
+
+  <!-- RIGHT: recommendation -->
+  <div class="card">
+    <h2>优秀操作推荐</h2>
+    <div class="body" id="recBody"><div class="muted">点“跑整局”或选择决策点后计算…</div></div>
+  </div>
+</div>
+<div class="note" id="note"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let STATE = { games:[], log:null, decisions:[], sel:-1, provider:'heuristic' };
+
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  if(!r.ok){ throw new Error(await r.text() || r.status); }
+  return r.json();
+}
+
+async function boot(){
+  try{
+    const h = await api('/api/health');
+    $('#hsBadge').textContent = 'hslog: ' + (h.hslog ? '可用' : '缺失');
+    $('#hsBadge').className = 'badge ' + (h.hslog?'on':'');
+    STATE.games = h.games || [];
+    const sel = $('#gameSel');
+    sel.innerHTML = STATE.games.map(g=>`<option value="${esc(g.name)}">${esc(g.name)} (${g.size_kb}KB)</option>`).join('');
+    if(!STATE.games.length){ $('#turns').innerHTML = '<div class="muted" style="padding:14px">data/replays 下没有 .log 回放</div>'; return; }
+    sel.value = STATE.games[0].name;
+    await loadGame(STATE.games[0].name);
+  }catch(e){ $('#note').innerHTML = '启动失败: '+esc(e.message); }
+}
+
+async function loadGame(name){
+  STATE.log = name; STATE.sel = -1;
+  $('#turns').innerHTML = '<div class="muted" style="padding:14px"><span class="spin"></span> 解析回放…</div>';
+  $('#board').innerHTML = '<div class="muted">…</div>';
+  $('#recBody').innerHTML = '<div class="muted">…</div>';
+  try{
+    const g = await api('/api/game?log='+encodeURIComponent(name));
+    STATE.decisions = g.decisions || [];
+    renderTurns();
+    if(STATE.decisions.length){ selectTurn(0); }
+  }catch(e){ $('#turns').innerHTML = '<div class="muted" style="padding:14px">解析失败: '+esc(e.message)+'</div>'; }
+}
+
+function renderTurns(){
+  const el = $('#turns');
+  if(!STATE.decisions.length){ el.innerHTML='<div class="muted" style="padding:14px">该回放没有解析出决策点</div>'; return; }
+  el.innerHTML = STATE.decisions.map((d,i)=>{
+    const cls = d.result ? (d.result.agreed?'ok':'no') : 'na';
+    return `<div class="turn ${i===STATE.sel?'sel':''}" data-i="${i}">
+      <span class="t">T${d.turn}</span>
+      <span class="m">${d.mana}/${d.max_mana} · ${d.option_count} 选项</span>
+      <span class="dot ${cls}"></span></div>`;
+  }).join('');
+  el.querySelectorAll('.turn').forEach(n=>n.onclick=()=>selectTurn(+n.dataset.i));
+}
+
+function renderBoard(d){
+  const b = d.board;
+  const minion = m => `<div class="minion ${m.taunt?'taunt':''} ${m.can_attack?'':'sick'}">
+      <div class="nm">${esc(m.name)}</div>
+      <div class="stats"><span class="a">${m.attack}</span><span class="h">${m.health}</span></div></div>`;
+  const hero = (h,opp) => `<div class="heroRow ${opp?'opp':''}">
+      <div class="portrait">${esc((h.name||'?')[0])}</div>
+      <div><div style="font-weight:700">${esc(h.name)}</div>
+      <div class="muted" style="font-size:12px">${opp?'对手':'我方'} · 法力/武器 ${h.attack||0}</div></div>
+      <div style="margin-left:auto;text-align:right">
+        <div class="hp">${h.health}${h.armor?'+'+h.armor:''}</div><div class="atk">HP</div></div></div>`;
+  const mana = Array.from({length:b.max_mana||0},(_,i)=>`<span class="crystal ${i<b.mana?'full':''}"></span>`).join('');
+  const hand = b.hand.map(c=>`<div class="hcard"><div class="cost">${c.cost}</div>
+      <div class="nm">${esc(c.name)}</div><div class="ty">${esc(c.card_type)}</div></div>`).join('') || '<span class="muted">空手牌</span>';
+  return `
+    <div class="side">${hero(b.opp_hero,true)}<div class="minions">${b.opp_minions.map(minion).join('')||'<span class="muted">无随从</span>'}</div></div>
+    <div class="side">${hero(b.my_hero,false)}<div class="minions">${b.my_minions.map(minion).join('')||'<span class="muted">无随从</span>'}</div></div>
+    <div class="mana">${mana}<span class="muted" style="margin-left:8px">${b.mana}/${b.max_mana} 法力 · 牌库 ${b.deck_count}</span></div>
+    <div class="side"><div class="label">手牌</div><div class="hand">${hand}</div></div>`;
+}
+
+function renderRec(d, rec){
+  const el = $('#recBody');
+  if(!rec){ el.innerHTML = '<div class="muted">计算中…</div>'; return; }
+  const conf = Math.round((rec.confidence||0)*100);
+  const prov = rec.provider==='model' ? '<span class="pill model">真实模型</span>' : '<span class="pill">启发式</span>';
+  const fb = rec.is_fallback ? `<span class="pill fb">保底: ${esc(rec.fallback_reason||'')}</span>` : '';
+  const human = d.human || {candidate:'-',action_type:'-'};
+  const vcls = rec.agreed ? 'ok':'no';
+  const vtxt = rec.agreed ? '✓ 与人类操作一致' : '✗ 与人类操作不同';
+  const opts = (rec.legal_actions||[]).map(o=>{
+    const pick = o.id===rec.candidate_id ? 'pick':'';
+    return `<div class="opt ${pick}"><span class="tag">${esc(o.action_type)}</span><span class="id">${esc(o.id)}</span></div>`;
+  }).join('') || '<div class="muted" style="padding:8px">—</div>';
+  el.innerHTML = `
+    <div class="rec">
+      <div class="big">${esc(rec.description)}</div>
+      <div style="margin-top:6px">${prov}${fb}<span class="pill">${esc(rec.action_type)}</span><span class="pill">${rec.latency_ms!=null?rec.latency_ms+'ms':''}</span></div>
+      <div class="conf"><div class="muted" style="font-size:12px;margin-bottom:4px">置信度 ${conf}%</div>
+        <div class="bar"><i style="width:${conf}%"></i></div></div>
+      <div class="cmp">
+        <div class="box"><div class="h">顾问推荐</div><div class="v">${esc(rec.candidate_id)}</div></div>
+        <div class="box"><div class="h">人类实操</div><div class="v">${esc(human.candidate)}</div></div>
+      </div>
+      <div class="verdict ${vcls}">${vtxt}</div>
+      <div class="muted" style="font-size:12px;margin-top:10px">合法动作包络（游戏引擎权威下发，${(rec.legal_actions||[]).length} 项）</div>
+      <div class="env">${opts}</div>
+    </div>`;
+}
+
+async function selectTurn(i){
+  STATE.sel = i; renderTurns();
+  const d = STATE.decisions[i];
+  $('#board').innerHTML = renderBoard(d);
+  renderRec(d, null);
+  try{
+    const rec = await api('/api/recommend', {method:'POST',headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({log:STATE.log, index:i, provider:STATE.provider})});
+    STATE.decisions[i].result = rec;
+    renderRec(d, rec); renderTurns();
+  }catch(e){ $('#recBody').innerHTML = '<div class="muted">推荐失败: '+esc(e.message)+'</div>'; }
+}
+
+async function runAll(){
+  if(!STATE.log) return;
+  const btn = $('#runAll'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 跑整局…';
+  try{
+    const r = await api('/api/replay', {method:'POST',headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({log:STATE.log, provider:STATE.provider})});
+    (r.reports||[]).forEach((rep,i)=>{ if(STATE.decisions[i]) STATE.decisions[i].result = rep; });
+    const n = r.reports.length;
+    const agree = r.reports.filter(x=>x.agreed).length;
+    const fb = r.reports.filter(x=>x.is_fallback).length;
+    $('#sCount').textContent = n; $('#sAgree').textContent = n? Math.round(100*agree/n)+'%':'–';
+    $('#sFallback').textContent = fb;
+    renderTurns();
+    if(STATE.sel>=0) renderRec(STATE.decisions[STATE.sel], STATE.decisions[STATE.sel].result);
+  }catch(e){ $('#note').textContent = '整局失败: '+e.message; }
+  btn.disabled = false; btn.textContent = '跑整局';
+}
+
+$('#gameSel').onchange = e => loadGame(e.target.value);
+$('#provSel').onchange = e => { STATE.provider = e.target.value;
+  $('#provBadge').textContent = 'provider: ' + STATE.provider;
+  $('#provBadge').className = 'badge ' + (STATE.provider==='model'?'':'on'); };
+$('#runAll').onclick = runAll;
+$('#provBadge').textContent = 'provider: heuristic';
+$('#provBadge').className = 'badge on';
+$('#note').innerHTML = '只读顾问：仅枚举合法动作并给出推荐，绝不驱动游戏客户端。数据源：本机 <code>data/replays/*.log</code> 真实 Power.log。';
+boot();
+</script>
+</body>
+</html>
