@@ -352,6 +352,7 @@ async function recommend(){
     const r = await jpost('/api/recommend',{name:CURRENT, kind:$('provSel').value});
     LAST = r;
     render(await jget('/api/game?name='+encodeURIComponent(CURRENT)));
+    while (rb.firstChild) rb.removeChild(rb.firstChild);
     const big = el('div','big', r.description);
     const meta = el('div');
     meta.appendChild(el('span', 'badge '+(r.is_fallback?'fb':'ok'), r.is_fallback?'回落':'模型'));
@@ -376,6 +377,7 @@ async function runAll(){
   rb.appendChild(el('div','muted','整局计算中…'));
   try{
     const r = await jpost('/api/replay',{kind:$('provSel').value});
+    while (rb.firstChild) rb.removeChild(rb.firstChild);
     const tb = $('cmpTable').querySelector('tbody');
     while (tb.firstChild) tb.removeChild(tb.firstChild);
     r.reports.forEach(x=>{
