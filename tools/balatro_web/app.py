@@ -38,6 +38,7 @@ from decidex.balatro import (  # noqa: E402
     BalatroState,
     load_state,
 )
+from decidex.providers.base import BaseInferenceProvider  # noqa: E402
 from decidex.providers.mock import MockReplayProvider  # noqa: E402
 
 logging.getLogger().setLevel(logging.ERROR)
@@ -55,10 +56,19 @@ def _heuristic_solver(payload, question):
     return opts[0], 0.82, {o: (0.82 if o == opts[0] else 0.18 / max(1, len(opts) - 1)) for o in opts}
 
 
+def _build_provider(kind: str) -> BaseInferenceProvider:
+    if kind == "model":
+        from decidex.providers.failover import PriorityFailoverProvider
+        # Four-tier chain: futureppo -> nace -> mindshub-free -> official pool.
+        # Keys: DECIDEX_KEY_FILE env or keys.jsonl in the working directory.
+        return PriorityFailoverProvider.from_default_routes()
+    return MockReplayProvider(solver_fn=_heuristic_solver, simulated_latency_ms=1)
+
+
 def get_advisor(kind: str) -> BalatroAdvisor:
     global ADVISOR
     if ADVISOR is None:
-        ADVISOR = BalatroAdvisor(provider=MockReplayProvider(solver_fn=_heuristic_solver),
+        ADVISOR = BalatroAdvisor(provider=_build_provider(kind),
                                  top_k=10, min_confidence=0.30, min_margin=0.01)
     return ADVISOR
 
