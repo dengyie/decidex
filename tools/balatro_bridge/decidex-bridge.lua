@@ -40,8 +40,12 @@ local function jstr(v)
 end
 
 local function jtable(t)
+  -- card_json/joker_json 等返回的已是 JSON 字符串,原样拼接;其余按字面量编码
   local parts = {}
-  for _, v in ipairs(t) do parts[#parts + 1] = jstr(v) end
+  for _, v in ipairs(t) do
+    if type(v) == "string" then parts[#parts + 1] = v
+    else parts[#parts + 1] = jstr(v) end
+  end
   return "[" .. table.concat(parts, ",") .. "]"
 end
 
