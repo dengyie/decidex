@@ -36,6 +36,10 @@
               background:#ff4d4d; margin-right:6px; animation:pulse 1.4s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
   .live-panel img.down { display:none; }
+  .live-panel.playable img { cursor: crosshair; }
+  .live-toolbar { display:flex; gap:10px; align-items:center; margin-top:8px; font-size:12px; color:var(--dim); }
+  .live-toolbar button { padding:3px 10px; font-size:12px; }
+  .live-toolbar .on { color:var(--good); } .live-toolbar .off { color:var(--bad); }
   @media (max-width: 1000px){ .layout { grid-template-columns: 1fr; } }
   .panel { background:rgba(12,16,24,.88); border:1px solid var(--line); border-radius:12px; padding:12px; }
   .panel h3 { margin:0 0 8px; font-size:12px; color:var(--accent); letter-spacing:.08em; text-transform:uppercase; }
@@ -150,9 +154,13 @@
 </header>
 
 <div class="live-wrap">
-  <div class="panel live-panel">
+  <div class="panel live-panel" id="livePanel">
     <h3><span class="live-dot"></span> 游戏实况 · LIVE(广州CVM 真机)</h3>
     <img id="liveFeed" src="/api/frame.jpg" alt="live" onerror="this.classList.add('down')">
+    <div class="live-toolbar">
+      <button id="playToggle">操作:开</button>
+      <span id="ctrlHint">直接点击画面即可操作游戏(鼠标=点击,自动换算坐标)</span>
+    </div>
   </div>
 </div>
 
@@ -414,6 +422,54 @@ setInterval(() => {
   const img = $('liveFeed');
   if (img && document.visibilityState === 'visible') img.src = '/api/frame.jpg?t=' + Date.now();
 }, 600);
+
+/* ---- 操作游戏:点击实况画面 → 服务端 xdotool ---- */
+let PLAY_MODE = true;
+let INPUT_TOKEN = localStorage.getItem('balatro_input_token') || '';
+
+async function sendInput(path, body) {
+  const r = await fetch(path, { method:'POST',
+    headers: {'Content-Type':'application/json', 'X-Input-Token': INPUT_TOKEN},
+    body: JSON.stringify(body) });
+  if (r.status === 401) {
+    const tok = prompt('操作口令(默认与 VNC 密码相同):');
+    if (!tok) return false;
+    INPUT_TOKEN = tok; localStorage.setItem('balatro_input_token', tok);
+    return sendInput(path, body);
+  }
+  return r.ok;
+}
+
+$('liveFeed').addEventListener('click', async (ev) => {
+  if (!PLAY_MODE) return;
+  const img = ev.target;
+  const rect = img.getBoundingClientRect();
+  const x = Math.round((ev.clientX - rect.left) * 1280 / rect.width);
+  const y = Math.round((ev.clientY - rect.top) * 800 / rect.height);
+  await sendInput('/api/input/click', {x, y});
+});
+$('liveFeed').addEventListener('dblclick', async (ev) => {
+  if (!PLAY_MODE) return;
+  const img = ev.target;
+  const rect = img.getBoundingClientRect();
+  const x = Math.round((ev.clientX - rect.left) * 1280 / rect.width);
+  const y = Math.round((ev.clientY - rect.top) * 800 / rect.height);
+  await sendInput('/api/input/click', {x, y, double:true});
+});
+document.addEventListener('keydown', async (ev) => {
+  if (!PLAY_MODE || ev.target.tagName === 'INPUT' || ev.target.tagName === 'SELECT') return;
+  const k = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
+  if (k.length > 1 && !['Enter','Escape','Backspace','Up','Down','Left','Right','Tab','space'].includes(k)) return;
+  ev.preventDefault();
+  await sendInput('/api/input/key', {key: k === ' ' ? 'space' : k});
+});
+$('playToggle').onclick = () => {
+  PLAY_MODE = !PLAY_MODE;
+  $('playToggle').textContent = PLAY_MODE ? '操作:开' : '操作:关';
+  $('playToggle').className = PLAY_MODE ? 'on' : 'off';
+  $('livePanel').classList.toggle('playable', PLAY_MODE);
+};
+$('livePanel').classList.add('playable');
 $('gameSel').onchange = e => loadGame(e.target.value);
 $('recBtn').onclick = recommend;
 $('runAll').onclick = runAll;

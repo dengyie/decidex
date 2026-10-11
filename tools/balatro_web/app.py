@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import json
 import logging
 import os
+import re
 import sys
+import subprocess
 import threading
 import time
 import traceback
@@ -47,6 +50,7 @@ BRIDGE_DIR = Path(os.environ.get("BALATRO_BRIDGE_DIR", ROOT / "data" / "balatro_
 VNC_TARGET = os.environ.get("BALATRO_VNC_TARGET", "10.144.144.8::5900")
 VNC_PASSWORD = os.environ.get("BALATRO_VNC_PASSWORD", "")
 FRAME_PATH = Path(os.environ.get("BALATRO_FRAME_PATH", "/tmp/balatro_live_frame.jpg"))
+GAME_DISPLAY = os.environ.get("BALATRO_GAME_DISPLAY", ":66")
 ADVISOR: Optional[BalatroAdvisor] = None
 _CACHE: Dict[str, Any] = {}
 
@@ -164,10 +168,15 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # silence request spam
         pass
 
-    def _send(self, code: int, body: bytes, ctype: str = "application/json; charset=utf-8"):
+    def _send(self, code: int, body: bytes, ctype: str = "application/json; charset=utf-8",
+              nocache: bool = False):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        if nocache:
+            # The live frame is a parameterless .jpg; Cloudflare caches those
+            # unless told otherwise, which freezes the public feed.
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.end_headers()
         self.wfile.write(body)
 
@@ -186,7 +195,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not FRAME_PATH.exists():
                     return self._json({"error": "no frame yet"}, 503)
                 data = FRAME_PATH.read_bytes()
-                self._send(200, data, "image/jpeg")
+                self._send(200, data, "image/jpeg", nocache=True)
                 return
             if self.path == "/api/health":
                 return self._json({
@@ -216,6 +225,25 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self._run_async(_recommend(str(req.get("name", "")), kind)))
             if self.path == "/api/replay":
                 return self._json(self._run_async(_replay(kind)))
+            if self.path == "/api/input/click":
+                if not _check_input_token(self.headers.get("X-Input-Token", "")):
+                    return self._json({"error": "unauthorized"}, 401)
+                x = int(req.get("x", 0)); y = int(req.get("y", 0))
+                args = ["mousemove", str(max(0, min(1279, x))), str(max(0, min(799, y)))]
+                if req.get("double"):
+                    args += ["click", "--repeat", "2", "1"]
+                else:
+                    args += ["click", "1"]
+                out = _xdotool(args)
+                return self._json({"ok": not out.startswith("error"), "out": out[:120]})
+            if self.path == "/api/input/key":
+                if not _check_input_token(self.headers.get("X-Input-Token", "")):
+                    return self._json({"error": "unauthorized"}, 401)
+                key = str(req.get("key", ""))[:24]
+                if not re.fullmatch(r"[a-zA-Z0-9_]+", key):
+                    return self._json({"error": "bad key"}, 400)
+                out = _xdotool(["key", key])
+                return self._json({"ok": not out.startswith("error"), "out": out[:120]})
             return self._json({"error": "not found"}, 404)
         except FileNotFoundError as e:
             return self._json({"error": f"snapshot not found: {e}"}, 404)
@@ -253,6 +281,20 @@ def _frame_worker() -> None:
             except Exception:  # noqa: BLE001
                 pass
             time.sleep(2.0)
+
+
+def _check_input_token(req_token: str) -> bool:
+    """Interactive input is gated: the shared secret doubles as the VNC password."""
+    if not VNC_PASSWORD or not req_token:
+        return False
+    return hmac.compare_digest(req_token, VNC_PASSWORD)
+
+
+def _xdotool(args: list) -> str:
+    env = dict(os.environ, DISPLAY=GAME_DISPLAY)
+    out = subprocess.run(["xdotool"] + args, env=env,
+                         capture_output=True, text=True, timeout=8)
+    return (out.stdout + out.stderr).strip()
 
 
 def main():
