@@ -8,8 +8,11 @@ Routes:
   GET  /                      UI
   GET  /api/health            service + snapshot inventory
   GET  /api/game?name=        one snapshot: board + legal envelope
+  GET  /api/frame.jpg         latest live game frame (captured from VNC)
   POST /api/recommend         advisor recommendation for one snapshot
   POST /api/replay            advisor over every snapshot (adviser vs human)
+  POST /api/input/click       inject a mouse click into the game (X-Input-Token)
+  POST /api/input/key         inject a keystroke into the game (X-Input-Token)
 
 Run:  python tools/balatro_web/app.py --host 0.0.0.0 --port 8091
 Bridge snapshots dir: $BALATRO_BRIDGE_DIR or <repo>/data/balatro_bridge
@@ -51,8 +54,20 @@ VNC_TARGET = os.environ.get("BALATRO_VNC_TARGET", "10.144.144.8::5900")
 VNC_PASSWORD = os.environ.get("BALATRO_VNC_PASSWORD", "")
 FRAME_PATH = Path(os.environ.get("BALATRO_FRAME_PATH", "/tmp/balatro_live_frame.jpg"))
 GAME_DISPLAY = os.environ.get("BALATRO_GAME_DISPLAY", ":66")
-ADVISOR: Optional[BalatroAdvisor] = None
+_ADVISORS: Dict[str, BalatroAdvisor] = {}
 _CACHE: Dict[str, Any] = {}
+
+# xdotool keysyms differ from DOM KeyboardEvent.key names; map the ones the page
+# can emit so arrow/enter/backspace actually reach the game instead of silently
+# being ignored ("No such key name").
+_KEY_ALIASES = {
+    "enter": "Return", "return": "Return",
+    "escape": "Escape", "esc": "Escape",
+    "backspace": "BackSpace", "delete": "Delete",
+    "tab": "Tab", "space": "space",
+    "arrowup": "Up", "arrowdown": "Down",
+    "arrowleft": "Left", "arrowright": "Right",
+}
 
 
 def _heuristic_solver(payload, question):
@@ -73,11 +88,14 @@ def _build_provider(kind: str) -> BaseInferenceProvider:
 
 
 def get_advisor(kind: str) -> BalatroAdvisor:
-    global ADVISOR
-    if ADVISOR is None:
-        ADVISOR = BalatroAdvisor(provider=_build_provider(kind),
+    """One advisor per provider kind; the first request must not pin every
+    later request to whatever kind happened to arrive first."""
+    advisor = _ADVISORS.get(kind)
+    if advisor is None:
+        advisor = BalatroAdvisor(provider=_build_provider(kind),
                                  top_k=10, min_confidence=0.30, min_margin=0.01)
-    return ADVISOR
+        _ADVISORS[kind] = advisor
+    return advisor
 
 
 def list_games() -> List[Dict[str, Any]]:
@@ -228,22 +246,20 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/input/click":
                 if not _check_input_token(self.headers.get("X-Input-Token", "")):
                     return self._json({"error": "unauthorized"}, 401)
-                x = int(req.get("x", 0)); y = int(req.get("y", 0))
-                args = ["mousemove", str(max(0, min(1279, x))), str(max(0, min(799, y)))]
-                if req.get("double"):
-                    args += ["click", "--repeat", "2", "1"]
-                else:
-                    args += ["click", "1"]
-                out = _xdotool(args)
-                return self._json({"ok": not out.startswith("error"), "out": out[:120]})
+                try:
+                    x = int(req.get("x", 0)); y = int(req.get("y", 0))
+                except (TypeError, ValueError):
+                    return self._json({"error": "bad coords"}, 400)
+                out = _xdotool(_click_args(x, y, bool(req.get("double"))))
+                return self._json({"ok": not _xdotool_failed(out), "out": out[:120]})
             if self.path == "/api/input/key":
                 if not _check_input_token(self.headers.get("X-Input-Token", "")):
                     return self._json({"error": "unauthorized"}, 401)
                 key = str(req.get("key", ""))[:24]
                 if not re.fullmatch(r"[a-zA-Z0-9_]+", key):
                     return self._json({"error": "bad key"}, 400)
-                out = _xdotool(["key", key])
-                return self._json({"ok": not out.startswith("error"), "out": out[:120]})
+                out = _xdotool(["key", _key_name(key)])
+                return self._json({"ok": not _xdotool_failed(out), "out": out[:120]})
             return self._json({"error": "not found"}, 404)
         except FileNotFoundError as e:
             return self._json({"error": f"snapshot not found: {e}"}, 404)
@@ -290,11 +306,35 @@ def _check_input_token(req_token: str) -> bool:
     return hmac.compare_digest(req_token, VNC_PASSWORD)
 
 
+def _click_args(x: int, y: int, double: bool = False) -> list:
+    """Clamp to the game window and build the xdotool argv for one click."""
+    args = ["mousemove", str(max(0, min(1279, x))), str(max(0, min(799, y)))]
+    if double:
+        return args + ["click", "--repeat", "2", "1"]
+    return args + ["click", "1"]
+
+
+def _key_name(key: str) -> str:
+    """Translate page-side key names to xdotool keysyms."""
+    return _KEY_ALIASES.get(key.lower(), key)
+
+
 def _xdotool(args: list) -> str:
+    """Run xdotool against the game display. Failures are returned as text so
+    the caller can report them instead of swallowing them."""
     env = dict(os.environ, DISPLAY=GAME_DISPLAY)
-    out = subprocess.run(["xdotool"] + args, env=env,
-                         capture_output=True, text=True, timeout=8)
+    try:
+        out = subprocess.run(["xdotool"] + args, env=env,
+                             capture_output=True, text=True, timeout=8)
+    except FileNotFoundError:
+        return "error: xdotool not installed"
+    except subprocess.TimeoutExpired:
+        return "error: xdotool timed out"
     return (out.stdout + out.stderr).strip()
+
+
+def _xdotool_failed(out: str) -> bool:
+    return out.lower().startswith("error") or "no such key name" in out.lower()
 
 
 def main():

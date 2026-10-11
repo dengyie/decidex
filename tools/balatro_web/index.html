@@ -426,6 +426,12 @@ setInterval(() => {
 /* ---- 操作游戏:点击实况画面 → 服务端 xdotool ---- */
 let PLAY_MODE = true;
 let INPUT_TOKEN = localStorage.getItem('balatro_input_token') || '';
+const GAME_W = 1280, GAME_H = 800;   // 游戏原生分辨率(窗口实测 1280x800)
+// DOM KeyboardEvent.key → 服务端 xdotool 键名
+const KEY_SEND = { ' ': 'space', 'ArrowUp': 'arrowup', 'ArrowDown': 'arrowdown',
+                   'ArrowLeft': 'arrowleft', 'ArrowRight': 'arrowright',
+                   'Enter': 'enter', 'Escape': 'escape', 'Backspace': 'backspace',
+                   'Tab': 'tab' };
 
 async function sendInput(path, body) {
   const r = await fetch(path, { method:'POST',
@@ -440,28 +446,32 @@ async function sendInput(path, body) {
   return r.ok;
 }
 
-$('liveFeed').addEventListener('click', async (ev) => {
+function gameCoords(ev) {
+  const rect = ev.target.getBoundingClientRect();
+  return { x: Math.round((ev.clientX - rect.left) * GAME_W / rect.width),
+           y: Math.round((ev.clientY - rect.top) * GAME_H / rect.height) };
+}
+
+let clickTimer = null;   // 单击要等双击判定窗口,避免一次点击注入两次
+$('liveFeed').addEventListener('click', (ev) => {
   if (!PLAY_MODE) return;
-  const img = ev.target;
-  const rect = img.getBoundingClientRect();
-  const x = Math.round((ev.clientX - rect.left) * 1280 / rect.width);
-  const y = Math.round((ev.clientY - rect.top) * 800 / rect.height);
-  await sendInput('/api/input/click', {x, y});
+  const {x, y} = gameCoords(ev);
+  clearTimeout(clickTimer);
+  clickTimer = setTimeout(() => sendInput('/api/input/click', {x, y}), 220);
 });
-$('liveFeed').addEventListener('dblclick', async (ev) => {
+$('liveFeed').addEventListener('dblclick', (ev) => {
   if (!PLAY_MODE) return;
-  const img = ev.target;
-  const rect = img.getBoundingClientRect();
-  const x = Math.round((ev.clientX - rect.left) * 1280 / rect.width);
-  const y = Math.round((ev.clientY - rect.top) * 800 / rect.height);
-  await sendInput('/api/input/click', {x, y, double:true});
+  clearTimeout(clickTimer);   // 取消挂起的单击,只发这一次双击
+  const {x, y} = gameCoords(ev);
+  sendInput('/api/input/click', {x, y, double:true});
 });
 document.addEventListener('keydown', async (ev) => {
   if (!PLAY_MODE || ev.target.tagName === 'INPUT' || ev.target.tagName === 'SELECT') return;
   const k = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
-  if (k.length > 1 && !['Enter','Escape','Backspace','Up','Down','Left','Right','Tab','space'].includes(k)) return;
+  const send = k.length === 1 ? k : KEY_SEND[k];
+  if (!send) return;
   ev.preventDefault();
-  await sendInput('/api/input/key', {key: k === ' ' ? 'space' : k});
+  await sendInput('/api/input/key', {key: send});
 });
 $('playToggle').onclick = () => {
   PLAY_MODE = !PLAY_MODE;
