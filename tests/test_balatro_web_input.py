@@ -25,6 +25,7 @@ app = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(app)
 
 TOKEN = "s3cret-token"
+USER = "operator"
 PASSWORD = "operator-pw"
 
 
@@ -33,6 +34,8 @@ def server(monkeypatch):
     """Live handler on a random port with xdotool stubbed and a known secret."""
     captured = []
     monkeypatch.setattr(app, "VNC_PASSWORD", TOKEN)
+    monkeypatch.setattr(app, "WEB_USER", USER)
+    monkeypatch.setattr(app, "WEB_PASSWORD", PASSWORD)
     monkeypatch.setattr(app, "_xdotool",
                         lambda args: captured.append(list(args)) or "")
     app._SESSIONS.clear()
@@ -52,10 +55,12 @@ def server(monkeypatch):
 
 @pytest.fixture
 def server_pw(monkeypatch):
-    """Same as `server`, but the operator password differs from the raw token so
+    """Same as `server`, but login creds differ from the raw token so the
     login vs. header paths are distinguishable."""
     captured = []
-    monkeypatch.setattr(app, "VNC_PASSWORD", PASSWORD)
+    monkeypatch.setattr(app, "VNC_PASSWORD", TOKEN)
+    monkeypatch.setattr(app, "WEB_USER", USER)
+    monkeypatch.setattr(app, "WEB_PASSWORD", PASSWORD)
     monkeypatch.setattr(app, "_xdotool",
                         lambda args: captured.append(list(args)) or "")
     app._SESSIONS.clear()
@@ -71,7 +76,7 @@ def server_pw(monkeypatch):
         app._SESSIONS.clear()
 
 
-def _post(base, path, body, token=None, cookie=None, csrf=True, password=None):
+def _post(base, path, body, token=None, cookie=None, csrf=True, password=None, user=None):
     headers = {"Content-Type": "application/json"}
     if csrf:
         headers["X-Requested-With"] = "decidex-web"
@@ -81,6 +86,8 @@ def _post(base, path, body, token=None, cookie=None, csrf=True, password=None):
         headers["Cookie"] = cookie
     if password is not None:
         body = dict(body, password=password)
+    if user is not None:
+        body = dict(body, user=user)
     req = urllib.request.Request(base + path, data=json.dumps(body).encode(),
                                  headers=headers, method="POST")
     try:
@@ -90,9 +97,9 @@ def _post(base, path, body, token=None, cookie=None, csrf=True, password=None):
         return e.code, json.loads(e.read()), dict(e.headers)
 
 
-def _login(base, password):
+def _login(base, password=PASSWORD, user=USER):
     """Log in and return the session cookie header value."""
-    code, _, headers = _post(base, "/api/login", {}, password=password)
+    code, _, headers = _post(base, "/api/login", {}, password=password, user=user)
     assert code == 200, f"login failed: {code}"
     set_cookie = headers.get("Set-Cookie", "")
     return set_cookie.split(";", 1)[0]
@@ -204,6 +211,33 @@ def test_login_wrong_password_is_401(server_pw):
     assert captured == []
 
 
+def test_login_wrong_user_is_401(server_pw):
+    base, captured = server_pw
+    code, _, headers = _post(base, "/api/login", {}, password=PASSWORD, user="someone-else")
+    assert code == 401
+    assert "Set-Cookie" not in headers
+    assert captured == []
+
+
+def test_login_missing_user_is_401(server_pw):
+    base, _ = server_pw
+    code, _, _ = _post(base, "/api/login", {}, password=PASSWORD)
+    assert code == 401
+
+
+def test_default_credentials_are_mango_12345678(monkeypatch):
+    """The shipped defaults must be the documented pair (no env override)."""
+    monkeypatch.delenv("BALATRO_WEB_USER", raising=False)
+    monkeypatch.delenv("BALATRO_WEB_PASSWORD", raising=False)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.WEB_USER == "mango"
+    assert mod.WEB_PASSWORD == "12345678"
+    assert mod._check_credentials("mango", "12345678")
+    assert not mod._check_credentials("mango", "nope")
+    assert not mod._check_credentials("root", "12345678")
+
+
 def test_login_requires_csrf_header(server_pw):
     base, _ = server_pw
     code, _, headers = _post(base, "/api/login", {}, password=PASSWORD, csrf=False)
@@ -254,7 +288,7 @@ def test_session_endpoint_reports_state(server_pw):
 
 def test_session_cookie_is_httponly_samesite_strict(server_pw):
     base, _ = server_pw
-    code, _, headers = _post(base, "/api/login", {}, password=PASSWORD)
+    code, _, headers = _post(base, "/api/login", {}, password=PASSWORD, user=USER)
     set_cookie = headers.get("Set-Cookie", "")
     assert "HttpOnly" in set_cookie
     assert "SameSite=Strict" in set_cookie

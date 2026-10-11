@@ -34,8 +34,10 @@
 <form class="card" id="loginForm" autocomplete="off">
   <h1>🃏 DecideX 小丑牌顾问</h1>
   <div class="sub">登录后可操作真机游戏(鼠标点击 = 直接控制)</div>
-  <label for="pw">操作口令</label>
-  <input id="pw" type="password" placeholder="请输入操作口令" autofocus>
+  <label for="user">账号</label>
+  <input id="user" type="text" placeholder="请输入账号" autocomplete="username" autofocus>
+  <label for="pw">密码</label>
+  <input id="pw" type="password" placeholder="请输入密码" autocomplete="current-password">
   <button id="go" type="submit">登录</button>
   <div class="err" id="err"></div>
 </form>
@@ -46,17 +48,18 @@ const next = new URLSearchParams(location.search).get('next') || '/';
 $('loginForm').addEventListener('submit', async (ev) => {
   ev.preventDefault();
   $('err').textContent = '';
+  const user = $('user').value.trim();
   const pw = $('pw').value;
-  if (!pw) return;
+  if (!user || !pw) return;
   $('go').disabled = true;
   try {
     const r = await fetch('/api/login', {
       method: 'POST',
       headers: {'Content-Type': 'application/json', 'X-Requested-With': 'decidex-web'},
-      body: JSON.stringify({password: pw})
+      body: JSON.stringify({user, password: pw})
     });
     if (r.ok) { location.href = next; return; }
-    $('err').textContent = r.status === 403 ? '请求被拒绝(CSRF 校验失败)' : '口令不正确';
+    $('err').textContent = r.status === 403 ? '请求被拒绝(CSRF 校验失败)' : '账号或密码不正确';
   } catch (e) {
     $('err').textContent = '网络错误: ' + e.message;
   } finally {

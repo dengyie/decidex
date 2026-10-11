@@ -20,10 +20,10 @@ Routes:
 
 Auth model (mirrors the user's other sites, e.g. 2fa-hub): interactive input
 requires a login session minted by POST /api/login and carried in an HttpOnly,
-SameSite=Strict cookie. The operator password IS the already-deployed
-BALATRO_VNC_PASSWORD secret — injected as an env var, never stored on disk, so
-there is no second password file or hash to keep in sync. A raw X-Input-Token
-header is still accepted so mesh scripts can actuate without a browser session.
+SameSite=Strict cookie. Login is a username/password pair (BALATRO_WEB_USER /
+BALATRO_WEB_PASSWORD, default mango/12345678) — override both via env in any
+real deployment. A raw X-Input-Token header (the BALATRO_VNC_PASSWORD secret)
+is still accepted so mesh scripts can actuate without a browser session.
 
 Run:  python tools/balatro_web/app.py --host 0.0.0.0 --port 8091
 Bridge snapshots dir: $BALATRO_BRIDGE_DIR or <repo>/data/balatro_bridge
@@ -67,6 +67,10 @@ VNC_TARGET = os.environ.get("BALATRO_VNC_TARGET", "10.144.144.8::5900")
 VNC_PASSWORD = os.environ.get("BALATRO_VNC_PASSWORD", "")
 FRAME_PATH = Path(os.environ.get("BALATRO_FRAME_PATH", "/tmp/balatro_live_frame.jpg"))
 GAME_DISPLAY = os.environ.get("BALATRO_GAME_DISPLAY", ":66")
+# Login credentials for the operator page. Defaults are the well-known dev pair;
+# override via env in any real deployment (BALATRO_WEB_USER / BALATRO_WEB_PASSWORD).
+WEB_USER = os.environ.get("BALATRO_WEB_USER", "mango")
+WEB_PASSWORD = os.environ.get("BALATRO_WEB_PASSWORD", "12345678")
 _ADVISORS: Dict[str, BalatroAdvisor] = {}
 _CACHE: Dict[str, Any] = {}
 
@@ -298,8 +302,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/login":
                 if not self._has_csrf_header():
                     return self._json({"error": "csrf"}, 403)
-                if not _check_password(str(req.get("password", ""))):
-                    return self._json({"error": "invalid password"}, 401)
+                if not _check_credentials(str(req.get("user", "")),
+                                          str(req.get("password", ""))):
+                    return self._json({"error": "invalid credentials"}, 401)
                 token = _new_session()
                 cookie = (f"{_SESSION_COOKIE}={token}; Path=/; HttpOnly; "
                           f"SameSite=Strict; Max-Age={_SESSION_TTL}")
@@ -378,11 +383,13 @@ def _check_input_token(req_token: str) -> bool:
     return hmac.compare_digest(req_token, VNC_PASSWORD)
 
 
-def _check_password(pw: str) -> bool:
-    """Constant-time compare against the operator password."""
-    if not VNC_PASSWORD or not pw:
-        return False
-    return hmac.compare_digest(pw, VNC_PASSWORD)
+def _check_credentials(user: str, pw: str) -> bool:
+    """Constant-time compare against the configured login pair. Both fields are
+    compared unconditionally so a wrong username cannot be timed apart from a
+    wrong password."""
+    ok_user = hmac.compare_digest((user or "").encode(), WEB_USER.encode())
+    ok_pw = hmac.compare_digest((pw or "").encode(), WEB_PASSWORD.encode())
+    return ok_user and ok_pw
 
 
 def _new_session() -> str:
