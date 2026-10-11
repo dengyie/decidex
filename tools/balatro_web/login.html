@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>登录 · DecideX 小丑牌顾问</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --felt1:#35654d; --felt2:#1e4433; --panel:#10141d;
+    --line:#2a2f3c; --text:#e8ecf3; --dim:#93a0b4; --accent:#f2b134; --bad:#e06c6c;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; color:var(--text); font:14px/1.5 "Segoe UI",system-ui,sans-serif;
+         min-height:100vh; display:flex; align-items:center; justify-content:center;
+         background:
+           radial-gradient(ellipse at 50% 38%, var(--felt1) 0%, var(--felt2) 58%, #0e2419 100%)
+           fixed var(--panel); }
+  .card { width:min(360px, 92vw); background:rgba(12,16,24,.9);
+          border:1px solid var(--line); border-radius:14px; padding:26px 24px;
+          box-shadow:0 18px 50px rgba(0,0,0,.55); }
+  h1 { font-size:18px; margin:0 0 4px; color:var(--accent); }
+  .sub { color:var(--dim); font-size:12px; margin-bottom:20px; }
+  label { display:block; font-size:12px; color:var(--dim); margin:0 0 6px; }
+  input { width:100%; background:#1a212e; color:var(--text); border:1px solid var(--line);
+          border-radius:8px; padding:10px 12px; font-size:14px; margin-bottom:14px; }
+  input:focus { outline:none; border-color:var(--accent); }
+  button { width:100%; background:var(--accent); color:#20160a; font-weight:700;
+           border:none; border-radius:8px; padding:11px; font-size:14px; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:default; }
+  .err { color:var(--bad); font-size:12px; min-height:16px; margin-top:10px; }
+</style>
+</head>
+<body>
+<form class="card" id="loginForm" autocomplete="off">
+  <h1>🃏 DecideX 小丑牌顾问</h1>
+  <div class="sub">登录后可操作真机游戏(鼠标点击 = 直接控制)</div>
+  <label for="pw">操作口令</label>
+  <input id="pw" type="password" placeholder="请输入操作口令" autofocus>
+  <button id="go" type="submit">登录</button>
+  <div class="err" id="err"></div>
+</form>
+<script>
+const $ = id => document.getElementById(id);
+const next = new URLSearchParams(location.search).get('next') || '/';
+
+$('loginForm').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  $('err').textContent = '';
+  const pw = $('pw').value;
+  if (!pw) return;
+  $('go').disabled = true;
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-Requested-With': 'decidex-web'},
+      body: JSON.stringify({password: pw})
+    });
+    if (r.ok) { location.href = next; return; }
+    $('err').textContent = r.status === 403 ? '请求被拒绝(CSRF 校验失败)' : '口令不正确';
+  } catch (e) {
+    $('err').textContent = '网络错误: ' + e.message;
+  } finally {
+    $('go').disabled = false;
+  }
+});
+</script>
+</body>
+</html>

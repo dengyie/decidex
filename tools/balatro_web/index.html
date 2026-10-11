@@ -27,6 +27,7 @@
   button { cursor:pointer; } button:hover { border-color:var(--accent); }
   button.primary { background:var(--accent); color:#20160a; font-weight:700; border:none; }
   #stats { color:var(--dim); font-size:12px; margin-left:auto; }
+  #authState { font-size:12px; } #authState.on { color:var(--good); } #authState.off { color:var(--dim); }
   .layout { display:grid; grid-template-columns: 1fr 340px; gap:12px; padding:12px; max-width:1440px; margin:0 auto; }
   .live-wrap { max-width:1440px; margin:0 auto; padding:12px 12px 0; }
   .live-panel { padding:10px; }
@@ -150,6 +151,8 @@
   </select>
   <button id="recBtn" class="primary">推荐</button>
   <button id="runAll">跑整局</button>
+  <span id="authState" class="off">未登录</span>
+  <button id="logoutBtn">退出</button>
   <span id="stats"></span>
 </header>
 
@@ -425,7 +428,7 @@ setInterval(() => {
 
 /* ---- 操作游戏:点击实况画面 → 服务端 xdotool ---- */
 let PLAY_MODE = true;
-let INPUT_TOKEN = localStorage.getItem('balatro_input_token') || '';
+let LOGGED_IN = false;
 const GAME_W = 1280, GAME_H = 800;   // 游戏原生分辨率(窗口实测 1280x800)
 // DOM KeyboardEvent.key → 服务端 xdotool 键名
 const KEY_SEND = { ' ': 'space', 'ArrowUp': 'arrowup', 'ArrowDown': 'arrowdown',
@@ -433,15 +436,14 @@ const KEY_SEND = { ' ': 'space', 'ArrowUp': 'arrowup', 'ArrowDown': 'arrowdown',
                    'Enter': 'enter', 'Escape': 'escape', 'Backspace': 'backspace',
                    'Tab': 'tab' };
 
+/* 交互输入走登录会话 cookie。401 表示会话过期或尚未登录,直接跳登录页并带回跳。 */
 async function sendInput(path, body) {
   const r = await fetch(path, { method:'POST',
-    headers: {'Content-Type':'application/json', 'X-Input-Token': INPUT_TOKEN},
+    headers: {'Content-Type':'application/json', 'X-Requested-With':'decidex-web'},
     body: JSON.stringify(body) });
   if (r.status === 401) {
-    const tok = prompt('操作口令(默认与 VNC 密码相同):');
-    if (!tok) return false;
-    INPUT_TOKEN = tok; localStorage.setItem('balatro_input_token', tok);
-    return sendInput(path, body);
+    location.href = '/login?next=' + encodeURIComponent(location.pathname);
+    return false;
   }
   return r.ok;
 }
@@ -480,6 +482,23 @@ $('playToggle').onclick = () => {
   $('livePanel').classList.toggle('playable', PLAY_MODE);
 };
 $('livePanel').classList.add('playable');
+
+async function syncAuth(){
+  try {
+    const r = await fetch('/api/session');
+    LOGGED_IN = !!(await r.json()).authenticated;
+  } catch(e) { LOGGED_IN = false; }
+  const el = $('authState');
+  el.textContent = LOGGED_IN ? '已登录' : '未登录 · 点画面将跳转登录';
+  el.className = LOGGED_IN ? 'on' : 'off';
+}
+$('logoutBtn').onclick = async () => {
+  await fetch('/api/logout', { method:'POST',
+    headers: {'Content-Type':'application/json', 'X-Requested-With':'decidex-web'},
+    body: '{}' });
+  location.href = '/login';
+};
+syncAuth();
 $('gameSel').onchange = e => loadGame(e.target.value);
 $('recBtn').onclick = recommend;
 $('runAll').onclick = runAll;

@@ -6,13 +6,24 @@ Only REAL snapshots from the bridge mod are ever shown — no demo data.
 
 Routes:
   GET  /                      UI
+  GET  /login                 operator login page
   GET  /api/health            service + snapshot inventory
   GET  /api/game?name=        one snapshot: board + legal envelope
-  GET  /api/frame.jpg         latest live game frame (captured from VNC)
+  GET  /api/session           whether the caller already holds a login session
   POST /api/recommend         advisor recommendation for one snapshot
   POST /api/replay            advisor over every snapshot (adviser vs human)
-  POST /api/input/click       inject a mouse click into the game (X-Input-Token)
-  POST /api/input/key         inject a keystroke into the game (X-Input-Token)
+  POST /api/login             exchange the operator password for a session cookie
+  POST /api/logout            drop the session cookie
+  GET  /api/frame.jpg         latest live game frame (captured from VNC)
+  POST /api/input/click       inject a mouse click into the game (input auth)
+  POST /api/input/key         inject a keystroke into the game (input auth)
+
+Auth model (mirrors the user's other sites, e.g. 2fa-hub): interactive input
+requires a login session minted by POST /api/login and carried in an HttpOnly,
+SameSite=Strict cookie. The operator password IS the already-deployed
+BALATRO_VNC_PASSWORD secret — injected as an env var, never stored on disk, so
+there is no second password file or hash to keep in sync. A raw X-Input-Token
+header is still accepted so mesh scripts can actuate without a browser session.
 
 Run:  python tools/balatro_web/app.py --host 0.0.0.0 --port 8091
 Bridge snapshots dir: $BALATRO_BRIDGE_DIR or <repo>/data/balatro_bridge
@@ -27,11 +38,13 @@ import json
 import logging
 import os
 import re
+import secrets
 import sys
 import subprocess
 import threading
 import time
 import traceback
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -56,6 +69,14 @@ FRAME_PATH = Path(os.environ.get("BALATRO_FRAME_PATH", "/tmp/balatro_live_frame.
 GAME_DISPLAY = os.environ.get("BALATRO_GAME_DISPLAY", ":66")
 _ADVISORS: Dict[str, BalatroAdvisor] = {}
 _CACHE: Dict[str, Any] = {}
+
+# Login sessions: random bearer held only in server memory, keyed to a
+# cookie value. Restarting the service invalidates every session (fine — the
+# operator just logs in again), and nothing sensitive is ever written to disk.
+_SESSION_COOKIE = "balatro_session"
+_SESSION_TTL = 12 * 3600
+_SESSIONS: Dict[str, float] = {}          # cookie value -> expiry epoch
+_SESSIONS_LOCK = threading.Lock()
 
 # xdotool keysyms differ from DOM KeyboardEvent.key names; map the ones the page
 # can emit so arrow/enter/backspace actually reach the game instead of silently
@@ -187,7 +208,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _send(self, code: int, body: bytes, ctype: str = "application/json; charset=utf-8",
-              nocache: bool = False):
+              nocache: bool = False, extra: Optional[Dict[str, str]] = None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -195,11 +216,40 @@ class Handler(BaseHTTPRequestHandler):
             # The live frame is a parameterless .jpg; Cloudflare caches those
             # unless told otherwise, which freezes the public feed.
             self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
-    def _json(self, obj: Any, code: int = 200):
-        self._send(code, json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8"))
+    def _json(self, obj: Any, code: int = 200, extra: Optional[Dict[str, str]] = None):
+        self._send(code, json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8"),
+                   extra=extra)
+
+    def _auth_via(self) -> Optional[str]:
+        """How the caller proved input rights: 'session' (ambient cookie) or
+        'token' (explicit X-Input-Token header for mesh scripts), else None."""
+        if _valid_session(_cookie_token(self.headers.get("Cookie"))):
+            return "session"
+        if _check_input_token(self.headers.get("X-Input-Token", "")):
+            return "token"
+        return None
+
+    def _has_csrf_header(self) -> bool:
+        """Mutations that ride the ambient session cookie must carry
+        X-Requested-With, matching the other sites' CSRF guard so a cross-site
+        form post cannot act on the operator's behalf. An explicit
+        X-Input-Token is not ambient, so it needs no such guard."""
+        return self.headers.get("X-Requested-With", "") == "decidex-web"
+
+    def _deny_input(self) -> Optional[int]:
+        """Authorize an input mutation; returns the HTTP status to send, or
+        None when the request may proceed."""
+        via = self._auth_via()
+        if via is None:
+            return 401
+        if via == "session" and not self._has_csrf_header():
+            return 403
+        return None
 
     def _run_async(self, coro):
         return asyncio.run_coroutine_threadsafe(coro, _LOOP).result(timeout=120)
@@ -209,6 +259,12 @@ class Handler(BaseHTTPRequestHandler):
             if self.path in ("/", "/index.html"):
                 page = (Path(__file__).parent / "index.html").read_bytes()
                 return self._send(200, page, "text/html; charset=utf-8")
+            if self.path in ("/login", "/login.html"):
+                page = (Path(__file__).parent / "login.html").read_bytes()
+                return self._send(200, page, "text/html; charset=utf-8")
+            if self.path == "/api/session":
+                return self._json({"authenticated":
+                                   _valid_session(_cookie_token(self.headers.get("Cookie")))})
             if self.path.startswith("/api/frame.jpg"):
                 if not FRAME_PATH.exists():
                     return self._json({"error": "no frame yet"}, 503)
@@ -239,13 +295,27 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(length) or b"{}")
             kind = str(req.get("kind", "heuristic"))
+            if self.path == "/api/login":
+                if not self._has_csrf_header():
+                    return self._json({"error": "csrf"}, 403)
+                if not _check_password(str(req.get("password", ""))):
+                    return self._json({"error": "invalid password"}, 401)
+                token = _new_session()
+                cookie = (f"{_SESSION_COOKIE}={token}; Path=/; HttpOnly; "
+                          f"SameSite=Strict; Max-Age={_SESSION_TTL}")
+                return self._json({"ok": True}, extra={"Set-Cookie": cookie})
+            if self.path == "/api/logout":
+                _drop_session(_cookie_token(self.headers.get("Cookie")))
+                cookie = f"{_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+                return self._json({"ok": True}, extra={"Set-Cookie": cookie})
             if self.path == "/api/recommend":
                 return self._json(self._run_async(_recommend(str(req.get("name", "")), kind)))
             if self.path == "/api/replay":
                 return self._json(self._run_async(_replay(kind)))
             if self.path == "/api/input/click":
-                if not _check_input_token(self.headers.get("X-Input-Token", "")):
-                    return self._json({"error": "unauthorized"}, 401)
+                deny = self._deny_input()
+                if deny:
+                    return self._json({"error": "unauthorized" if deny == 401 else "csrf"}, deny)
                 try:
                     x = int(req.get("x", 0)); y = int(req.get("y", 0))
                 except (TypeError, ValueError):
@@ -253,8 +323,9 @@ class Handler(BaseHTTPRequestHandler):
                 out = _xdotool(_click_args(x, y, bool(req.get("double"))))
                 return self._json({"ok": not _xdotool_failed(out), "out": out[:120]})
             if self.path == "/api/input/key":
-                if not _check_input_token(self.headers.get("X-Input-Token", "")):
-                    return self._json({"error": "unauthorized"}, 401)
+                deny = self._deny_input()
+                if deny:
+                    return self._json({"error": "unauthorized" if deny == 401 else "csrf"}, deny)
                 key = str(req.get("key", ""))[:24]
                 if not re.fullmatch(r"[a-zA-Z0-9_]+", key):
                     return self._json({"error": "bad key"}, 400)
@@ -300,10 +371,62 @@ def _frame_worker() -> None:
 
 
 def _check_input_token(req_token: str) -> bool:
-    """Interactive input is gated: the shared secret doubles as the VNC password."""
+    """Raw-header escape hatch for mesh scripts: the shared secret doubles as
+    the VNC password. Interactive browser use goes through a login session."""
     if not VNC_PASSWORD or not req_token:
         return False
     return hmac.compare_digest(req_token, VNC_PASSWORD)
+
+
+def _check_password(pw: str) -> bool:
+    """Constant-time compare against the operator password."""
+    if not VNC_PASSWORD or not pw:
+        return False
+    return hmac.compare_digest(pw, VNC_PASSWORD)
+
+
+def _new_session() -> str:
+    """Mint a session cookie value with a fresh TTL."""
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    with _SESSIONS_LOCK:
+        for k, exp in list(_SESSIONS.items()):
+            if exp < now:
+                _SESSIONS.pop(k, None)
+        _SESSIONS[token] = now + _SESSION_TTL
+    return token
+
+
+def _valid_session(token: Optional[str]) -> bool:
+    if not token:
+        return False
+    now = time.time()
+    with _SESSIONS_LOCK:
+        exp = _SESSIONS.get(token)
+        if exp is None:
+            return False
+        if exp < now:
+            _SESSIONS.pop(token, None)
+            return False
+    return True
+
+
+def _drop_session(token: Optional[str]) -> None:
+    if token:
+        with _SESSIONS_LOCK:
+            _SESSIONS.pop(token, None)
+
+
+def _cookie_token(cookie_header: Optional[str]) -> Optional[str]:
+    if not cookie_header:
+        return None
+    jar = SimpleCookie()
+    try:
+        jar.load(cookie_header)
+    except Exception:  # noqa: BLE001 - malformed cookie jar, treat as anonymous
+        return None
+    morsel = jar.get(_SESSION_COOKIE)
+    return morsel.value if morsel else None
 
 
 def _click_args(x: int, y: int, double: bool = False) -> list:

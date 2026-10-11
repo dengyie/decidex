@@ -1,8 +1,9 @@
 """Tests for the Balatro web viewer's interactive-input layer.
 
 These drive the real HTTP handler with a stubbed `_xdotool` so the argv that
-would be sent to the game is asserted directly, plus the token gate and the
-bad-input paths.
+would be sent to the game is asserted directly, plus the auth gate (login
+session cookie and the mesh X-Input-Token escape hatch), the CSRF guard, and
+the bad-input paths.
 """
 
 from __future__ import annotations
@@ -24,15 +25,17 @@ app = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(app)
 
 TOKEN = "s3cret-token"
+PASSWORD = "operator-pw"
 
 
 @pytest.fixture
 def server(monkeypatch):
-    """Live handler on a random port with xdotool stubbed and a known token."""
+    """Live handler on a random port with xdotool stubbed and a known secret."""
     captured = []
     monkeypatch.setattr(app, "VNC_PASSWORD", TOKEN)
     monkeypatch.setattr(app, "_xdotool",
                         lambda args: captured.append(list(args)) or "")
+    app._SESSIONS.clear()
 
     srv = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
     srv.daemon_threads = True
@@ -44,19 +47,55 @@ def server(monkeypatch):
     finally:
         srv.shutdown()
         srv.server_close()
+        app._SESSIONS.clear()
 
 
-def _post(base, path, body, token=None):
+@pytest.fixture
+def server_pw(monkeypatch):
+    """Same as `server`, but the operator password differs from the raw token so
+    login vs. header paths are distinguishable."""
+    captured = []
+    monkeypatch.setattr(app, "VNC_PASSWORD", PASSWORD)
+    monkeypatch.setattr(app, "_xdotool",
+                        lambda args: captured.append(list(args)) or "")
+    app._SESSIONS.clear()
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        yield base, captured
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        app._SESSIONS.clear()
+
+
+def _post(base, path, body, token=None, cookie=None, csrf=True, password=None):
     headers = {"Content-Type": "application/json"}
+    if csrf:
+        headers["X-Requested-With"] = "decidex-web"
     if token is not None:
         headers["X-Input-Token"] = token
+    if cookie is not None:
+        headers["Cookie"] = cookie
+    if password is not None:
+        body = dict(body, password=password)
     req = urllib.request.Request(base + path, data=json.dumps(body).encode(),
                                  headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
-            return r.status, json.loads(r.read())
+            return r.status, json.loads(r.read()), dict(r.headers)
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read())
+        return e.code, json.loads(e.read()), dict(e.headers)
+
+
+def _login(base, password):
+    """Log in and return the session cookie header value."""
+    code, _, headers = _post(base, "/api/login", {}, password=password)
+    assert code == 200, f"login failed: {code}"
+    set_cookie = headers.get("Set-Cookie", "")
+    return set_cookie.split(";", 1)[0]
 
 
 # ---- pure helpers -----------------------------------------------------------
@@ -89,23 +128,23 @@ def test_xdotool_failed_detects_errors():
 
 # ---- HTTP behaviour ---------------------------------------------------------
 
-def test_click_requires_token(server):
+def test_click_requires_auth(server):
     base, captured = server
-    code, body = _post(base, "/api/input/click", {"x": 10, "y": 20})
+    code, _, _ = _post(base, "/api/input/click", {"x": 10, "y": 20})
     assert code == 401
     assert captured == []
 
 
 def test_click_rejects_wrong_token(server):
     base, captured = server
-    code, _ = _post(base, "/api/input/click", {"x": 10, "y": 20}, token="nope")
+    code, _, _ = _post(base, "/api/input/click", {"x": 10, "y": 20}, token="nope")
     assert code == 401
     assert captured == []
 
 
 def test_click_with_token_moves_and_clicks(server):
     base, captured = server
-    code, body = _post(base, "/api/input/click", {"x": 640, "y": 400}, token=TOKEN)
+    code, body, _ = _post(base, "/api/input/click", {"x": 640, "y": 400}, token=TOKEN)
     assert code == 200 and body["ok"] is True
     assert captured == [["mousemove", "640", "400", "click", "1"]]
 
@@ -118,21 +157,21 @@ def test_double_click_sends_repeat(server):
 
 def test_click_bad_coords_is_400_not_500(server):
     base, captured = server
-    code, _ = _post(base, "/api/input/click", {"x": "abc", "y": None}, token=TOKEN)
+    code, _, _ = _post(base, "/api/input/click", {"x": "abc", "y": None}, token=TOKEN)
     assert code == 400
     assert captured == []
 
 
 def test_key_arrow_is_translated(server):
     base, captured = server
-    code, body = _post(base, "/api/input/key", {"key": "arrowleft"}, token=TOKEN)
+    code, body, _ = _post(base, "/api/input/key", {"key": "arrowleft"}, token=TOKEN)
     assert code == 200 and body["ok"] is True
     assert captured == [["key", "Left"]]
 
 
 def test_key_rejects_injection(server):
     base, captured = server
-    code, _ = _post(base, "/api/input/key", {"key": "a; rm -rf /"}, token=TOKEN)
+    code, _, _ = _post(base, "/api/input/key", {"key": "a; rm -rf /"}, token=TOKEN)
     assert code == 400
     assert captured == []
 
@@ -141,8 +180,95 @@ def test_key_reports_xdotool_failure(server, monkeypatch):
     base, _ = server
     monkeypatch.setattr(app, "_xdotool",
                         lambda args: "(symbol) No such key name 'Bogus'. Ignoring it.")
-    code, body = _post(base, "/api/input/key", {"key": "bogus"}, token=TOKEN)
+    code, body, _ = _post(base, "/api/input/key", {"key": "bogus"}, token=TOKEN)
     assert code == 200 and body["ok"] is False
+
+
+# ---- login session ----------------------------------------------------------
+
+def test_login_sets_session_cookie_and_authorizes(server_pw):
+    base, captured = server_pw
+    cookie = _login(base, PASSWORD)
+    assert app._SESSION_COOKIE in cookie
+    # No X-Input-Token at all — the session cookie alone must authorize.
+    code, body, _ = _post(base, "/api/input/click", {"x": 8, "y": 9}, cookie=cookie)
+    assert code == 200 and body["ok"] is True
+    assert captured == [["mousemove", "8", "9", "click", "1"]]
+
+
+def test_login_wrong_password_is_401(server_pw):
+    base, captured = server_pw
+    code, _, headers = _post(base, "/api/login", {}, password="wrong")
+    assert code == 401
+    assert "Set-Cookie" not in headers
+    assert captured == []
+
+
+def test_login_requires_csrf_header(server_pw):
+    base, _ = server_pw
+    code, _, headers = _post(base, "/api/login", {}, password=PASSWORD, csrf=False)
+    assert code == 403
+    assert "Set-Cookie" not in headers
+
+
+def test_input_requires_csrf_header(server_pw):
+    """A logged-in session alone is not enough: cross-site form posts carry the
+    cookie but cannot set X-Requested-With, so mutations must be refused."""
+    base, captured = server_pw
+    cookie = _login(base, PASSWORD)
+    code, _, _ = _post(base, "/api/input/click", {"x": 1, "y": 2}, cookie=cookie, csrf=False)
+    assert code == 403
+    assert captured == []
+
+
+def test_token_works_without_csrf_header(server):
+    """The mesh escape hatch is an explicit header, not ambient browser
+    credentials, so it must not require X-Requested-With."""
+    base, captured = server
+    code, body, _ = _post(base, "/api/input/click", {"x": 7, "y": 7}, token=TOKEN, csrf=False)
+    assert code == 200 and body["ok"] is True
+    assert captured == [["mousemove", "7", "7", "click", "1"]]
+
+
+def test_logout_invalidates_session(server_pw):
+    base, captured = server_pw
+    cookie = _login(base, PASSWORD)
+    code, _, headers = _post(base, "/api/logout", {}, cookie=cookie)
+    assert code == 200
+    assert "Max-Age=0" in headers.get("Set-Cookie", "")
+    code, _, _ = _post(base, "/api/input/click", {"x": 3, "y": 4}, cookie=cookie)
+    assert code == 401
+    assert captured == []
+
+
+def test_session_endpoint_reports_state(server_pw):
+    base, _ = server_pw
+    req = urllib.request.Request(base + "/api/session")
+    with urllib.request.urlopen(req, timeout=5) as r:
+        assert json.loads(r.read())["authenticated"] is False
+    cookie = _login(base, PASSWORD)
+    req = urllib.request.Request(base + "/api/session", headers={"Cookie": cookie})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        assert json.loads(r.read())["authenticated"] is True
+
+
+def test_session_cookie_is_httponly_samesite_strict(server_pw):
+    base, _ = server_pw
+    code, _, headers = _post(base, "/api/login", {}, password=PASSWORD)
+    set_cookie = headers.get("Set-Cookie", "")
+    assert "HttpOnly" in set_cookie
+    assert "SameSite=Strict" in set_cookie
+
+
+def test_expired_session_is_rejected(server_pw, monkeypatch):
+    base, captured = server_pw
+    cookie = _login(base, PASSWORD)
+    token = cookie.split("=", 1)[1]
+    with app._SESSIONS_LOCK:
+        app._SESSIONS[token] = 0.0          # force-expire
+    code, _, _ = _post(base, "/api/input/click", {"x": 1, "y": 1}, cookie=cookie)
+    assert code == 401
+    assert captured == []
 
 
 # ---- provider selection -----------------------------------------------------
