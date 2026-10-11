@@ -1,6 +1,8 @@
 """
-DecideX Balatro web viewer: browse bridge snapshots, run the advisor, and
+DecideX Balatro web viewer: browse real bridge snapshots, run the advisor, and
 compare recommendations against what the human actually played.
+
+Only REAL snapshots from the bridge mod are ever shown — no demo data.
 
 Routes:
   GET  /                      UI
@@ -11,7 +13,6 @@ Routes:
 
 Run:  python tools/balatro_web/app.py --host 0.0.0.0 --port 8091
 Bridge snapshots dir: $BALATRO_BRIDGE_DIR or <repo>/data/balatro_bridge
-(falls back to the shipped test fixtures when empty).
 """
 
 from __future__ import annotations
@@ -42,7 +43,6 @@ from decidex.providers.mock import MockReplayProvider  # noqa: E402
 logging.getLogger().setLevel(logging.ERROR)
 
 BRIDGE_DIR = Path(os.environ.get("BALATRO_BRIDGE_DIR", ROOT / "data" / "balatro_bridge"))
-FIXTURE_DIR = ROOT / "tests" / "fixtures" / "balatro"
 ADVISOR: Optional[BalatroAdvisor] = None
 _CACHE: Dict[str, Any] = {}
 
@@ -64,25 +64,19 @@ def get_advisor(kind: str) -> BalatroAdvisor:
 
 
 def list_games() -> List[Dict[str, Any]]:
+    """Real bridge snapshots only — never demo fixtures."""
     games: List[Dict[str, Any]] = []
-    seen = set()
-    for d, tag in ((BRIDGE_DIR, "bridge"), (FIXTURE_DIR, "demo")):
-        if d.is_dir():
-            for p in sorted(d.glob("*.json")):
-                if p.name not in seen:
-                    seen.add(p.name)
-                    games.append({"name": p.name, "size_kb": round(p.stat().st_size / 1024, 1),
-                                  "source": tag})
+    if BRIDGE_DIR.is_dir():
+        for p in sorted(BRIDGE_DIR.glob("*.json")):
+            games.append({"name": p.name, "size_kb": round(p.stat().st_size / 1024, 1),
+                          "source": "bridge"})
     return games
 
 
 def _snapshot_path(name: str) -> Optional[Path]:
     safe = Path(name).name
-    for d in (BRIDGE_DIR, FIXTURE_DIR):
-        p = d / safe
-        if p.is_file():
-            return p
-    return None
+    p = BRIDGE_DIR / safe
+    return p if p.is_file() else None
 
 
 def get_state(name: str) -> BalatroState:

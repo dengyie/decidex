@@ -104,7 +104,8 @@ async def test_advisor_falls_back_when_model_picks_illegal():
 async def test_real_replay_pairs_human_action():
     """Full fixture pairing: state-0002 records the human's royal-flush play."""
     from examples.balatro_real_replay import collect_snapshots, heuristic_solver
-    files = collect_snapshots([])
+    files = collect_snapshots([str(FIXTURES)])   # 测试显式指定 fixtures;产品代码只用真机 bridge 目录
+    assert all("fixtures" in str(f) for f in files)
     assert len(files) == 4
     states = [(f.name, load_state(f)) for f in files]
     pres = [s for _, s in states if s.actual is None]
@@ -152,3 +153,9 @@ def test_hopeless_hand_prefers_discards():
     best_play = max((c for c in acts if c.metadata["action_type"] == "play"),
                     key=lambda c: c.heuristic_score)
     assert best_discard.heuristic_score > best_play.heuristic_score
+
+
+def test_example_default_dir_is_bridge_dir():
+    """语义回归:示例与网页只读真机 bridge 目录,不回落 demo fixtures。"""
+    from examples.balatro_real_replay import DEFAULT_DIR
+    assert DEFAULT_DIR.name == "balatro_bridge"

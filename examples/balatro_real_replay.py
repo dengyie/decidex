@@ -4,11 +4,11 @@ decision-point snapshots and compare each recommendation with what the human
 actually played.
 
 Usage:
-    python examples/balatro_real_replay.py [dir-or-file ...]
+    python examples/balatro_real_replay.py <dir-or-file ...>
 
-No game install needed: point it at a directory of bridge JSON snapshots
-(default: tests/fixtures/balatro for a quick smoke, or the mod's output dir
-%APPDATA%/Balatro/decidex_bridge on the machine running the game).
+Point it at the bridge mod's output directory on the machine running the
+real game (Windows: %APPDATA%/Balatro/decidex_bridge), or set
+BALATRO_BRIDGE_DIR. No game install / no demo data — real snapshots only.
 
 Read-only: this only prints recommendations, never touches the game.
 """
@@ -16,13 +16,17 @@ Read-only: this only prints recommendations, never touches the game.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
 from decidex.balatro import BalatroAdvisor, load_state
 from decidex.providers.mock import MockReplayProvider
 
-DEFAULT_DIR = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "balatro"
+DEFAULT_DIR = Path(os.environ.get(
+    "BALATRO_BRIDGE_DIR",
+    Path(__file__).resolve().parents[1] / "data" / "balatro_bridge",
+))
 
 
 def heuristic_solver(payload, question):

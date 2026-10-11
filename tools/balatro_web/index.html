@@ -233,7 +233,10 @@ async function boot(){
 
 function renderSnapList(){
   const list = $('snapList'); while (list.firstChild) list.removeChild(list.firstChild);
-  if (!GAMES.length){ list.appendChild(el('div','muted','(无快照)')); return; }
+  if (!GAMES.length){
+    list.appendChild(el('div','muted','暂无真机快照 — 游戏机装好 decidex-bridge mod 并进入对局后,快照会自动出现在这里。'));
+    return;
+  }
   GAMES.forEach(g=>{
     const d = el('div', 'snap' + (g.name===CURRENT ? ' active' : ''));
     d.appendChild(el('span', null, g.name));
