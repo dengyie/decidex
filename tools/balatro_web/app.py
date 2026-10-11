@@ -65,10 +65,14 @@ def get_advisor(kind: str) -> BalatroAdvisor:
 
 def list_games() -> List[Dict[str, Any]]:
     games: List[Dict[str, Any]] = []
-    src_dir = BRIDGE_DIR if BRIDGE_DIR.is_dir() else FIXTURE_DIR
-    if src_dir.is_dir():
-        for p in sorted(src_dir.glob("*.json")):
-            games.append({"name": p.name, "size_kb": round(p.stat().st_size / 1024, 1)})
+    seen = set()
+    for d, tag in ((BRIDGE_DIR, "bridge"), (FIXTURE_DIR, "demo")):
+        if d.is_dir():
+            for p in sorted(d.glob("*.json")):
+                if p.name not in seen:
+                    seen.add(p.name)
+                    games.append({"name": p.name, "size_kb": round(p.stat().st_size / 1024, 1),
+                                  "source": tag})
     return games
 
 
