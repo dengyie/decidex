@@ -159,7 +159,7 @@
 <div class="live-wrap">
   <div class="panel live-panel" id="livePanel">
     <h3><span class="live-dot"></span> 游戏实况 · LIVE(广州CVM 真机)</h3>
-    <img id="liveFeed" src="/api/frame.jpg" alt="live" onerror="this.classList.add('down')">
+    <img id="liveFeed" alt="live">
     <div class="live-toolbar">
       <button id="playToggle">操作:开</button>
       <span id="ctrlHint">直接点击画面即可操作游戏(鼠标=点击,自动换算坐标)</span>
@@ -421,10 +421,27 @@ async function runAll(){
     rb2.appendChild(el('div','muted','失败: '+e.message)); }
 }
 
-setInterval(() => {
+/* 实况帧:串行加载,上一帧彻底画完才请求下一帧。
+   固定 600ms 轮询会在隧道慢时(单帧数秒)互相顶掉 —— 浏览器取消在途请求,
+   日志刷满 "stream canceled by remote",图片永远拼不完整。串行后每标签页
+   任意时刻最多一个在途请求,节奏随隧道延迟自适应,页面也就一直有画面。 */
+function scheduleFrame(delay) {
   const img = $('liveFeed');
-  if (img && document.visibilityState === 'visible') img.src = '/api/frame.jpg?t=' + Date.now();
-}, 600);
+  if (!img) return;
+  setTimeout(() => {
+    if (document.visibilityState !== 'visible') { scheduleFrame(800); return; }
+    let done = false;
+    const finish = (ok) => {
+      if (done) return; done = true;
+      img.classList.toggle('down', !ok);
+      scheduleFrame(ok ? 150 : 1500);   // 成功后靠近上一帧的到达节奏,失败则退避
+    };
+    img.onload = () => finish(true);
+    img.onerror = () => finish(false);
+    img.src = '/api/frame.jpg?t=' + Date.now();
+  }, delay);
+}
+scheduleFrame(0);
 
 /* ---- 操作游戏:点击实况画面 → 服务端 xdotool ---- */
 let PLAY_MODE = true;

@@ -66,6 +66,17 @@ BRIDGE_DIR = Path(os.environ.get("BALATRO_BRIDGE_DIR", ROOT / "data" / "balatro_
 VNC_TARGET = os.environ.get("BALATRO_VNC_TARGET", "10.144.144.8::5900")
 VNC_PASSWORD = os.environ.get("BALATRO_VNC_PASSWORD", "")
 FRAME_PATH = Path(os.environ.get("BALATRO_FRAME_PATH", "/tmp/balatro_live_frame.jpg"))
+FRAME_RAW_PATH = Path(os.environ.get("BALATRO_FRAME_RAW_PATH", "/tmp/balatro_live_frame.raw.jpg"))
+# The public path is bounded by this host's EGRESS uplink, not by CPU or the
+# tunnel: measured ~8.7 KB/s while the game runs (the 2-vCPU box is CPU-starved,
+# which collapses the TCP congestion window and drops ~1% of segments). A raw
+# 1280x800 capture is ~98 KB, so it needs 11+ s to leave the box — longer than
+# the browser waits, so the live feed never paints. Serving a downscaled frame
+# is the only lever inside this host: 640x400 q50 is ~18 KB (~2 s/frame) and
+# still legible for the board. Override both via env if the uplink changes.
+FRAME_WIDTH = int(os.environ.get("BALATRO_FRAME_WIDTH", "640"))
+FRAME_QUALITY = int(os.environ.get("BALATRO_FRAME_QUALITY", "50"))
+FRAME_INTERVAL = float(os.environ.get("BALATRO_FRAME_INTERVAL", "0.6"))
 GAME_DISPLAY = os.environ.get("BALATRO_GAME_DISPLAY", ":66")
 # Login credentials for the operator page. Defaults are the well-known dev pair;
 # override via env in any real deployment (BALATRO_WEB_USER / BALATRO_WEB_PASSWORD).
@@ -361,10 +372,33 @@ class Handler(BaseHTTPRequestHandler):
 _LOOP = None
 
 
+def _shrink_frame() -> None:
+    """Re-encode the raw capture into the small frame the uplink can afford.
+    draft() decodes the source JPEG at a reduced DCT scale (cheap on this
+    CPU-starved box) before the LANCZOS resize, and we always start from the
+    full-size raw capture, so quality never accumulates loss. If Pillow is
+    unavailable we fall back to the raw frame rather than serving nothing."""
+    try:
+        from PIL import Image
+    except Exception:  # noqa: BLE001 - Pillow is optional; raw frame still works
+        FRAME_PATH.write_bytes(FRAME_RAW_PATH.read_bytes())
+        return
+    with Image.open(FRAME_RAW_PATH) as im:
+        im.draft("RGB", (FRAME_WIDTH, 1))   # 1 keeps draft from demanding full height
+        if im.width <= FRAME_WIDTH:
+            im.convert("RGB").save(FRAME_PATH, "JPEG",
+                                   quality=FRAME_QUALITY, optimize=True)
+            return
+        height = max(1, round(im.height * FRAME_WIDTH / im.width))
+        im.convert("RGB").resize((FRAME_WIDTH, height), Image.LANCZOS).save(
+            FRAME_PATH, "JPEG", quality=FRAME_QUALITY, optimize=True)
+
+
 def _frame_worker() -> None:
     """Connect to the live game's VNC server and keep the latest frame JPEG
     on disk so /api/frame.jpg can serve the real game feed. One persistent
-    client, ~2 fps, auto-reconnect on failure."""
+    client, auto-reconnect on failure. Frames are captured full-size to
+    FRAME_RAW_PATH and then shrunk into FRAME_PATH before serving."""
     global _FRAME_MTIME
     while True:
         client = None
@@ -373,12 +407,13 @@ def _frame_worker() -> None:
             client = api.connect(VNC_TARGET, password=VNC_PASSWORD or None)
             logging.getLogger().info("live feed: connected to %s", VNC_TARGET)
             while True:
-                client.captureScreen(str(FRAME_PATH))
-                if FRAME_PATH.exists():
+                client.captureScreen(str(FRAME_RAW_PATH))
+                if FRAME_RAW_PATH.exists():
+                    _shrink_frame()
                     mtime = FRAME_PATH.stat().st_mtime
                     if mtime != _FRAME_MTIME:
                         _FRAME_MTIME = mtime
-                time.sleep(0.45)
+                time.sleep(FRAME_INTERVAL)
         except Exception as e:  # noqa: BLE001 - keep the feed alive forever
             logging.getLogger().warning("live feed: %s; reconnecting", e)
             try:
