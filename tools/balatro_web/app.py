@@ -213,11 +213,14 @@ class Handler(BaseHTTPRequestHandler):
     # here because every response sets Content-Length.
     protocol_version = "HTTP/1.1"
 
-    # ThreadingHTTPServer defaults request_queue_size to 5. The connector opens
-    # several parallel streams; when the accept queue overflows the kernel RSTs
-    # the connection and cloudflared reports "http2: stream closed". Give it
-    # real headroom.
-    request_queue_size = 128
+    # Keep-alive without an idle timeout parks one ThreadingHTTPServer thread per
+    # abandoned socket forever — the live feed polls /api/frame.jpg every 600ms
+    # from every open tab, and the connector also opens speculative streams, so
+    # threads piled up into the hundreds on this 2-vCPU box and starved the
+    # origin. StreamRequestHandler applies this to the socket, and
+    # handle_one_request() turns the resulting socket.timeout into
+    # close_connection, so idle keep-alive sockets are reaped.
+    timeout = 15
 
     def log_message(self, *a):  # silence request spam
         pass
@@ -478,6 +481,15 @@ def _xdotool_failed(out: str) -> bool:
     return out.lower().startswith("error") or "no such key name" in out.lower()
 
 
+class _Server(ThreadingHTTPServer):
+    # request_queue_size is consumed by server_activate() during __init__, so it
+    # must be a class attribute — setting it after construction is too late.
+    # The default 5 overflows under the connector's parallel streams and the
+    # kernel RSTs them, which cloudflared reports as "http2: stream closed".
+    allow_reuse_address = True
+    request_queue_size = 128
+
+
 def main():
     global _LOOP
     ap = argparse.ArgumentParser(description="DecideX Balatro advisor web viewer")
@@ -491,7 +503,7 @@ def main():
     time.sleep(0.1)
     threading.Thread(target=_frame_worker, daemon=True).start()
 
-    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    srv = _Server((args.host, args.port), Handler)
     srv.daemon_threads = True
     print("=" * 68)
     print(" DecideX · 小丑牌顾问 优秀操作回放")
