@@ -208,6 +208,17 @@ async def _replay(kind: str) -> Dict[str, Any]:
 
 
 class Handler(BaseHTTPRequestHandler):
+    # HTTP/1.1 keeps the connection alive so Cloudflare's connector multiplexes
+    # its streams over fewer sockets instead of reconnecting per request. Safe
+    # here because every response sets Content-Length.
+    protocol_version = "HTTP/1.1"
+
+    # ThreadingHTTPServer defaults request_queue_size to 5. The connector opens
+    # several parallel streams; when the accept queue overflows the kernel RSTs
+    # the connection and cloudflared reports "http2: stream closed". Give it
+    # real headroom.
+    request_queue_size = 128
+
     def log_message(self, *a):  # silence request spam
         pass
 
