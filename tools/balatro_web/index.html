@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <title>DecideX · 小丑牌顾问</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 游戏分辨率由服务端按 BALATRO_GAME_W/H 注入(见 app.py),避免页面与服务端各写一份而漂移。
+     直接用浏览器打开本文件时占位符不会被替换,下面的解析会退回 960x600 默认值。 -->
+<meta id="game-dims" name="game-dims" content="__GAME_DIMS__">
 <style>
   :root {
     --felt1:#35654d; --felt2:#1e4433; --wood:#3a2a1c; --panel:#10141d;
@@ -424,21 +427,42 @@ async function runAll(){
 /* 实况帧:串行加载,上一帧彻底画完才请求下一帧。
    固定 600ms 轮询会在隧道慢时(单帧数秒)互相顶掉 —— 浏览器取消在途请求,
    日志刷满 "stream canceled by remote",图片永远拼不完整。串行后每标签页
-   任意时刻最多一个在途请求,节奏随隧道延迟自适应,页面也就一直有画面。 */
+   任意时刻最多一个在途请求,节奏随隧道延迟自适应,页面也就一直有画面。
+   URL 不带时间戳,配合服务端短 s-maxage:多观众由 CDN 边缘合并成约每次产帧
+   一次回源 —— 出网流量是这台机的硬约束。但 Cloudflare 的 Browser Cache TTL
+   会把我们发的 max-age=1 改写成 4h,<img src> 会直接吃浏览器缓存、画面冻结;
+   所以这里用 fetch(cache:'no-store') 强制每次走网络(边缘命中不额外占出网),
+   再用 blob URL 喂给 <img>,既保活又不破坏边缘合并。*/
+const FRAME_POLL_MS = 1000;   // 不快于服务端产帧节奏(0.5s),避免空转拉帧
+let _frameBlobURL = null;
+async function loadFrame() {
+  const img = $('liveFeed');
+  if (!img) return false;
+  const r = await fetch('/api/frame.jpg', { cache: 'no-store' });
+  if (!r.ok) return false;
+  const url = URL.createObjectURL(await r.blob());
+  const ok = await new Promise((res) => {
+    img.onload = () => res(true);
+    img.onerror = () => res(false);
+    img.src = url;
+  });
+  if (ok) {
+    if (_frameBlobURL) URL.revokeObjectURL(_frameBlobURL);
+    _frameBlobURL = url;
+  } else {
+    URL.revokeObjectURL(url);
+  }
+  return ok;
+}
 function scheduleFrame(delay) {
   const img = $('liveFeed');
   if (!img) return;
-  setTimeout(() => {
-    if (document.visibilityState !== 'visible') { scheduleFrame(800); return; }
-    let done = false;
-    const finish = (ok) => {
-      if (done) return; done = true;
-      img.classList.toggle('down', !ok);
-      scheduleFrame(ok ? 150 : 1500);   // 成功后靠近上一帧的到达节奏,失败则退避
-    };
-    img.onload = () => finish(true);
-    img.onerror = () => finish(false);
-    img.src = '/api/frame.jpg?t=' + Date.now();
+  setTimeout(async () => {
+    if (document.visibilityState !== 'visible') { scheduleFrame(1000); return; }
+    let ok = false;
+    try { ok = await loadFrame(); } catch { ok = false; }
+    img.classList.toggle('down', !ok);
+    scheduleFrame(ok ? FRAME_POLL_MS : 2000);   // 成功按产帧节奏,失败退避
   }, delay);
 }
 scheduleFrame(0);
@@ -446,7 +470,10 @@ scheduleFrame(0);
 /* ---- 操作游戏:点击实况画面 → 服务端 xdotool ---- */
 let PLAY_MODE = true;
 let LOGGED_IN = false;
-const GAME_W = 1280, GAME_H = 800;   // 游戏原生分辨率(窗口实测 1280x800)
+/* 游戏渲染分辨率 = Xvfb :66 屏幕尺寸。服务端把它注入 <meta name="game-dims">,
+   这里读回来,保证点击坐标映射与服务端 xdotool 夹取范围一致。占位符未替换时退回默认。 */
+const _GD = ($('game-dims')?.content || '').match(/^(\d+)x(\d+)$/);
+const GAME_W = _GD ? +_GD[1] : 960, GAME_H = _GD ? +_GD[2] : 600;
 // DOM KeyboardEvent.key → 服务端 xdotool 键名
 const KEY_SEND = { ' ': 'space', 'ArrowUp': 'arrowup', 'ArrowDown': 'arrowdown',
                    'ArrowLeft': 'arrowleft', 'ArrowRight': 'arrowright',

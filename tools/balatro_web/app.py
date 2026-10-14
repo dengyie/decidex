@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
@@ -72,12 +73,26 @@ FRAME_RAW_PATH = Path(os.environ.get("BALATRO_FRAME_RAW_PATH", "/tmp/balatro_liv
 # which collapses the TCP congestion window and drops ~1% of segments). A raw
 # 1280x800 capture is ~98 KB, so it needs 11+ s to leave the box — longer than
 # the browser waits, so the live feed never paints. Serving a downscaled frame
-# is the only lever inside this host: 640x400 q50 is ~18 KB (~2 s/frame) and
-# still legible for the board. Override both via env if the uplink changes.
-FRAME_WIDTH = int(os.environ.get("BALATRO_FRAME_WIDTH", "640"))
-FRAME_QUALITY = int(os.environ.get("BALATRO_FRAME_QUALITY", "50"))
-FRAME_INTERVAL = float(os.environ.get("BALATRO_FRAME_INTERVAL", "0.6"))
+# is the only lever inside this host. The public box now runs the game at
+# 960x600 and the served frame at 560x350, and every egress KB counts against a
+# 300 GB/month traffic allowance, so size is deliberately conservative.
+FRAME_WIDTH = int(os.environ.get("BALATRO_FRAME_WIDTH", "560"))
+FRAME_QUALITY = int(os.environ.get("BALATRO_FRAME_QUALITY", "40"))
+# The worker mints a fresh JPEG every FRAME_INTERVAL; the browser polls no
+# faster than this, so a fast client cannot multiply egress by re-fetching the
+# same frame. Cloudflare edge caching (below) then collapses many viewers into
+# ~one origin fetch per interval.
+FRAME_INTERVAL = float(os.environ.get("BALATRO_FRAME_INTERVAL", "0.5"))
+# Serve the frame with a tiny s-maxage so Cloudflare collapses concurrent
+# viewers into one origin request per interval. The per-request cache-buster is
+# gone (dropped from index.html), so the URL is stable and edge-cacheable; the
+# content still changes every FRAME_INTERVAL, so the feed stays live.
+FRAME_MAXAGE = int(os.environ.get("BALATRO_FRAME_MAXAGE", "1"))
 GAME_DISPLAY = os.environ.get("BALATRO_GAME_DISPLAY", ":66")
+# Xvfb :66 screen size; the game window tracks it (no window manager), so this
+# is also the click-coordinate space the page maps onto.
+GAME_W = int(os.environ.get("BALATRO_GAME_W", "960"))
+GAME_H = int(os.environ.get("BALATRO_GAME_H", "600"))
 # Login credentials for the operator page. Defaults are the well-known dev pair;
 # override via env in any real deployment (BALATRO_WEB_USER / BALATRO_WEB_PASSWORD).
 WEB_USER = os.environ.get("BALATRO_WEB_USER", "mango")
@@ -286,8 +301,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             if self.path in ("/", "/index.html"):
-                page = (Path(__file__).parent / "index.html").read_bytes()
-                return self._send(200, page, "text/html; charset=utf-8")
+                page = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+                # Inject the real game screen size so the page's click-coordinate
+                # mapping can never drift from the server's xdotool clamp.
+                page = page.replace("__GAME_DIMS__", f"{GAME_W}x{GAME_H}")
+                return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             if self.path in ("/login", "/login.html"):
                 page = (Path(__file__).parent / "login.html").read_bytes()
                 return self._send(200, page, "text/html; charset=utf-8")
@@ -297,8 +315,26 @@ class Handler(BaseHTTPRequestHandler):
             if self.path.startswith("/api/frame.jpg"):
                 if not FRAME_PATH.exists():
                     return self._json({"error": "no frame yet"}, 503)
+                etag = '"%s"' % _FRAME_ETAG
+                # Cloudflare revalidates cached frames with If-None-Match; the
+                # 304 reply carries no body, so an unchanged frame costs ~0
+                # egress no matter how many viewers poll.
+                if self.headers.get("If-None-Match") == etag:
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.send_header("Cache-Control",
+                                     f"public, max-age={FRAME_MAXAGE}, s-maxage={FRAME_MAXAGE}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 data = FRAME_PATH.read_bytes()
-                self._send(200, data, "image/jpeg", nocache=True)
+                # Stable URL (no per-request cache-buster) + short edge TTL lets
+                # the CDN collapse N viewers into ~one origin fetch per interval.
+                self._send(200, data, "image/jpeg", extra={
+                    "ETag": etag,
+                    "Cache-Control":
+                    f"public, max-age={FRAME_MAXAGE}, s-maxage={FRAME_MAXAGE}",
+                })
                 return
             if self.path == "/api/health":
                 return self._json({
@@ -370,6 +406,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 _LOOP = None
+# Fingerprint of the current served frame (sha1 of its bytes). Cloudflare's
+# edge revalidates with If-None-Match; when the frame is unchanged we answer
+# 304 with no body, so an idle client costs ~0 egress instead of re-downloading
+# an identical 18 KB JPEG every poll.
+_FRAME_ETAG: str = ""
 
 
 def _shrink_frame() -> None:
@@ -378,20 +419,22 @@ def _shrink_frame() -> None:
     CPU-starved box) before the LANCZOS resize, and we always start from the
     full-size raw capture, so quality never accumulates loss. If Pillow is
     unavailable we fall back to the raw frame rather than serving nothing."""
+    global _FRAME_ETAG
     try:
         from PIL import Image
     except Exception:  # noqa: BLE001 - Pillow is optional; raw frame still works
         FRAME_PATH.write_bytes(FRAME_RAW_PATH.read_bytes())
-        return
-    with Image.open(FRAME_RAW_PATH) as im:
-        im.draft("RGB", (FRAME_WIDTH, 1))   # 1 keeps draft from demanding full height
-        if im.width <= FRAME_WIDTH:
-            im.convert("RGB").save(FRAME_PATH, "JPEG",
-                                   quality=FRAME_QUALITY, optimize=True)
-            return
-        height = max(1, round(im.height * FRAME_WIDTH / im.width))
-        im.convert("RGB").resize((FRAME_WIDTH, height), Image.LANCZOS).save(
-            FRAME_PATH, "JPEG", quality=FRAME_QUALITY, optimize=True)
+    else:
+        with Image.open(FRAME_RAW_PATH) as im:
+            im.draft("RGB", (FRAME_WIDTH, 1))   # 1 keeps draft from demanding full height
+            if im.width <= FRAME_WIDTH:
+                im.convert("RGB").save(FRAME_PATH, "JPEG",
+                                       quality=FRAME_QUALITY, optimize=True)
+            else:
+                height = max(1, round(im.height * FRAME_WIDTH / im.width))
+                im.convert("RGB").resize((FRAME_WIDTH, height), Image.LANCZOS).save(
+                    FRAME_PATH, "JPEG", quality=FRAME_QUALITY, optimize=True)
+    _FRAME_ETAG = hashlib.sha1(FRAME_PATH.read_bytes()).hexdigest()[:16]
 
 
 def _frame_worker() -> None:
@@ -399,7 +442,6 @@ def _frame_worker() -> None:
     on disk so /api/frame.jpg can serve the real game feed. One persistent
     client, auto-reconnect on failure. Frames are captured full-size to
     FRAME_RAW_PATH and then shrunk into FRAME_PATH before serving."""
-    global _FRAME_MTIME
     while True:
         client = None
         try:
@@ -410,9 +452,6 @@ def _frame_worker() -> None:
                 client.captureScreen(str(FRAME_RAW_PATH))
                 if FRAME_RAW_PATH.exists():
                     _shrink_frame()
-                    mtime = FRAME_PATH.stat().st_mtime
-                    if mtime != _FRAME_MTIME:
-                        _FRAME_MTIME = mtime
                 time.sleep(FRAME_INTERVAL)
         except Exception as e:  # noqa: BLE001 - keep the feed alive forever
             logging.getLogger().warning("live feed: %s; reconnecting", e)
@@ -486,8 +525,10 @@ def _cookie_token(cookie_header: Optional[str]) -> Optional[str]:
 
 
 def _click_args(x: int, y: int, double: bool = False) -> list:
-    """Clamp to the game window and build the xdotool argv for one click."""
-    args = ["mousemove", str(max(0, min(1279, x))), str(max(0, min(799, y)))]
+    """Clamp to the game window and build the xdotool argv for one click.
+    Bounds track the Xvfb :66 screen (BALATRO_GAME_W/H), which may be shrunk
+    from the original 1280x800 to cut render cost and frame size."""
+    args = ["mousemove", str(max(0, min(GAME_W - 1, x))), str(max(0, min(GAME_H - 1, y)))]
     if double:
         return args + ["click", "--repeat", "2", "1"]
     return args + ["click", "1"]

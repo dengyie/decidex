@@ -117,7 +117,9 @@ def test_click_args_double():
 
 
 def test_click_args_clamps_out_of_range():
-    assert app._click_args(-5, 99999) == ["mousemove", "0", "799", "click", "1"]
+    # bounds track the game screen (BALATRO_GAME_W/H default 960x600)
+    assert app._click_args(-5, 99999) == ["mousemove", "0", "599", "click", "1"]
+    assert app._click_args(99999, -5) == ["mousemove", "959", "0", "click", "1"]
 
 
 def test_key_name_translates_page_keys():
