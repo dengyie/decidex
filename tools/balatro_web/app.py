@@ -66,6 +66,12 @@ logging.getLogger().setLevel(logging.ERROR)
 BRIDGE_DIR = Path(os.environ.get("BALATRO_BRIDGE_DIR", ROOT / "data" / "balatro_bridge"))
 VNC_TARGET = os.environ.get("BALATRO_VNC_TARGET", "10.144.144.8::5900")
 VNC_PASSWORD = os.environ.get("BALATRO_VNC_PASSWORD", "")
+# Bound every VNC round-trip (connect/capture/disconnect). vncdotool's proxy
+# waits on a result queue with this timeout, and the default is a full hour: if
+# x11vnc restarts, captureScreen blocks on the dead socket for up to 3600 s and
+# the worker never reaches its reconnect branch. A few seconds turns that hang
+# into a TimeoutError so the loop reconnects promptly.
+VNC_TIMEOUT = float(os.environ.get("BALATRO_VNC_TIMEOUT", "8"))
 FRAME_PATH = Path(os.environ.get("BALATRO_FRAME_PATH", "/tmp/balatro_live_frame.jpg"))
 FRAME_RAW_PATH = Path(os.environ.get("BALATRO_FRAME_RAW_PATH", "/tmp/balatro_live_frame.raw.jpg"))
 # The public path is bounded by this host's EGRESS uplink, not by CPU or the
@@ -446,7 +452,8 @@ def _frame_worker() -> None:
         client = None
         try:
             from vncdotool import api
-            client = api.connect(VNC_TARGET, password=VNC_PASSWORD or None)
+            client = api.connect(VNC_TARGET, password=VNC_PASSWORD or None,
+                                 timeout=VNC_TIMEOUT)
             logging.getLogger().info("live feed: connected to %s", VNC_TARGET)
             while True:
                 client.captureScreen(str(FRAME_RAW_PATH))
