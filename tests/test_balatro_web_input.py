@@ -92,9 +92,9 @@ def _post(base, path, body, token=None, cookie=None, csrf=True, password=None, u
                                  headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
-            return r.status, json.loads(r.read()), dict(r.headers)
+            return r.status, json.loads(r.read()), r.headers
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read()), dict(e.headers)
+        return e.code, json.loads(e.read()), e.headers
 
 
 def _login(base, password=PASSWORD, user=USER):
@@ -195,13 +195,16 @@ def test_key_reports_xdotool_failure(server, monkeypatch):
 
 # ---- routing (query string strip) -------------------------------------------
 
-def _get(base, path):
-    req = urllib.request.Request(base + path, method="GET")
+def _get(base, path, cookie=None):
+    headers = {}
+    if cookie is not None:
+        headers["Cookie"] = cookie
+    req = urllib.request.Request(base + path, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
-            return r.status, r.read(), dict(r.headers)
+            return r.status, r.read(), r.headers
     except urllib.error.HTTPError as e:
-        return e.code, e.read(), dict(e.headers)
+        return e.code, e.read(), e.headers
 
 
 def test_login_page_served_with_query_string(server):
@@ -408,3 +411,67 @@ def test_advisor_cached_per_kind():
         app._build_provider = orig
         app._ADVISORS.clear()
     assert seen == ["heuristic", "model"]
+
+# ---- SSO integration tests --------------------------------------------------
+
+def test_sso_cookie_authenticates_session_and_input(server_pw, monkeypatch):
+    base, captured = server_pw
+    secret = "test-sso-secret-xyz"
+    monkeypatch.setattr(app, "_SSO_SECRET", secret)
+    sso_tok = app._create_sso_token("mango_operator", secret=secret)
+    sso_cookie = f"{app._SSO_COOKIE}={sso_tok}"
+
+    # Test /api/session
+    code, raw_body, _ = _get(base, "/api/session", cookie=sso_cookie)
+    body = json.loads(raw_body.decode())
+    assert code == 200
+    assert body.get("authenticated") is True
+    assert body.get("user") == "mango_operator"
+    assert body.get("sso") is True
+
+    # Test /api/input/click
+    code, _, _ = _post(base, "/api/input/click", {"x": 10, "y": 20}, cookie=sso_cookie)
+    assert code == 200
+    assert len(captured) == 1
+
+
+def test_sso_tampered_or_expired_cookie_rejected(server_pw, monkeypatch):
+    base, captured = server_pw
+    secret = "test-sso-secret-xyz"
+    monkeypatch.setattr(app, "_SSO_SECRET", secret)
+    
+    # Tampered token
+    tampered_cookie = f"{app._SSO_COOKIE}=invalid.signature"
+    code, raw_body, _ = _get(base, "/api/session", cookie=tampered_cookie)
+    body = json.loads(raw_body.decode())
+    assert code == 200
+    assert body.get("authenticated") is False
+
+    code, _, _ = _post(base, "/api/input/click", {"x": 10, "y": 20}, cookie=tampered_cookie)
+    assert code == 401
+    assert captured == []
+
+    # Expired token
+    expired_tok = app._create_sso_token("mango", secret=secret, ttl=-10)
+    expired_cookie = f"{app._SSO_COOKIE}={expired_tok}"
+    code, raw_body, _ = _get(base, "/api/session", cookie=expired_cookie)
+    body = json.loads(raw_body.decode())
+    assert code == 200
+    assert body.get("authenticated") is False
+
+
+def test_sso_logout_drops_both_cookies(server_pw, monkeypatch):
+    base, _ = server_pw
+    secret = "test-sso-secret-xyz"
+    monkeypatch.setattr(app, "_SSO_SECRET", secret)
+    sso_tok = app._create_sso_token("mango", secret=secret)
+    sso_cookie = f"{app._SSO_COOKIE}={sso_tok}"
+
+    code, body, headers = _post(base, "/api/logout", {}, cookie=sso_cookie)
+    assert code == 200
+    assert body.get("ok") is True
+    # Verify multiple Set-Cookie headers in response
+    cookies_header = headers.get_all("Set-Cookie") if hasattr(headers, "get_all") else [headers.get("Set-Cookie")]
+    cookies_str = " ".join(str(c) for c in cookies_header)
+    assert "balatro_session=" in cookies_str
+    assert "mango_game_session=" in cookies_str

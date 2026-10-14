@@ -32,6 +32,7 @@ Bridge snapshots dir: $BALATRO_BRIDGE_DIR or <repo>/data/balatro_bridge
 from __future__ import annotations
 
 import argparse
+import base64
 import asyncio
 import hashlib
 import hmac
@@ -112,6 +113,51 @@ _CACHE: Dict[str, Any] = {}
 # operator just logs in again), and nothing sensitive is ever written to disk.
 _SESSION_COOKIE = "balatro_session"
 _SESSION_TTL = 12 * 3600
+_SSO_COOKIE = "mango_game_session"
+_SSO_SECRET = os.environ.get("MANGO_AUTH_SECRET", "")
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
+
+
+def _b64url_decode(s: str) -> bytes:
+    padding = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + padding)
+
+
+def _verify_sso_token(token: Optional[str], secret: Optional[str] = None) -> Optional[dict]:
+    s = secret if secret is not None else _SSO_SECRET
+    if not token or "." not in token or not s:
+        return None
+    try:
+        payload_b64, sig_b64 = token.split(".", 1)
+        expected = hmac.new(s.encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).digest()
+        actual = _b64url_decode(sig_b64)
+        if not hmac.compare_digest(expected, actual):
+            return None
+        payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
+        if time.time() > payload.get("exp", 0):
+            return None
+        return payload
+    except Exception:
+        return None
+
+
+def _create_sso_token(user: str, secret: Optional[str] = None, ttl: int = _SESSION_TTL) -> str:
+    s = secret if secret is not None else _SSO_SECRET
+    now = int(time.time())
+    payload = {
+        "u": user,
+        "role": "operator",
+        "iat": now,
+        "exp": now + ttl
+    }
+    payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    payload_b64 = _b64url_encode(payload_bytes)
+    sig = hmac.new(s.encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).digest()
+    sig_b64 = _b64url_encode(sig)
+    return f"{payload_b64}.{sig_b64}"
 _SESSIONS: Dict[str, float] = {}          # cookie value -> expiry epoch
 _SESSIONS_LOCK = threading.Lock()
 
@@ -273,8 +319,13 @@ class Handler(BaseHTTPRequestHandler):
             # The live frame is a parameterless .jpg; Cloudflare caches those
             # unless told otherwise, which freezes the public feed.
             self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-        for k, v in (extra or {}).items():
-            self.send_header(k, v)
+        if extra:
+            for k, v in extra.items():
+                if isinstance(v, list):
+                    for sub_v in v:
+                        self.send_header(k, sub_v)
+                else:
+                    self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -285,7 +336,8 @@ class Handler(BaseHTTPRequestHandler):
     def _auth_via(self) -> Optional[str]:
         """How the caller proved input rights: 'session' (ambient cookie) or
         'token' (explicit X-Input-Token header for mesh scripts), else None."""
-        if _valid_session(_cookie_token(self.headers.get("Cookie"))):
+        balatro_tok, sso_tok = _cookie_tokens(self.headers.get("Cookie"))
+        if _valid_session(balatro_tok, sso_tok):
             return "session"
         if _check_input_token(self.headers.get("X-Input-Token", "")):
             return "token"
@@ -323,16 +375,22 @@ class Handler(BaseHTTPRequestHandler):
                 page = page.replace("__GAME_DIMS__", f"{GAME_W}x{GAME_H}")
                 return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             if path in ("/login", "/login.html"):
+                balatro_tok, sso_tok = _cookie_tokens(self.headers.get("Cookie"))
+                if _valid_session(balatro_tok, sso_tok):
+                    qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+                    nxt = _safe_next_path(parse_qs(qs).get("next", [None])[0])
+                    return self._send(302, b"", "text/plain", extra={"Location": nxt})
                 page = (Path(__file__).parent / "login.html").read_text(encoding="utf-8")
-                # Never let the client trust the raw `next` query: sanitize it
-                # here and inject a validated same-origin path as a JS literal.
                 qs = self.path.split("?", 1)[1] if "?" in self.path else ""
                 nxt = _safe_next_path(parse_qs(qs).get("next", [None])[0])
                 page = page.replace("__NEXT_PATH__", json.dumps(nxt))
                 return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             if path == "/api/session":
-                return self._json({"authenticated":
-                                   _valid_session(_cookie_token(self.headers.get("Cookie")))})
+                balatro_tok, sso_tok = _cookie_tokens(self.headers.get("Cookie"))
+                sso_payload = _verify_sso_token(sso_tok) if sso_tok else None
+                authed = _valid_session(balatro_tok, sso_tok)
+                user = (sso_payload.get("u") if sso_payload else None) or ("operator" if authed else None)
+                return self._json({"authenticated": authed, "user": user, "sso": bool(sso_payload)})
             if path.startswith("/api/frame.jpg"):
                 if not FRAME_PATH.exists():
                     return self._json({"error": "no frame yet"}, 503)
@@ -390,13 +448,22 @@ class Handler(BaseHTTPRequestHandler):
                                           str(req.get("password", ""))):
                     return self._json({"error": "invalid credentials"}, 401)
                 token = _new_session()
-                cookie = (f"{_SESSION_COOKIE}={token}; Path=/; HttpOnly; "
-                          f"SameSite=Strict; Max-Age={_SESSION_TTL}")
-                return self._json({"ok": True}, extra={"Set-Cookie": cookie})
+                cookies = [
+                    f"{_SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={_SESSION_TTL}"
+                ]
+                if _SSO_SECRET:
+                    sso_token = _create_sso_token(str(req.get("user", "")))
+                    cookies.append(
+                        f"{_SSO_COOKIE}={sso_token}; Path=/; Domain=.mangoqwq.com; HttpOnly; SameSite=Lax; Secure; Max-Age={_SESSION_TTL}"
+                    )
+                return self._json({"ok": True}, extra={"Set-Cookie": cookies})
             if path == "/api/logout":
                 _drop_session(_cookie_token(self.headers.get("Cookie")))
-                cookie = f"{_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
-                return self._json({"ok": True}, extra={"Set-Cookie": cookie})
+                cookies_to_drop = [
+                    f"{_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+                    f"{_SSO_COOKIE}=; Path=/; Domain=.mangoqwq.com; HttpOnly; SameSite=Lax; Secure; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+                ]
+                return self._json({"ok": True}, extra={"Set-Cookie": cookies_to_drop})
             if path == "/api/recommend":
                 return self._json(self._run_async(_recommend(str(req.get("name", "")), kind)))
             if path == "/api/replay":
@@ -538,7 +605,11 @@ def _new_session() -> str:
     return token
 
 
-def _valid_session(token: Optional[str]) -> bool:
+def _valid_session(token: Optional[str], sso_token: Optional[str] = None) -> bool:
+    if sso_token:
+        sso_payload = _verify_sso_token(sso_token)
+        if sso_payload:
+            return True
     if not token:
         return False
     now = time.time()
@@ -558,16 +629,23 @@ def _drop_session(token: Optional[str]) -> None:
             _SESSIONS.pop(token, None)
 
 
-def _cookie_token(cookie_header: Optional[str]) -> Optional[str]:
+def _cookie_tokens(cookie_header: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     if not cookie_header:
-        return None
+        return None, None
     jar = SimpleCookie()
     try:
         jar.load(cookie_header)
     except Exception:  # noqa: BLE001 - malformed cookie jar, treat as anonymous
-        return None
-    morsel = jar.get(_SESSION_COOKIE)
-    return morsel.value if morsel else None
+        return None, None
+    balatro_morsel = jar.get(_SESSION_COOKIE)
+    sso_morsel = jar.get(_SSO_COOKIE)
+    return (balatro_morsel.value if balatro_morsel else None,
+            sso_morsel.value if sso_morsel else None)
+
+
+def _cookie_token(cookie_header: Optional[str]) -> Optional[str]:
+    balatro, _ = _cookie_tokens(cookie_header)
+    return balatro
 
 
 def _click_args(x: int, y: int, double: bool = False) -> list:

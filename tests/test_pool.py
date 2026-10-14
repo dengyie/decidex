@@ -312,6 +312,7 @@ def test_from_default_locations_ignores_mindshub_credentials(tmp_path, monkeypat
     monkeypatch.setenv("MINDSHUB_API_KEY", "mdb_env_key")
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.delenv("DECIDEX_API_KEY", raising=False)
+    monkeypatch.delenv("DECIDEX_KEY_FILE", raising=False)
     monkeypatch.setattr(
         KeyPool, "default_key_file_candidates",
         classmethod(lambda cls: [str(tmp_path / "keys.jsonl")]),
@@ -328,6 +329,7 @@ def test_from_default_locations_filters_tagged_mindshub_keys(tmp_path, monkeypat
     monkeypatch.delenv("MINDSHUB_API_KEY", raising=False)
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.delenv("DECIDEX_API_KEY", raising=False)
+    monkeypatch.delenv("DECIDEX_KEY_FILE", raising=False)
     monkeypatch.setattr(
         KeyPool, "default_key_file_candidates",
         classmethod(lambda cls: [str(tmp_path / "keys.jsonl")]),
@@ -350,6 +352,7 @@ def test_from_default_locations_ignores_futureppo_credentials(tmp_path, monkeypa
     monkeypatch.delenv("DECIDEX_FUTUREPPO_KEY", raising=False)
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.delenv("DECIDEX_API_KEY", raising=False)
+    monkeypatch.delenv("DECIDEX_KEY_FILE", raising=False)
     monkeypatch.setattr(
         KeyPool, "default_key_file_candidates",
         classmethod(lambda cls: [str(tmp_path / "keys.jsonl")]),
@@ -368,6 +371,7 @@ def test_from_default_locations_filters_tagged_futureppo_keys(tmp_path, monkeypa
     monkeypatch.delenv("MINDSHUB_API_KEY", raising=False)
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.delenv("DECIDEX_API_KEY", raising=False)
+    monkeypatch.delenv("DECIDEX_KEY_FILE", raising=False)
     monkeypatch.setattr(
         KeyPool, "default_key_file_candidates",
         classmethod(lambda cls: [str(tmp_path / "keys.jsonl")]),

@@ -528,13 +528,21 @@ $('playToggle').onclick = () => {
 $('livePanel').classList.add('playable');
 
 async function syncAuth(){
+  let ssoUser = null;
   try {
     const r = await fetch('/api/session');
-    LOGGED_IN = !!(await r.json()).authenticated;
+    const data = await r.json();
+    LOGGED_IN = !!data.authenticated;
+    if (data.sso && data.user) ssoUser = data.user;
   } catch(e) { LOGGED_IN = false; }
   const el = $('authState');
-  el.textContent = LOGGED_IN ? '已登录' : '未登录 · 点画面将跳转登录';
-  el.className = LOGGED_IN ? 'on' : 'off';
+  if (LOGGED_IN) {
+    el.textContent = ssoUser ? ('已登录 (全站通行: ' + ssoUser + ')') : '已登录';
+    el.className = 'on';
+  } else {
+    el.textContent = '未登录 · 点画面将跳转登录';
+    el.className = 'off';
+  }
 }
 $('logoutBtn').onclick = async () => {
   await fetch('/api/logout', { method:'POST',
