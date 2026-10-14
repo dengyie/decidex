@@ -193,6 +193,32 @@ def test_key_reports_xdotool_failure(server, monkeypatch):
     assert code == 200 and body["ok"] is False
 
 
+# ---- routing (query string strip) -------------------------------------------
+
+def _get(base, path):
+    req = urllib.request.Request(base + path, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, r.read(), dict(r.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), dict(e.headers)
+
+
+def test_login_page_served_with_query_string(server):
+    """The 401 flow redirects to /login?next=%2F; a query string must not 404."""
+    base, _ = server
+    code, body, headers = _get(base, "/login?next=%2F")
+    assert code == 200
+    assert headers["Content-Type"].startswith("text/html")
+    assert b"loginForm" in body
+
+
+def test_index_served_with_query_string(server):
+    base, _ = server
+    code, body, _ = _get(base, "/?x=1")
+    assert code == 200 and b"__GAME_DIMS__" not in body
+
+
 # ---- login session ----------------------------------------------------------
 
 def test_login_sets_session_cookie_and_authorizes(server_pw):

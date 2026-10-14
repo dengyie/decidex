@@ -306,19 +306,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
-            if self.path in ("/", "/index.html"):
+            # self.path still carries the query string; route on the bare path
+            # so /login?next=%2F (the 401 redirect target) is served, not 404'd.
+            path = self.path.split("?", 1)[0]
+            if path in ("/", "/index.html"):
                 page = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
                 # Inject the real game screen size so the page's click-coordinate
                 # mapping can never drift from the server's xdotool clamp.
                 page = page.replace("__GAME_DIMS__", f"{GAME_W}x{GAME_H}")
                 return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
-            if self.path in ("/login", "/login.html"):
+            if path in ("/login", "/login.html"):
                 page = (Path(__file__).parent / "login.html").read_bytes()
                 return self._send(200, page, "text/html; charset=utf-8")
-            if self.path == "/api/session":
+            if path == "/api/session":
                 return self._json({"authenticated":
                                    _valid_session(_cookie_token(self.headers.get("Cookie")))})
-            if self.path.startswith("/api/frame.jpg"):
+            if path.startswith("/api/frame.jpg"):
                 if not FRAME_PATH.exists():
                     return self._json({"error": "no frame yet"}, 503)
                 etag = '"%s"' % _FRAME_ETAG
@@ -342,13 +345,13 @@ class Handler(BaseHTTPRequestHandler):
                     f"public, max-age={FRAME_MAXAGE}, s-maxage={FRAME_MAXAGE}",
                 })
                 return
-            if self.path == "/api/health":
+            if path == "/api/health":
                 return self._json({
                     "ok": True, "engine": "balatro-advisor",
                     "bridge_dir": str(BRIDGE_DIR),
                     "games": list_games(),
                 })
-            if self.path.startswith("/api/game"):
+            if path.startswith("/api/game"):
                 qs = dict(pair.split("=", 1) for pair in self.path.split("?", 1)[1].split("&")) \
                     if "?" in self.path else {}
                 name = qs.get("name", "")
@@ -363,10 +366,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
+            # Strip the query string for routing, same as do_GET.
+            path = self.path.split("?", 1)[0]
             length = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(length) or b"{}")
             kind = str(req.get("kind", "heuristic"))
-            if self.path == "/api/login":
+            if path == "/api/login":
                 if not self._has_csrf_header():
                     return self._json({"error": "csrf"}, 403)
                 if not _check_credentials(str(req.get("user", "")),
@@ -376,15 +381,15 @@ class Handler(BaseHTTPRequestHandler):
                 cookie = (f"{_SESSION_COOKIE}={token}; Path=/; HttpOnly; "
                           f"SameSite=Strict; Max-Age={_SESSION_TTL}")
                 return self._json({"ok": True}, extra={"Set-Cookie": cookie})
-            if self.path == "/api/logout":
+            if path == "/api/logout":
                 _drop_session(_cookie_token(self.headers.get("Cookie")))
                 cookie = f"{_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
                 return self._json({"ok": True}, extra={"Set-Cookie": cookie})
-            if self.path == "/api/recommend":
+            if path == "/api/recommend":
                 return self._json(self._run_async(_recommend(str(req.get("name", "")), kind)))
-            if self.path == "/api/replay":
+            if path == "/api/replay":
                 return self._json(self._run_async(_replay(kind)))
-            if self.path == "/api/input/click":
+            if path == "/api/input/click":
                 deny = self._deny_input()
                 if deny:
                     return self._json({"error": "unauthorized" if deny == 401 else "csrf"}, deny)
@@ -394,7 +399,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "bad coords"}, 400)
                 out = _xdotool(_click_args(x, y, bool(req.get("double"))))
                 return self._json({"ok": not _xdotool_failed(out), "out": out[:120]})
-            if self.path == "/api/input/key":
+            if path == "/api/input/key":
                 deny = self._deny_input()
                 if deny:
                     return self._json({"error": "unauthorized" if deny == 401 else "csrf"}, deny)
