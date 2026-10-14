@@ -189,9 +189,54 @@ local function maybe_dump_pre()
   write_state("state", nil)
 end
 
+--[[
+可选性能节流(env 门控,默认关闭)
+=================================
+Balatro 主循环默认按 `G.FPS_CAP = G.FPS_CAP or 500`(见游戏 main.lua)跑 500 FPS;
+无头 Xvfb 上 vsync 不生效,Mesa 软件光栅会被推满 CPU —— 而本桥只被 2 FPS 采样的
+网页读画面,回合制卡牌也不需要高帧率。
+
+设 `DECIDEX_FPS_CAP=<n>`(n>=1)即把帧率压到 n;不设/为 0 则完全不动游戏。
+main.lua 每帧执行 `G.FPS_CAP = G.FPS_CAP or 500`:只要非 nil 它就不覆盖,所以
+在 love.update 里每帧重申一次即可稳拿控制权(单次赋值,开销可忽略)。纯性能旋钮,
+不改任何游戏状态/数值,也不影响快照内容。
+]]
+local PERF_FPS_CAP = tonumber(os.getenv("DECIDEX_FPS_CAP") or "") or 0
+local PERF_DEBUG = os.getenv("DECIDEX_PERF_DEBUG") == "1"
+local _perf_frames = 0
+
+--[[
+节流开启时顺带滤掉游戏自带的长帧日志洪水。
+game.lua 每帧 `if self.real_dt > 0.05 then print('LONG DT @ ...') end`;无头 Xvfb 的
+软件光栅让单帧本就更长于 100ms(此处 dt 被钳到 0.1),再叠加帧率节流后 Long DT 成了
+每帧必然事件,把 lovely 日志灌到 26MB、journald 涨到数百 MB,纯属噪声。只滤
+`LONG DT ` 前缀这一行,不碰其它 print(chunk 名/报错照常)。
+]]
+if PERF_FPS_CAP >= 1 then
+  local _ref_print = print
+  print = function(...)
+    local first = ...
+    if type(first) == "string" and first:sub(1, 8) == "LONG DT " then return end
+    return _ref_print(...)
+  end
+end
+
 local _ref_update = love.update or function(dt) end
 function love.update(dt)
   _ref_update(dt)
+  if PERF_FPS_CAP >= 1 and G then G.FPS_CAP = PERF_FPS_CAP end
+  if PERF_DEBUG then
+    _perf_frames = _perf_frames + 1
+    if _perf_frames % 200 == 0 then
+      pcall(function()
+        love.filesystem.createDirectory("decidex_bridge")
+        love.filesystem.write("decidex_bridge/perf.txt", string.format(
+          "env=%s G.FPS_CAP=%s love_fps=%d dt=%.4f\n",
+          tostring(PERF_FPS_CAP), tostring(G and G.FPS_CAP),
+          love.timer.getFPS(), dt or -1))
+      end)
+    end
+  end
   pcall(maybe_dump_pre)
 end
 
