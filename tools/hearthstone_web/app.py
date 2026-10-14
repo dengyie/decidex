@@ -40,6 +40,9 @@ sys.path.insert(0, str(ROOT / "src"))
 
 HERE = Path(__file__).resolve().parent
 REPLAY_DIR = ROOT / "data" / "replays"
+# Shared visualization assets (same files the Balatro viewer serves) — one
+# implementation of the bars / confidence badge / token gauge / lint panel.
+SHARED_DIR = ROOT / "tools" / "web_shared"
 
 # hslog logs a wall of parse warnings on the root logger; keep the console readable.
 logging.getLogger().setLevel(logging.ERROR)
@@ -50,6 +53,7 @@ try:
     from decidex.hearthstone.replay import game_options_to_candidates, _map_chosen, _same_action
     from decidex.providers.mock import MockReplayProvider
     from decidex.providers.base import BaseInferenceProvider
+    from decidex.viz import build_report
     HSLOG = True
     HSLOG_ERR = ""
 except Exception as e:  # hslog / hearthstone libs missing
@@ -222,7 +226,23 @@ async def _recommend_one(snap, kind: str) -> Dict[str, Any]:
             "human": {"candidate": human_id, "action_type": human_type},
             "agreed": False,
             "latency_ms": latency_ms,
+            "viz": None,
         }
+
+    # Presentation model built server-side; viz.py is the shared source of
+    # truth for bars / confidence banding / token budget / lint (see viz.py).
+    # Pure transform of what the advisor already produced — never feeds back.
+    report = build_report(
+        rec.evidence,
+        {rec.question.get("id", "hearthstone_action"): rec.question.get("criteria", {})},
+        primitive=rec.primitive,
+        distribution=rec.distribution,
+        selected=rec.candidate_id,
+        confidence=rec.confidence,
+        options=rec.question.get("options"),
+        labels={a["id"]: a.get("description", a["id"]) for a in rec.legal_actions},
+        is_fallback=rec.is_fallback,
+    )
 
     return {
         "provider": kind,
@@ -238,6 +258,7 @@ async def _recommend_one(snap, kind: str) -> Dict[str, Any]:
         "human": {"candidate": human_id, "action_type": human_type},
         "agreed": _same_action(rec.candidate_id, human_id),
         "latency_ms": latency_ms,
+        "viz": report,
     }
 
 
@@ -284,6 +305,15 @@ class Handler(BaseHTTPRequestHandler):
             if path in ("/", "/index.html"):
                 html = (HERE / "index.html").read_bytes()
                 self._send(200, html, "text/html; charset=utf-8")
+                return
+            if path in ("/viz.js", "/viz.css"):
+                name = Path(path).name
+                target = SHARED_DIR / name
+                if not target.is_file():
+                    return self._err("shared asset missing: " + name, 404)
+                ctype = ("application/javascript; charset=utf-8" if name.endswith(".js")
+                         else "text/css; charset=utf-8")
+                self._send(200, target.read_bytes(), ctype)
                 return
             if path == "/api/health":
                 self._json({

@@ -102,6 +102,9 @@
   .note{font-size:12px;color:var(--dim);padding:0 20px 18px}
   code{background:#0b0f14;border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:12px}
 </style>
+<!-- 可视化组件（概率条 / 置信三档 / token 仪表 / lint 面板）与炉石看板共用同一份，
+     由 app.py 从 tools/web_shared/ 提供，避免两站各写一份后漂移。 -->
+<link rel="stylesheet" href="/viz.css">
 </head>
 <body>
 <header>
@@ -145,6 +148,7 @@
 </div>
 <div class="note" id="note"></div>
 
+<script src="/viz.js"></script>
 <script>
 const $ = s => document.querySelector(s);
 let STATE = { games:[], log:null, decisions:[], sel:-1, provider:'heuristic' };
@@ -244,7 +248,11 @@ function renderRec(d, rec){
       <div class="verdict ${vcls}">${vtxt}</div>
       <div class="muted" style="font-size:12px;margin-top:10px">合法动作包络（游戏引擎权威下发，${(rec.legal_actions||[]).length} 项）</div>
       <div class="env">${opts}</div>
+      <div id="vizHost"></div>
     </div>`;
+  // 概率分布 / 置信三档 / token 预算 / 发前体检全部由服务端展示模型驱动
+  // (src/decidex/viz.py)；这里只挂载，阈值不在两端各写一份。
+  if (window.DecidexViz) DecidexViz.render($('#vizHost'), rec.viz);
 }
 
 async function selectTurn(i){

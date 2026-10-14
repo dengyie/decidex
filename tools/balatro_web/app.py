@@ -62,10 +62,15 @@ from decidex.balatro import (  # noqa: E402
 )
 from decidex.providers.base import BaseInferenceProvider  # noqa: E402
 from decidex.providers.mock import MockReplayProvider  # noqa: E402
+from decidex.viz import build_report  # noqa: E402
 
 logging.getLogger().setLevel(logging.ERROR)
 
 BRIDGE_DIR = Path(os.environ.get("BALATRO_BRIDGE_DIR", ROOT / "data" / "balatro_bridge"))
+# Shared, framework-free visualization assets used by every DecideX web viewer
+# (see tools/web_shared/viz.js). Served from this app too so a viewer needs one
+# origin, and so the two viewers cannot drift.
+SHARED_DIR = ROOT / "tools" / "web_shared"
 VNC_TARGET = os.environ.get("BALATRO_VNC_TARGET", "10.144.144.8::5900")
 VNC_PASSWORD = os.environ.get("BALATRO_VNC_PASSWORD", "")
 # Bound every VNC round-trip (connect/capture/disconnect). vncdotool's proxy
@@ -247,6 +252,21 @@ async def _recommend(name: str, kind: str) -> Dict[str, Any]:
     advisor = get_advisor(kind)
     rec = await advisor.recommend(state)
     chosen = next((a for a in rec.legal_actions if a["id"] == rec.candidate_id), None)
+    # The presentation model is built server-side so viz.py stays the single
+    # source of truth for bars / confidence banding / token budget / lint and
+    # this viewer cannot drift from the Hearthstone one. It is a pure transform
+    # of data the advisor already produced — it never feeds back into a verdict.
+    report = build_report(
+        rec.evidence,
+        {rec.question.get("id", "balatro_action"): rec.question.get("criteria", {})},
+        primitive=rec.primitive,
+        distribution=rec.distribution,
+        selected=rec.candidate_id,
+        confidence=rec.confidence,
+        options=rec.question.get("options"),
+        labels={a["id"]: a.get("description", a["id"]) for a in rec.legal_actions},
+        is_fallback=rec.is_fallback,
+    )
     return {
         "log": name,
         "candidate_id": rec.candidate_id,
@@ -262,6 +282,7 @@ async def _recommend(name: str, kind: str) -> Dict[str, Any]:
         "chips": (chosen or {}).get("chips"),
         "mult": (chosen or {}).get("mult"),
         "legal_actions": rec.legal_actions,
+        "viz": report,
     }
 
 
@@ -374,6 +395,14 @@ class Handler(BaseHTTPRequestHandler):
                 # mapping can never drift from the server's xdotool clamp.
                 page = page.replace("__GAME_DIMS__", f"{GAME_W}x{GAME_H}")
                 return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+            if path in ("/viz.js", "/viz.css"):
+                name = Path(path).name
+                target = SHARED_DIR / name
+                if not target.is_file():
+                    return self._json({"error": "shared asset missing: " + name}, 404)
+                ctype = ("application/javascript; charset=utf-8" if name.endswith(".js")
+                         else "text/css; charset=utf-8")
+                return self._send(200, target.read_bytes(), ctype)
             if path in ("/login", "/login.html"):
                 balatro_tok, sso_tok = _cookie_tokens(self.headers.get("Cookie"))
                 if _valid_session(balatro_tok, sso_tok):

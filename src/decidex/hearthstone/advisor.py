@@ -42,6 +42,12 @@ class Recommendation:
     fallback_reason: Optional[str] = None
     distribution: Dict[str, float] = field(default_factory=dict)
     legal_actions: List[Dict[str, Any]] = field(default_factory=list)
+    # Evidence dict + question spec that produced this verdict, carried through
+    # so a viewer can render tokens / lint / bars without re-deriving them.
+    # Purely observational — nothing reads these back.
+    evidence: Dict[str, Any] = field(default_factory=dict)
+    question: Dict[str, Any] = field(default_factory=dict)
+    primitive: str = PrimitiveType.CHOICE.value
 
 
 class HearthstoneAdvisor:
@@ -118,6 +124,13 @@ class HearthstoneAdvisor:
         )
 
         evidence = build_evidence(state, len(top_candidates))
+        spec = {
+            "id": question.id,
+            "primitive": question.primitive.value,
+            "description": question.description,
+            "options": option_ids,
+            "criteria": descriptions,
+        }
 
         # Stage 3-4: model judgment + gating. legal_actions pins the model to
         # the deterministic legal set, so an illegal pick is rejected -> fallback.
@@ -135,6 +148,7 @@ class HearthstoneAdvisor:
             return self._recommendation_from_candidate(
                 safe, verdict.calibrated_confidence, verdicts_verdict=verdict,
                 legal=top_candidates, reason=verdict.fallback_reason,
+                evidence=evidence, question=spec,
             )
 
         selected = lookup.get(str(verdict.selected))
@@ -143,11 +157,12 @@ class HearthstoneAdvisor:
             return self._recommendation_from_candidate(
                 safe, verdict.calibrated_confidence, verdicts_verdict=verdict,
                 legal=top_candidates, reason="SELECTION_NOT_IN_ENVELOPE",
+                evidence=evidence, question=spec,
             )
 
         return self._recommendation_from_candidate(
             selected, verdict.calibrated_confidence, verdicts_verdict=verdict,
-            legal=top_candidates,
+            legal=top_candidates, evidence=evidence, question=spec,
         )
 
     def _recommendation_from_candidate(
@@ -157,6 +172,8 @@ class HearthstoneAdvisor:
         verdicts_verdict: Any,
         legal: List[ActionCandidate],
         reason: Optional[str] = None,
+        evidence: Optional[Dict[str, Any]] = None,
+        question: Optional[Dict[str, Any]] = None,
     ) -> Recommendation:
         return Recommendation(
             candidate_id=candidate.candidate_id,
@@ -166,6 +183,10 @@ class HearthstoneAdvisor:
             is_fallback=reason is not None,
             fallback_reason=reason,
             distribution=dict(getattr(verdicts_verdict, "distribution", {})),
+            evidence=evidence or {},
+            question=question or {},
+            primitive=str(getattr(getattr(verdicts_verdict, "primitive", None), "value",
+                                  getattr(verdicts_verdict, "primitive", PrimitiveType.CHOICE.value))),
             legal_actions=[
                 {
                     "id": c.candidate_id,

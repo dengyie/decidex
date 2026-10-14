@@ -7,6 +7,9 @@
 <!-- 游戏分辨率由服务端按 BALATRO_GAME_W/H 注入(见 app.py),避免页面与服务端各写一份而漂移。
      直接用浏览器打开本文件时占位符不会被替换,下面的解析会退回 960x600 默认值。 -->
 <meta id="game-dims" name="game-dims" content="__GAME_DIMS__">
+<!-- 可视化组件(概率条 / 置信度三档 / token 仪表 / lint 面板)与炉石看板共用同一份,
+     由 app.py 从 tools/web_shared/ 提供,避免两站各写一份后漂移。 -->
+<link rel="stylesheet" href="/viz.css">
 <style>
   :root {
     --felt1:#35654d; --felt2:#1e4433; --wood:#3a2a1c; --panel:#10141d;
@@ -215,6 +218,7 @@
     <div class="panel" style="margin-top:12px">
       <h3>优秀操作推荐</h3>
       <div id="recBody"><div class="muted">点「推荐」或「跑整局」。</div></div>
+      <div id="vizBody"></div>
       <h3 style="margin-top:12px">合法动作包络(TOP-10)</h3>
       <div id="legal"></div>
     </div>
@@ -226,6 +230,7 @@
   </div>
 </div>
 
+<script src="/viz.js"></script>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -392,17 +397,22 @@ async function recommend(){
         `模拟得分 ${Math.round(r.expected_score)} · ${r.clears_blind?'足够过关':'未达目标'}`));
     }
     if (r.fallback_reason) rb.appendChild(el('div','muted', '回落原因: '+r.fallback_reason));
+    // 概率分布 / 置信三档 / token 预算 / 发前体检:全部来自服务端的展示模型
+    // (src/decidex/viz.py),前端只画不算,阈值不在两端各写一份。
+    DecidexViz.render($('vizBody'), r.viz);
     const lg = $('legal'); while (lg.firstChild) lg.removeChild(lg.firstChild);
     r.legal_actions.forEach(a=>{
       const row = el('div', a.id===r.candidate_id?'best':null, `[${a.action_type}] ${a.description}`);
       lg.appendChild(row);
     });
   }catch(e){ const rb2=$('recBody'); while(rb2.firstChild) rb2.removeChild(rb2.firstChild);
-    rb2.appendChild(el('div','muted','失败: '+e.message)); }
+    rb2.appendChild(el('div','muted','失败: '+e.message));
+    DecidexViz.clear($('vizBody')); }
 }
 
 async function runAll(){
   const rb = $('recBody'); while (rb.firstChild) rb.removeChild(rb.firstChild);
+  DecidexViz.clear($('vizBody'));
   rb.appendChild(el('div','muted','整局计算中…'));
   try{
     const r = await jpost('/api/replay',{kind:$('provSel').value});

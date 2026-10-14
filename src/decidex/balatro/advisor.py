@@ -62,6 +62,12 @@ class Recommendation:
     fallback_reason: Optional[str] = None
     distribution: Dict[str, float] = field(default_factory=dict)
     legal_actions: List[Dict[str, Any]] = field(default_factory=list)
+    # The evidence dict and question spec that produced this verdict, carried
+    # through so a viewer can render the decision (tokens / lint / bars) without
+    # re-deriving them. Purely observational — nothing reads these back.
+    evidence: Dict[str, Any] = field(default_factory=dict)
+    question: Dict[str, Any] = field(default_factory=dict)
+    primitive: str = PrimitiveType.CHOICE.value
 
 
 class BalatroAdvisor:
@@ -118,24 +124,36 @@ class BalatroAdvisor:
             criteria=descriptions,
         )
 
+        evidence = build_evidence(state, len(top))
         verdicts = await self._engine.step(
-            domain_state=build_evidence(state, len(top)),
+            domain_state=evidence,
             questions=[question],
             legal_actions=option_ids,
             phase=TurnPhase.MAIN,
         )
         verdict = verdicts["balatro_action"]
 
+        spec = {
+            "id": question.id,
+            "primitive": question.primitive.value,
+            "description": question.description,
+            "options": option_ids,
+            "criteria": descriptions,
+        }
+
         if verdict.is_fallback:
             safe = choose_safe_default(top, state)
             return self._from_candidate(safe, verdict.calibrated_confidence, verdict,
-                                        top, reason=verdict.fallback_reason)
+                                        top, reason=verdict.fallback_reason,
+                                        evidence=evidence, question=spec)
         selected = lookup.get(str(verdict.selected))
         if selected is None:
             safe = choose_safe_default(top, state)
             return self._from_candidate(safe, verdict.calibrated_confidence, verdict,
-                                        top, reason="SELECTION_NOT_IN_ENVELOPE")
-        return self._from_candidate(selected, verdict.calibrated_confidence, verdict, top)
+                                        top, reason="SELECTION_NOT_IN_ENVELOPE",
+                                        evidence=evidence, question=spec)
+        return self._from_candidate(selected, verdict.calibrated_confidence, verdict, top,
+                                   evidence=evidence, question=spec)
 
     def _from_candidate(
         self,
@@ -144,6 +162,8 @@ class BalatroAdvisor:
         verdict: Any,
         legal: List[ActionCandidate],
         reason: Optional[str] = None,
+        evidence: Optional[Dict[str, Any]] = None,
+        question: Optional[Dict[str, Any]] = None,
     ) -> Recommendation:
         return Recommendation(
             candidate_id=candidate.candidate_id,
@@ -155,6 +175,10 @@ class BalatroAdvisor:
             is_fallback=reason is not None,
             fallback_reason=reason,
             distribution=dict(getattr(verdict, "distribution", {})),
+            evidence=evidence or {},
+            question=question or {},
+            primitive=str(getattr(getattr(verdict, "primitive", None), "value",
+                                  getattr(verdict, "primitive", PrimitiveType.CHOICE.value))),
             legal_actions=[
                 {
                     "id": c.candidate_id,
