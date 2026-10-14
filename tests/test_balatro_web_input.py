@@ -219,6 +219,60 @@ def test_index_served_with_query_string(server):
     assert code == 200 and b"__GAME_DIMS__" not in body
 
 
+# ---- open-redirect guard (_safe_next_path) ----------------------------------
+
+@pytest.mark.parametrize("raw,expected", [
+    ("/", "/"),
+    ("/play", "/play"),
+    ("/a/b?c=d", "/a/b?c=d"),
+    (None, "/"),
+    ("", "/"),
+    ("https://evil.example", "/"),
+    ("//evil.example", "/"),
+    ("/\\evil.example", "/"),
+    ("\\\\evil.example", "/"),
+    ("javascript:alert(1)", "/"),
+    ("/<script>", "/"),             # decoded form (parse_qs decodes %3C etc.)
+    ("</script>", "/"),
+    ("/a\tb", "/"),
+    ("/a\nb", "/"),
+    ("/ok<script>", "/"),
+])
+def test_safe_next_path(raw, expected):
+    assert app._safe_next_path(raw) == expected
+
+
+def test_login_page_injects_sanitized_next(server):
+    """A hostile next must be neutralized in the served page, not echoed."""
+    base, _ = server
+    code, body, _ = _get(base, "/login?next=https://evil.example")
+    assert code == 200
+    text = body.decode()
+    assert "evil.example" not in text
+    assert "const next = \"/\";" in text
+
+
+def test_login_page_keeps_safe_next(server):
+    base, _ = server
+    code, body, _ = _get(base, "/login?next=%2Fplay")
+    assert code == 200 and 'const next = "/play";' in body.decode()
+
+
+def test_login_page_never_leaks_placeholder(server):
+    base, _ = server
+    _, body, _ = _get(base, "/login")
+    assert "__NEXT_PATH__" not in body.decode()
+
+
+def test_login_page_rejects_encoded_injection(server):
+    """%3C%2Fscript%3E decodes to </script>; it must not survive into the page."""
+    base, _ = server
+    code, body, _ = _get(base, "/login?next=%2F%3C%2Fscript%3E")
+    assert code == 200
+    assert b"</script>" not in body.split(b"const next =", 1)[1].split(b";", 1)[0]
+    assert 'const next = "/";' in body.decode()
+
+
 # ---- login session ----------------------------------------------------------
 
 def test_login_sets_session_cookie_and_authorizes(server_pw):

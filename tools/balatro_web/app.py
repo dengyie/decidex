@@ -49,6 +49,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
@@ -113,6 +114,12 @@ _SESSION_COOKIE = "balatro_session"
 _SESSION_TTL = 12 * 3600
 _SESSIONS: Dict[str, float] = {}          # cookie value -> expiry epoch
 _SESSIONS_LOCK = threading.Lock()
+
+# A post-login `next` target must be a single-slash same-origin path made only
+# of RFC-3986 path/query characters. This is the one gate that keeps the login
+# page from becoming an open redirect (//host, https://host) and from letting a
+# crafted value break out of the JS literal it is injected into.
+_SAFE_NEXT_RE = re.compile(r"^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*(?:\?[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*)?$")
 
 # xdotool keysyms differ from DOM KeyboardEvent.key names; map the ones the page
 # can emit so arrow/enter/backspace actually reach the game instead of silently
@@ -316,8 +323,13 @@ class Handler(BaseHTTPRequestHandler):
                 page = page.replace("__GAME_DIMS__", f"{GAME_W}x{GAME_H}")
                 return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             if path in ("/login", "/login.html"):
-                page = (Path(__file__).parent / "login.html").read_bytes()
-                return self._send(200, page, "text/html; charset=utf-8")
+                page = (Path(__file__).parent / "login.html").read_text(encoding="utf-8")
+                # Never let the client trust the raw `next` query: sanitize it
+                # here and inject a validated same-origin path as a JS literal.
+                qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+                nxt = _safe_next_path(parse_qs(qs).get("next", [None])[0])
+                page = page.replace("__NEXT_PATH__", json.dumps(nxt))
+                return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             if path == "/api/session":
                 return self._json({"authenticated":
                                    _valid_session(_cookie_token(self.headers.get("Cookie")))})
@@ -490,6 +502,28 @@ def _check_credentials(user: str, pw: str) -> bool:
     ok_user = hmac.compare_digest((user or "").encode(), WEB_USER.encode())
     ok_pw = hmac.compare_digest((pw or "").encode(), WEB_PASSWORD.encode())
     return ok_user and ok_pw
+
+
+def _safe_next_path(raw: Optional[str]) -> str:
+    """Sanitize a post-login redirect target down to a same-origin absolute
+    path. The value arrives from the query string, so it is fully
+    attacker-controlled: `?next=https://evil.example` (or `//evil.example`)
+    would turn the login page into an open redirect.
+
+    A strict character whitelist is the single gate: the result must start with
+    a single `/` and contain only RFC-3986 path/query characters (no backslash,
+    no control chars, no `<`/`>`/`"`). That rejects host-relative and
+    scheme-relative URLs *and* any value that could break out of the JS string
+    literal it is injected into. Anything outside the set falls back to "/".
+    The value is URL-decoded first (parse_qs), so percent-escapes can't smuggle
+    a rejected character past the check."""
+    if not raw:
+        return "/"
+    if raw.startswith("//"):
+        return "/"
+    if not _SAFE_NEXT_RE.match(raw):
+        return "/"
+    return raw
 
 
 def _new_session() -> str:

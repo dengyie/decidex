@@ -43,7 +43,9 @@
 </form>
 <script>
 const $ = id => document.getElementById(id);
-const next = new URLSearchParams(location.search).get('next') || '/';
+// Server-validated same-origin path injected by app.py (see _safe_next_path);
+// never read `next` from the query string directly — that would be an open redirect.
+const next = __NEXT_PATH__;
 
 $('loginForm').addEventListener('submit', async (ev) => {
   ev.preventDefault();
