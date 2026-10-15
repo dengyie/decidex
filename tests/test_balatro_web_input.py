@@ -108,18 +108,28 @@ def _login(base, password=PASSWORD, user=USER):
 # ---- pure helpers -----------------------------------------------------------
 
 def test_click_args_single():
-    assert app._click_args(100, 200) == ["mousemove", "100", "200", "click", "1"]
+    assert app._click_args(100, 200) == [
+        "mousemove", "100", "200", "sleep", "0.05", "mousedown", "1", "sleep", "0.05", "mouseup", "1"
+    ]
 
 
 def test_click_args_double():
     assert app._click_args(100, 200, double=True) == [
-        "mousemove", "100", "200", "click", "--repeat", "2", "1"]
+        "mousemove", "100", "200", "sleep", "0.05",
+        "mousedown", "1", "sleep", "0.05", "mouseup", "1",
+        "sleep", "0.05",
+        "mousedown", "1", "sleep", "0.05", "mouseup", "1",
+    ]
 
 
 def test_click_args_clamps_out_of_range():
     # bounds track the game screen (BALATRO_GAME_W/H default 960x600)
-    assert app._click_args(-5, 99999) == ["mousemove", "0", "599", "click", "1"]
-    assert app._click_args(99999, -5) == ["mousemove", "959", "0", "click", "1"]
+    assert app._click_args(-5, 99999) == [
+        "mousemove", "0", "599", "sleep", "0.05", "mousedown", "1", "sleep", "0.05", "mouseup", "1"
+    ]
+    assert app._click_args(99999, -5) == [
+        "mousemove", "959", "0", "sleep", "0.05", "mousedown", "1", "sleep", "0.05", "mouseup", "1"
+    ]
 
 
 def test_key_name_translates_page_keys():
@@ -155,13 +165,20 @@ def test_click_with_token_moves_and_clicks(server):
     base, captured = server
     code, body, _ = _post(base, "/api/input/click", {"x": 640, "y": 400}, token=TOKEN)
     assert code == 200 and body["ok"] is True
-    assert captured == [["mousemove", "640", "400", "click", "1"]]
+    assert captured == [[
+        "mousemove", "640", "400", "sleep", "0.05", "mousedown", "1", "sleep", "0.05", "mouseup", "1"
+    ]]
 
 
 def test_double_click_sends_repeat(server):
     base, captured = server
     _post(base, "/api/input/click", {"x": 5, "y": 5, "double": True}, token=TOKEN)
-    assert captured[0][-3:] == ["--repeat", "2", "1"]
+    assert captured[0] == [
+        "mousemove", "5", "5", "sleep", "0.05",
+        "mousedown", "1", "sleep", "0.05", "mouseup", "1",
+        "sleep", "0.05",
+        "mousedown", "1", "sleep", "0.05", "mouseup", "1",
+    ]
 
 
 def test_click_bad_coords_is_400_not_500(server):
@@ -285,7 +302,9 @@ def test_login_sets_session_cookie_and_authorizes(server_pw):
     # No X-Input-Token at all — the session cookie alone must authorize.
     code, body, _ = _post(base, "/api/input/click", {"x": 8, "y": 9}, cookie=cookie)
     assert code == 200 and body["ok"] is True
-    assert captured == [["mousemove", "8", "9", "click", "1"]]
+    assert captured == [[
+        "mousemove", "8", "9", "sleep", "0.05", "mousedown", "1", "sleep", "0.05", "mouseup", "1"
+    ]]
 
 
 def test_login_wrong_password_is_401(server_pw):
@@ -346,7 +365,9 @@ def test_token_works_without_csrf_header(server):
     base, captured = server
     code, body, _ = _post(base, "/api/input/click", {"x": 7, "y": 7}, token=TOKEN, csrf=False)
     assert code == 200 and body["ok"] is True
-    assert captured == [["mousemove", "7", "7", "click", "1"]]
+    assert captured == [[
+        "mousemove", "7", "7", "sleep", "0.05", "mousedown", "1", "sleep", "0.05", "mouseup", "1"
+    ]]
 
 
 def test_logout_invalidates_session(server_pw):
@@ -475,3 +496,234 @@ def test_sso_logout_drops_both_cookies(server_pw, monkeypatch):
     cookies_str = " ".join(str(c) for c in cookies_header)
     assert "balatro_session=" in cookies_str
     assert "mango_game_session=" in cookies_str
+
+
+# ---- /api/execute direct game control tests ---------------------------------
+
+def test_execute_unauthorized_requires_auth(server):
+    base, _ = server
+    code, body, _ = _post(base, "/api/execute", {"action": "play"})
+    assert code == 401
+    assert body.get("error") == "unauthorized"
+
+
+def test_execute_requires_csrf_with_session_cookie(server_pw):
+    base, _ = server_pw
+    cookie = _login(base, PASSWORD)
+    code, body, _ = _post(base, "/api/execute", {"action": "play"}, cookie=cookie, csrf=False)
+    assert code == 403
+    assert body.get("error") == "csrf"
+
+
+def test_execute_card_and_shop_actions(server, monkeypatch):
+    base, _ = server
+    dispatched = []
+    monkeypatch.setattr(app, "_dispatch_game_action",
+                        lambda act, args=None: dispatched.append((act, args)) or True)
+
+    # 1. toggle_card
+    code, body, _ = _post(base, "/api/execute", {"action": "toggle_card", "index": 2}, token=TOKEN)
+    assert code == 200 and body["ok"] is True
+    assert dispatched[-1] == ("toggle_card", {"index": 2})
+
+    # toggle_card missing index
+    code, body, _ = _post(base, "/api/execute", {"action": "toggle_card"}, token=TOKEN)
+    assert code == 200 and body["ok"] is False and "requires index" in body["error"]
+
+    # 2. select_cards
+    code, body, _ = _post(base, "/api/execute", {"action": "select_cards", "indices": [0, 2, 4]}, token=TOKEN)
+    assert code == 200 and body["ok"] is True
+    assert dispatched[-1] == ("select_cards", {"indices": [0, 2, 4]})
+
+    # 3. unhighlight_all
+    code, body, _ = _post(base, "/api/execute", {"action": "unhighlight_all"}, token=TOKEN)
+    assert code == 200 and body["ok"] is True
+    assert dispatched[-1] == ("unhighlight_all", None)
+
+    # 4. play with and without indices
+    code, body, _ = _post(base, "/api/execute", {"action": "play", "indices": [1, 3]}, token=TOKEN)
+    assert code == 200 and body["ok"] is True
+    assert dispatched[-1] == ("play", {"indices": [1, 3]})
+
+    code, body, _ = _post(base, "/api/execute", {"action": "play"}, token=TOKEN)
+    assert code == 200 and body["ok"] is True
+    assert dispatched[-1] == ("play", {})
+
+    # 5. discard with and without indices
+    code, body, _ = _post(base, "/api/execute", {"action": "discard", "indices": [0]}, token=TOKEN)
+    assert code == 200 and body["ok"] is True
+    assert dispatched[-1] == ("discard", {"indices": [0]})
+
+    code, body, _ = _post(base, "/api/execute", {"action": "discard"}, token=TOKEN)
+    assert code == 200 and body["ok"] is True
+    assert dispatched[-1] == ("discard", {})
+
+    # 6. sort_rank and sort_suit
+    code, body, _ = _post(base, "/api/execute", {"action": "sort_rank"}, token=TOKEN)
+    assert code == 200 and body["ok"] is True
+    assert dispatched[-1] == ("sort_rank", None)
+
+    code, body, _ = _post(base, "/api/execute", {"action": "sort_suit"}, token=TOKEN)
+    assert code == 200 and body["ok"] is True
+    assert dispatched[-1] == ("sort_suit", None)
+
+    # 7. reroll_shop
+    code, body, _ = _post(base, "/api/execute", {"action": "reroll_shop"}, token=TOKEN)
+    assert code == 200 and body["ok"] is True
+    assert dispatched[-1] == ("reroll_shop", None)
+
+    # 8. buy_card
+    code, body, _ = _post(base, "/api/execute", {"action": "buy_card", "index": 1, "area": "shop_jokers"}, token=TOKEN)
+    assert code == 200 and body["ok"] is True
+    assert dispatched[-1] == ("buy_card", {"index": 1, "area": "shop_jokers"})
+
+    # 9. use_card and sell_card
+    code, body, _ = _post(base, "/api/execute", {"action": "use_card", "index": 0, "area": "consumables"}, token=TOKEN)
+    assert code == 200 and body["ok"] is True
+    assert dispatched[-1] == ("use_card", {"index": 0, "area": "consumables"})
+
+    code, body, _ = _post(base, "/api/execute", {"action": "sell_card", "index": 0, "area": "jokers"}, token=TOKEN)
+    assert code == 200 and body["ok"] is True
+    assert dispatched[-1] == ("sell_card", {"index": 0, "area": "jokers"})
+
+    # 10. stage transitions
+    for stage_act in ("select_blind", "cash_out", "toggle_shop", "start_run"):
+        code, body, _ = _post(base, "/api/execute", {"action": stage_act}, token=TOKEN)
+        assert code == 200 and body["ok"] is True
+        assert dispatched[-1] == (stage_act, None)
+
+
+def test_execute_rejects_unknown_action_without_auto_play(server, monkeypatch):
+    base, _ = server
+    dispatched = []
+    monkeypatch.setattr(app, "_dispatch_game_action",
+                        lambda act, args=None: dispatched.append((act, args)) or True)
+
+    code, body, _ = _post(base, "/api/execute", {"action": "invalid_action_foo"}, token=TOKEN)
+    assert code == 200
+    assert body.get("ok") is False
+    assert "unrecognized action_type" in body.get("error", "")
+    assert len(dispatched) == 0
+
+
+def test_execute_rejects_invalid_area_or_index(server, monkeypatch):
+    base, _ = server
+    dispatched = []
+    monkeypatch.setattr(app, "_dispatch_game_action",
+                        lambda act, args=None: dispatched.append((act, args)) or True)
+
+    # Invalid area (injection attempt)
+    code, body, _ = _post(base, "/api/execute", {
+        "action": "buy_card",
+        "index": 0,
+        "area": "'); os.execute('whoami'); --"
+    }, token=TOKEN)
+    assert code == 200
+    assert body.get("ok") is False
+    assert "invalid area" in body.get("error", "")
+    assert len(dispatched) == 0
+
+    # Negative index
+    code, body, _ = _post(base, "/api/execute", {
+        "action": "toggle_card",
+        "index": -5
+    }, token=TOKEN)
+    assert code == 200
+    assert body.get("ok") is False
+    assert "non-negative" in body.get("error", "")
+    assert len(dispatched) == 0
+
+    # String index
+    code, body, _ = _post(base, "/api/execute", {
+        "action": "toggle_card",
+        "index": "not_an_int"
+    }, token=TOKEN)
+    assert code == 200
+    assert body.get("ok") is False
+    assert "integer" in body.get("error", "")
+    assert len(dispatched) == 0
+
+
+def test_dispatch_game_action_direct_sanitization_and_offset(tmp_path, monkeypatch):
+    test_eval_file = tmp_path / "balatro_eval.lua"
+    monkeypatch.setattr(app, "Path", lambda p: test_eval_file if "balatro_eval" in str(p) else Path(p))
+
+    # 1. Valid action and index conversion from 0-based to 1-based
+    ok = app._dispatch_game_action("toggle_card", {"index": 0})
+    assert ok is True
+    assert test_eval_file.is_file()
+    content = test_eval_file.read_text(encoding="utf-8")
+    assert "G.DECIDEX_EXECUTE('toggle_card'" in content
+    assert "index = 1" in content
+    assert "indices = nil" in content
+
+    # 2. Valid indices conversion
+    ok = app._dispatch_game_action("select_cards", {"indices": [0, 3, 4]})
+    assert ok is True
+    content = test_eval_file.read_text(encoding="utf-8")
+    assert "indices = {1,4,5}" in content
+
+    # 3. Valid area
+    ok = app._dispatch_game_action("buy_card", {"index": 1, "area": "shop_jokers"})
+    assert ok is True
+    content = test_eval_file.read_text(encoding="utf-8")
+    assert "area = 'shop_jokers'" in content
+
+    # 4. Reject invalid action
+    ok = app._dispatch_game_action("malicious_action", {"index": 0})
+    assert ok is False
+
+    # 5. Reject invalid area (injection)
+    ok = app._dispatch_game_action("buy_card", {"index": 0, "area": "evil_area"})
+    assert ok is False
+
+
+def test_balatro_state_preserves_runtime_fields():
+    from decidex.balatro.state import BalatroState, Card
+
+    raw = {
+        "hand": [{"rank": "A", "suit": "S", "highlighted": True}],
+        "state_name": "SHOP",
+        "shop": {"cards": [{"name": "Joker", "cost": 4}], "reroll_cost": 5},
+        "hover": "reroll_btn",
+        "money": 15,
+    }
+    state = BalatroState.from_dict(raw)
+    assert state.state_name == "SHOP"
+    assert state.shop == {"cards": [{"name": "Joker", "cost": 4}], "reroll_cost": 5}
+    assert state.hover == "reroll_btn"
+    assert len(state.hand) == 1
+    assert state.hand[0].highlighted is True
+
+    out = state.to_dict()
+    assert out["state_name"] == "SHOP"
+    assert out["shop"] == {"cards": [{"name": "Joker", "cost": 4}], "reroll_cost": 5}
+    assert out["hover"] == "reroll_btn"
+    assert out["hand"][0]["highlighted"] is True
+
+
+def test_load_state_retries_on_json_decode_error(tmp_path, monkeypatch):
+    import json
+    from decidex.balatro.state import load_state
+
+    p = tmp_path / "test_state.json"
+    p.write_text('{"hand": []}', encoding="utf-8")
+
+    attempts = 0
+    orig_open = open
+
+    def mock_open(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            # First attempt fails with truncated JSON
+            import io
+            return io.StringIO('{"hand": [')
+        return orig_open(*args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", mock_open)
+    st = load_state(p)
+    assert len(st.hand) == 0
+    assert attempts == 2
+
+

@@ -37,6 +37,7 @@ class Card:
     enhancement: Optional[str] = None
     edition: Optional[str] = None
     seal: Optional[str] = None
+    highlighted: bool = False
 
     @property
     def chips(self) -> int:
@@ -56,6 +57,7 @@ class Card:
         return {
             "rank": self.rank, "suit": self.suit,
             "enhancement": self.enhancement, "edition": self.edition, "seal": self.seal,
+            "highlighted": self.highlighted,
         }
 
 
@@ -121,6 +123,13 @@ class BalatroState:
     # What the human actually did at this decision point (bridge-filled), for
     # advisor-vs-player comparison. {"type": "play"|"discard"|"use", "cards": [idx]}
     actual: Optional[Dict[str, Any]] = None
+    state_name: Optional[str] = None
+    shop: Optional[Dict[str, Any]] = None
+    hover: Optional[str] = None
+    can_cash_out: bool = False
+    can_toggle_shop: bool = False
+    can_select_blind: bool = False
+    won: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -131,20 +140,37 @@ class BalatroState:
             "hands_left": self.hands_left, "discards_left": self.discards_left,
             "hand_size": self.hand_size, "money": self.money,
             "ante": self.ante, "round": self.round,
+            "state_name": self.state_name,
+            "shop": self.shop,
+            "hover": self.hover,
+            "can_cash_out": self.can_cash_out,
+            "can_toggle_shop": self.can_toggle_shop,
+            "can_select_blind": self.can_select_blind,
+            "won": self.won,
             "actual": self.actual,
         }
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "BalatroState":
         blind = d.get("blind") or {}
+        b_name = blind.get("name") or "Small Blind"
+        b_chips = int(blind.get("chips", 300) or 300)
+        if b_chips <= 0:
+            b_chips = 300
         return cls(
-            hand=[Card(**{k: c.get(k) for k in ("rank", "suit", "enhancement", "edition", "seal")})
-                  for c in d.get("hand", [])],
+            hand=[Card(
+                rank=str(c.get("rank") or "?"),
+                suit=str(c.get("suit") or "?"),
+                enhancement=c.get("enhancement"),
+                edition=c.get("edition"),
+                seal=c.get("seal"),
+                highlighted=bool(c.get("highlighted", False)),
+            ) for c in d.get("hand", [])],
             blind=Blind(
-                name=blind.get("name", "Small Blind"),
-                type=blind.get("type", "small"),
-                chips=int(blind.get("chips", 300)),
-                scored=int(blind.get("scored", 0)),
+                name=b_name,
+                type=blind.get("type") or "small",
+                chips=b_chips,
+                scored=int(blind.get("scored", 0) or 0),
             ),
             jokers=[Joker(
                 name=j.get("name", "?"),
@@ -163,11 +189,26 @@ class BalatroState:
             ante=int(d.get("ante", 1)),
             round=int(d.get("round", 1)),
             actual=d.get("actual"),
+            state_name=d.get("state_name"),
+            shop=d.get("shop"),
+            hover=d.get("hover"),
+            can_cash_out=bool(d.get("can_cash_out", False)),
+            can_toggle_shop=bool(d.get("can_toggle_shop", False)),
+            can_select_blind=bool(d.get("can_select_blind", False)),
+            won=bool(d.get("won", False)),
         )
 
 
 def load_state(path) -> BalatroState:
     """Load one bridge snapshot (JSON) into a :class:`BalatroState`."""
     import json
-    with open(path, "r", encoding="utf-8") as f:
-        return BalatroState.from_dict(json.load(f))
+    import time
+    for attempt in range(2):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return BalatroState.from_dict(json.load(f))
+        except json.JSONDecodeError:
+            if attempt == 0:
+                time.sleep(0.02)
+                continue
+            raise

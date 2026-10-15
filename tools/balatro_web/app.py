@@ -49,7 +49,7 @@ import traceback
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -60,6 +60,7 @@ from decidex.balatro import (  # noqa: E402
     BalatroState,
     load_state,
 )
+from decidex.balatro.state import SUIT_SYMBOL  # noqa: E402
 from decidex.providers.base import BaseInferenceProvider  # noqa: E402
 from decidex.providers.mock import MockReplayProvider  # noqa: E402
 from decidex.viz import build_report  # noqa: E402
@@ -112,6 +113,21 @@ WEB_USER = os.environ.get("BALATRO_WEB_USER", "mango")
 WEB_PASSWORD = os.environ.get("BALATRO_WEB_PASSWORD", "12345678")
 _ADVISORS: Dict[str, BalatroAdvisor] = {}
 _CACHE: Dict[str, Any] = {}
+_META_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_CACHE_MAX_ENTRIES = 256
+_CACHE_LOCK = threading.Lock()
+_DISPATCH_LOCK = threading.Lock()
+
+VALID_GAME_ACTIONS = {
+    "play", "discard", "toggle_card", "select_cards", "unhighlight_all",
+    "sort_rank", "sort_suit", "reroll_shop", "buy_card", "buy_from_shop",
+    "use_card", "sell_card", "select_blind", "cash_out", "toggle_shop", "start_run"
+}
+
+VALID_AREAS = {
+    "shop_jokers", "shop_booster", "shop_boosters", "shop_vouchers", "shop_voucher",
+    "consumables", "consumeables", "jokers", "joker", "hand"
+}
 
 # Login sessions: random bearer held only in server memory, keyed to a
 # cookie value. Restarting the service invalidates every session (fine — the
@@ -213,33 +229,172 @@ def get_advisor(kind: str) -> BalatroAdvisor:
     return advisor
 
 
-def list_games() -> List[Dict[str, Any]]:
-    """Real bridge snapshots only — never demo fixtures."""
+def _format_card_label(c: Any) -> str:
+    """Turn a raw card dict into a concise label like 'A♠'."""
+    if isinstance(c, dict):
+        rank = str(c.get("rank") or "?")
+        suit = str(c.get("suit") or "?")
+        return f"{rank}{SUIT_SYMBOL.get(suit, suit)}"
+    return str(c)
+
+
+def _get_snapshot_meta(p: Path) -> Dict[str, Any]:
+    """Extract and cache structured metadata from a bridge state snapshot."""
+    try:
+        mtime = p.stat().st_mtime
+        sz = round(p.stat().st_size / 1024, 1)
+    except OSError:
+        return {
+            "name": p.name, "size_kb": 0.0, "source": "bridge",
+            "ante": 1, "round": 1, "blind_name": "Small Blind", "blind_type": "small",
+            "target_chips": 300, "scored_chips": 0, "hands_left": 4, "discards_left": 3,
+            "money": 4, "state_name": "SELECTING_HAND", "actual_type": None, "actual_desc": None,
+            "mtime": 0.0,
+        }
+
+    cache_key = str(p.resolve())
+    with _CACHE_LOCK:
+        cached = _META_CACHE.get(cache_key)
+        if cached and cached[0] == mtime:
+            return cached[1]
+
+    meta: Dict[str, Any] = {
+        "name": p.name,
+        "size_kb": sz,
+        "source": "bridge",
+        "ante": 1,
+        "round": 1,
+        "blind_name": "Small Blind",
+        "blind_type": "small",
+        "target_chips": 300,
+        "scored_chips": 0,
+        "hands_left": 4,
+        "discards_left": 3,
+        "money": 4,
+        "state_name": "SELECTING_HAND",
+        "actual_type": None,
+        "actual_cards": [],
+        "actual_desc": None,
+        "mtime": mtime,
+    }
+
+    try:
+        raw_text = p.read_text(encoding="utf-8")
+        data = json.loads(raw_text)
+        if isinstance(data, dict):
+            meta["ante"] = int(data.get("ante") or 1)
+            meta["round"] = int(data.get("round") or 1)
+            blind = data.get("blind") or {}
+            meta["blind_name"] = str(blind.get("name") or "Small Blind")
+            meta["blind_type"] = str(blind.get("type") or "small")
+            meta["target_chips"] = int(blind.get("chips") or 300)
+            meta["scored_chips"] = int(blind.get("scored") or 0)
+            meta["hands_left"] = int(data.get("hands_left") if data.get("hands_left") is not None else 4)
+            meta["discards_left"] = int(data.get("discards_left") if data.get("discards_left") is not None else 3)
+            meta["money"] = int(data.get("money") or 0)
+            meta["state_name"] = str(data.get("state_name") or "SELECTING_HAND")
+
+            actual = data.get("actual")
+            if isinstance(actual, dict):
+                act_type = str(actual.get("type") or "")
+                meta["actual_type"] = act_type
+                cards_idx = actual.get("cards") or []
+                hand = data.get("hand") or []
+                cards_str = []
+                for idx in cards_idx:
+                    if isinstance(idx, int) and 0 <= idx < len(hand):
+                        cards_str.append(_format_card_label(hand[idx]))
+                    else:
+                        cards_str.append(f"#{idx}")
+                meta["actual_cards"] = cards_str
+                cards_repr = " ".join(cards_str)
+                if act_type == "play":
+                    meta["actual_desc"] = f"打出 {len(cards_idx)} 张: {cards_repr}" if cards_repr else f"打出 {len(cards_idx)} 张"
+                elif act_type == "discard":
+                    meta["actual_desc"] = f"弃牌 {len(cards_idx)} 张: {cards_repr}" if cards_repr else f"弃牌 {len(cards_idx)} 张"
+                elif act_type:
+                    meta["actual_desc"] = act_type
+    except Exception:
+        pass
+
+    with _CACHE_LOCK:
+        if len(_META_CACHE) >= _CACHE_MAX_ENTRIES:
+            oldest = next(iter(_META_CACHE), None)
+            if oldest:
+                _META_CACHE.pop(oldest, None)
+        _META_CACHE[cache_key] = (mtime, meta)
+    return meta
+
+
+def list_games(limit: Optional[int] = 60) -> List[Dict[str, Any]]:
+    """Real bridge snapshots only — sorted latest first with rich metadata."""
     games: List[Dict[str, Any]] = []
     if BRIDGE_DIR.is_dir():
-        for p in sorted(BRIDGE_DIR.glob("*.json")):
-            games.append({"name": p.name, "size_kb": round(p.stat().st_size / 1024, 1),
-                          "source": "bridge"})
+        files = [p for p in BRIDGE_DIR.glob("*.json") if p.name != "live_state.json"]
+        def _sort_key(p: Path):
+            m = re.search(r"-(\d{4})\.json$", p.name)
+            seq = int(m.group(1)) if m else 0
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            return (mtime, seq, p.name)
+
+        sorted_files = sorted(files, key=_sort_key, reverse=True)
+        if limit is not None and limit > 0:
+            sorted_files = sorted_files[:limit]
+        for p in sorted_files:
+            games.append(_get_snapshot_meta(p))
     return games
 
 
 def _snapshot_path(name: str) -> Optional[Path]:
-    safe = Path(name).name
+    if not BRIDGE_DIR.is_dir():
+        return None
+    safe = Path(name).name if name else ""
+    if not safe or safe in ("live", "latest"):
+        live_p = BRIDGE_DIR / "live_state.json"
+        if live_p.is_file():
+            return live_p
+        files = [p for p in BRIDGE_DIR.glob("*.json") if p.name != "live_state.json"]
+        if files:
+            def _sort_key(p: Path):
+                m = re.search(r"-(\d{4})\.json$", p.name)
+                seq = int(m.group(1)) if m else 0
+                try:
+                    mtime = p.stat().st_mtime
+                except OSError:
+                    mtime = 0.0
+                return (mtime, seq, p.name)
+            return max(files, key=_sort_key)
+        return None
     p = BRIDGE_DIR / safe
-    return p if p.is_file() else None
+    if p.is_file():
+        return p
+    if not safe.endswith(".json"):
+        p_ext = BRIDGE_DIR / f"{safe}.json"
+        if p_ext.is_file():
+            return p_ext
+    return None
 
 
 def get_state(name: str) -> BalatroState:
-    mtime = None
     p = _snapshot_path(name)
     if p is None:
-        raise FileNotFoundError(name)
+        raise FileNotFoundError(name or "live")
     mtime = p.stat().st_mtime
-    cached = _CACHE.get(name)
-    if cached and cached[0] == mtime:
-        return cached[1]
+    cache_key = str(p.resolve())
+    with _CACHE_LOCK:
+        cached = _CACHE.get(cache_key)
+        if cached and cached[0] == mtime:
+            return cached[1]
     state = load_state(p)
-    _CACHE[name] = (mtime, state)
+    with _CACHE_LOCK:
+        if len(_CACHE) >= _CACHE_MAX_ENTRIES:
+            oldest = next(iter(_CACHE), None)
+            if oldest:
+                _CACHE.pop(oldest, None)
+        _CACHE[cache_key] = (mtime, state)
     return state
 
 
@@ -289,8 +444,13 @@ async def _recommend(name: str, kind: str) -> Dict[str, Any]:
 async def _replay(kind: str) -> Dict[str, Any]:
     """Advisor over every pre-decision snapshot; pair with the following
     action snapshot to compare against the human's actual move."""
-    games = list_games()
-    loaded = [(g["name"], get_state(g["name"])) for g in games]
+    files = [p for p in BRIDGE_DIR.glob("*.json") if p.name != "live_state.json"] if BRIDGE_DIR.is_dir() else []
+    def _seq_key(p: Path):
+        m = re.search(r"-(\d{4})\.json$", p.name)
+        seq = int(m.group(1)) if m else 0
+        return (seq, p.name)
+    chronological = [p.name for p in sorted(files, key=_seq_key)]
+    loaded = [(name, get_state(name)) for name in chronological]
     reports = []
     for i, (name, state) in enumerate(loaded):
         if state.actual is not None:
@@ -305,12 +465,303 @@ async def _replay(kind: str) -> Dict[str, Any]:
         rec = await _recommend(name, kind)
         reports.append({
             "name": name,
+            "ante": state.ante,
+            "round": state.round,
+            "blind": state.blind.name,
             "advisor": rec["candidate_id"],
             "advisor_desc": rec["description"],
             "confidence": rec["confidence"],
             "human": human,
         })
     return {"provider": kind, "reports": reports}
+
+
+def _dispatch_game_action(action: str, args: Optional[Dict[str, Any]] = None) -> bool:
+    """Send an in-game action to the running Balatro instance via bridge eval."""
+    if action not in VALID_GAME_ACTIONS:
+        logging.warning("Refused invalid game action: %s", action)
+        return False
+
+    args = args or {}
+    indices = args.get("indices")
+    if indices is not None:
+        try:
+            lua_indices = "{" + ",".join(str(int(i) + 1) for i in indices if int(i) >= 0) + "}"
+        except (TypeError, ValueError):
+            logging.warning("Invalid indices format: %s", indices)
+            return False
+    else:
+        lua_indices = "nil"
+
+    idx = args.get("index")
+    if idx is not None:
+        try:
+            i_val = int(idx)
+            if i_val < 0:
+                return False
+            lua_idx = str(i_val + 1)
+        except (TypeError, ValueError):
+            logging.warning("Invalid index format: %s", idx)
+            return False
+    else:
+        lua_idx = "nil"
+
+    area = args.get("area")
+    if area is not None:
+        if area not in VALID_AREAS:
+            logging.warning("Refused invalid game area: %s", area)
+            return False
+        lua_area = f"'{area}'"
+    else:
+        lua_area = "nil"
+
+    lua_code = f"""
+if G and G.DECIDEX_EXECUTE then
+  G.DECIDEX_EXECUTE('{action}', {{
+    indices = {lua_indices},
+    index = {lua_idx},
+    area = {lua_area}
+  }})
+end
+"""
+    eval_p = Path("/tmp/balatro_eval.lua")
+    tmp_p = eval_p.parent / f"balatro_eval_{os.getpid()}_{threading.get_ident()}_{time.time_ns()}.tmp"
+    with _DISPATCH_LOCK:
+        try:
+            tmp_p.write_text(lua_code, encoding="utf-8")
+            os.replace(tmp_p, eval_p)
+            return True
+        except OSError as e:
+            logging.error("Failed to write balatro_eval: %s", e)
+            try:
+                if tmp_p.is_file():
+                    tmp_p.unlink()
+            except OSError:
+                pass
+            return False
+
+
+async def _execute_step(action_type: Optional[str] = None,
+                        indices: Optional[List[int]] = None,
+                        index: Optional[int] = None,
+                        area: Optional[str] = None,
+                        kind: str = "heuristic") -> Dict[str, Any]:
+    """Execute a single gameplay step or auto-step based on current live state."""
+    if action_type not in (None, "", "auto") and action_type not in VALID_GAME_ACTIONS:
+        return {"ok": False, "error": f"unrecognized action_type: {action_type}"}
+
+    if action_type in ("play", "discard"):
+        args: Dict[str, Any] = {}
+        if indices is not None:
+            try:
+                args["indices"] = [int(i) for i in indices if int(i) >= 0]
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "indices must be integers"}
+            if not args["indices"]:
+                return {"ok": False, "error": f"{action_type} requires at least one card index"}
+        ok = _dispatch_game_action(action_type, args)
+        act_cn = "出牌" if action_type == "play" else "弃牌"
+        desc = f"已执行 {act_cn}" + (f" ({len(indices)} 张)" if indices is not None else " (当前选中牌)")
+        return {
+            "ok": ok,
+            "executed": ok,
+            "action_type": action_type,
+            "indices": indices,
+            "description": desc,
+        }
+
+    if action_type == "toggle_card":
+        if index is None:
+            return {"ok": False, "error": "toggle_card requires index"}
+        try:
+            idx_val = int(index)
+            if idx_val < 0:
+                return {"ok": False, "error": "index must be non-negative"}
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "index must be an integer"}
+        ok = _dispatch_game_action("toggle_card", {"index": idx_val})
+        return {
+            "ok": ok,
+            "executed": ok,
+            "action_type": action_type,
+            "index": idx_val,
+            "description": f"已切换第 {idx_val + 1} 张手牌选中状态",
+        }
+
+    if action_type == "select_cards":
+        if indices is None:
+            idxs = []
+        else:
+            try:
+                idxs = [int(i) for i in indices if int(i) >= 0]
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "indices must be integers"}
+        ok = _dispatch_game_action("select_cards", {"indices": idxs})
+        return {
+            "ok": ok,
+            "executed": ok,
+            "action_type": action_type,
+            "indices": idxs,
+            "description": f"已选中指定手牌 ({len(idxs)} 张)",
+        }
+
+    if action_type == "unhighlight_all":
+        ok = _dispatch_game_action("unhighlight_all")
+        return {
+            "ok": ok,
+            "executed": ok,
+            "action_type": action_type,
+            "description": "已取消所有手牌选中",
+        }
+
+    if action_type in ("buy_card", "buy_from_shop"):
+        if index is None:
+            return {"ok": False, "error": f"{action_type} requires index"}
+        try:
+            idx_val = int(index)
+            if idx_val < 0:
+                return {"ok": False, "error": "index must be non-negative"}
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "index must be an integer"}
+        card_area = area or "shop_jokers"
+        if card_area not in VALID_AREAS:
+            return {"ok": False, "error": f"invalid area: {card_area}"}
+        args = {"index": idx_val, "area": card_area}
+        ok = _dispatch_game_action("buy_card", args)
+        return {
+            "ok": ok,
+            "executed": ok,
+            "action_type": action_type,
+            "index": idx_val,
+            "area": card_area,
+            "description": f"已购买商店第 {idx_val + 1} 张卡牌",
+        }
+
+    if action_type in ("sort_rank", "sort_suit"):
+        ok = _dispatch_game_action(action_type)
+        desc = "按点数排序手牌" if action_type == "sort_rank" else "按花色排序手牌"
+        return {"ok": ok, "executed": ok, "action_type": action_type, "description": f"已{desc}"}
+
+    if action_type == "reroll_shop":
+        ok = _dispatch_game_action("reroll_shop")
+        return {"ok": ok, "executed": ok, "action_type": action_type, "description": "已重掷商店"}
+
+    if action_type in ("use_card", "sell_card"):
+        if index is None:
+            return {"ok": False, "error": f"{action_type} requires index"}
+        try:
+            idx_val = int(index)
+            if idx_val < 0:
+                return {"ok": False, "error": "index must be non-negative"}
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "index must be an integer"}
+        card_area = area or ("consumables" if action_type == "use_card" else "jokers")
+        if card_area not in VALID_AREAS:
+            return {"ok": False, "error": f"invalid area: {card_area}"}
+        args = {"index": idx_val, "area": card_area}
+        ok = _dispatch_game_action(action_type, args)
+        desc = f"已{'使用' if action_type == 'use_card' else '出售'} {card_area} 第 {idx_val + 1} 张"
+        return {"ok": ok, "executed": ok, "action_type": action_type, "index": idx_val, "area": card_area, "description": desc}
+
+    if action_type in ("select_blind", "cash_out", "toggle_shop", "start_run"):
+        ok = _dispatch_game_action(action_type)
+        action_names = {
+            "select_blind": "选择下一盲注",
+            "cash_out": "结算本轮奖励进入商店",
+            "toggle_shop": "离开商店进入下一盲注",
+            "start_run": "开始新对局",
+        }
+        return {
+            "ok": ok,
+            "executed": ok,
+            "action_type": action_type,
+            "description": f"已执行 {action_names.get(action_type, action_type)}",
+        }
+
+    try:
+        live_state = get_state("live")
+    except FileNotFoundError:
+        return {"ok": False, "error": "live_state.json not found"}
+    except Exception as e:
+        return {"ok": False, "error": f"read live_state error: {e}"}
+
+    st_name = live_state.state_name or "unknown"
+
+    if st_name == "SELECTING_HAND":
+        blind = live_state.blind
+        if blind.chips > 0 and blind.scored >= blind.chips:
+            return {"ok": True, "executed": False, "state_name": st_name, "action_type": "wait", "description": "目标分数已达成，等待结算进入商店"}
+        if live_state.hands_left <= 0:
+            return {"ok": False, "error": "no hands left"}
+        if not live_state.hand:
+            return {"ok": False, "error": "hand is empty"}
+
+        rec = await _recommend("live", kind)
+        act = rec.get("action_type")
+        idxs = rec.get("indices", [])
+        if act in ("play", "discard"):
+            if not idxs:
+                return {"ok": False, "error": f"no card indices recommended for {act}"}
+            ok = _dispatch_game_action(act, {"indices": idxs})
+            return {
+                "ok": ok,
+                "executed": ok,
+                "state_name": st_name,
+                "action_type": act,
+                "indices": idxs,
+                "description": rec.get("description", ""),
+                "recommendation": rec,
+            }
+        return {"ok": False, "error": f"unsupported recommended action {act}"}
+
+    elif st_name == "BLIND_SELECT":
+        ok = _dispatch_game_action("select_blind")
+        return {
+            "ok": ok,
+            "executed": ok,
+            "state_name": st_name,
+            "action_type": "select_blind",
+            "description": "选择下一盲注",
+        }
+
+    elif st_name == "ROUND_EVAL":
+        ok = _dispatch_game_action("cash_out")
+        return {
+            "ok": ok,
+            "executed": ok,
+            "state_name": st_name,
+            "action_type": "cash_out",
+            "description": "结算本轮奖励进入商店",
+        }
+
+    elif st_name == "SHOP":
+        ok = _dispatch_game_action("toggle_shop")
+        return {
+            "ok": ok,
+            "executed": ok,
+            "state_name": st_name,
+            "action_type": "toggle_shop",
+            "description": "离开商店进入下一盲注",
+        }
+
+    elif st_name == "MENU":
+        ok = _dispatch_game_action("start_run")
+        return {
+            "ok": ok,
+            "executed": ok,
+            "state_name": st_name,
+            "action_type": "start_run",
+            "description": "开始新对局",
+        }
+
+    else:
+        return {
+            "ok": True,
+            "executed": False,
+            "waiting": True,
+            "state_name": st_name,
+            "description": f"游戏状态过渡中 ({st_name})，等待完成",
+        }
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -382,6 +833,8 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
     def _run_async(self, coro):
+        if _LOOP is None or not _LOOP.is_running():
+            return asyncio.run(coro)
         return asyncio.run_coroutine_threadsafe(coro, _LOOP).result(timeout=120)
 
     def do_GET(self):
@@ -424,10 +877,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not FRAME_PATH.exists():
                     return self._json({"error": "no frame yet"}, 503)
                 etag = '"%s"' % _FRAME_ETAG
-                # Cloudflare revalidates cached frames with If-None-Match; the
-                # 304 reply carries no body, so an unchanged frame costs ~0
-                # egress no matter how many viewers poll.
-                if self.headers.get("If-None-Match") == etag:
+                # If requested with explicit fresh query parameter (e.g. ?_t=... after interactive click):
+                # bypass edge caching completely so clicks immediately reflect on the viewer.
+                is_fresh_req = "?" in self.path and ("_t=" in self.path or "t=" in self.path)
+                if not is_fresh_req and self.headers.get("If-None-Match") == etag:
                     self.send_response(304)
                     self.send_header("ETag", etag)
                     self.send_header("Cache-Control",
@@ -436,26 +889,38 @@ class Handler(BaseHTTPRequestHandler):
                     self.end_headers()
                     return
                 data = FRAME_PATH.read_bytes()
-                # Stable URL (no per-request cache-buster) + short edge TTL lets
-                # the CDN collapse N viewers into ~one origin fetch per interval.
+                cache_ctrl = ("no-store, no-cache, must-revalidate, max-age=0"
+                              if is_fresh_req
+                              else f"public, max-age={FRAME_MAXAGE}, s-maxage={FRAME_MAXAGE}")
                 self._send(200, data, "image/jpeg", extra={
                     "ETag": etag,
-                    "Cache-Control":
-                    f"public, max-age={FRAME_MAXAGE}, s-maxage={FRAME_MAXAGE}",
+                    "Cache-Control": cache_ctrl,
                 })
                 return
             if path == "/api/health":
+                has_live = (BRIDGE_DIR / "live_state.json").is_file() if BRIDGE_DIR.is_dir() else False
+                qs = dict(pair.split("=", 1) for pair in self.path.split("?", 1)[1].split("&")) \
+                    if "?" in self.path else {}
+                try:
+                    limit_val = int(qs.get("limit", "60"))
+                except ValueError:
+                    limit_val = 60
                 return self._json({
                     "ok": True, "engine": "balatro-advisor",
                     "bridge_dir": str(BRIDGE_DIR),
-                    "games": list_games(),
+                    "has_live": has_live,
+                    "games": list_games(limit=limit_val),
                 })
             if path.startswith("/api/game"):
                 qs = dict(pair.split("=", 1) for pair in self.path.split("?", 1)[1].split("&")) \
                     if "?" in self.path else {}
-                name = qs.get("name", "")
+                name = qs.get("name", "live")
                 state = get_state(name)
-                return self._json(state_payload(state))
+                payload = state_payload(state)
+                p = _snapshot_path(name)
+                payload["_snapshot"] = p.name if p else name
+                payload["_is_live"] = (name in ("live", "latest", "") or (p and p.name == "live_state.json"))
+                return self._json(payload)
             return self._json({"error": "not found"}, 404)
         except FileNotFoundError as e:
             return self._json({"error": f"snapshot not found: {e}"}, 404)
@@ -497,6 +962,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self._run_async(_recommend(str(req.get("name", "")), kind)))
             if path == "/api/replay":
                 return self._json(self._run_async(_replay(kind)))
+            if path == "/api/execute":
+                deny = self._deny_input()
+                if deny:
+                    return self._json({"error": "unauthorized" if deny == 401 else "csrf"}, deny)
+                action_type = req.get("action_type") or req.get("action")
+                indices = req.get("indices")
+                index = req.get("index")
+                area = req.get("area")
+                res = self._run_async(_execute_step(action_type, indices=indices, index=index, area=area, kind=kind))
+                return self._json(res)
             if path == "/api/input/click":
                 deny = self._deny_input()
                 if deny:
@@ -681,10 +1156,10 @@ def _click_args(x: int, y: int, double: bool = False) -> list:
     """Clamp to the game window and build the xdotool argv for one click.
     Bounds track the Xvfb :66 screen (BALATRO_GAME_W/H), which may be shrunk
     from the original 1280x800 to cut render cost and frame size."""
-    args = ["mousemove", str(max(0, min(GAME_W - 1, x))), str(max(0, min(GAME_H - 1, y)))]
+    args = ["mousemove", str(max(0, min(GAME_W - 1, x))), str(max(0, min(GAME_H - 1, y))), "sleep", "0.05"]
     if double:
-        return args + ["click", "--repeat", "2", "1"]
-    return args + ["click", "1"]
+        return args + ["mousedown", "1", "sleep", "0.05", "mouseup", "1", "sleep", "0.05", "mousedown", "1", "sleep", "0.05", "mouseup", "1"]
+    return args + ["mousedown", "1", "sleep", "0.05", "mouseup", "1"]
 
 
 def _key_name(key: str) -> str:

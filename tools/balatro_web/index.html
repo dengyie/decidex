@@ -34,15 +34,25 @@
   button.primary { background:var(--accent); color:#20160a; font-weight:700; border:none; }
   #stats { color:var(--dim); font-size:12px; margin-left:auto; }
   #authState { font-size:12px; } #authState.on { color:var(--good); } #authState.off { color:var(--dim); }
-  .layout { display:grid; grid-template-columns: 1fr 340px; gap:12px; padding:12px; max-width:1440px; margin:0 auto; }
+  .layout { display:grid; grid-template-columns: 1fr 390px; gap:12px; padding:12px; max-width:1440px; margin:0 auto; }
   .live-wrap { max-width:1440px; margin:0 auto; padding:12px 12px 0; }
   .live-panel { padding:10px; }
-  .live-panel img { display:block; width:100%; max-height:62vh; object-fit:contain;
-                    background:#000; border-radius:8px; }
+  .feed-wrap { position:relative; overflow:hidden; border-radius:8px; line-height:0;
+               display:flex; justify-content:center; align-items:center; background:#000;
+               touch-action:manipulation; }
+  .live-panel img { display:block; width:min(100%, calc(62vh * 1.6)); height:auto;
+                    max-height:62vh; aspect-ratio:16/10; object-fit:contain;
+                    background:#000; border-radius:8px; margin:0 auto;
+                    touch-action:manipulation; }
+  .feed-wrap .ripple {
+    position:absolute; width:22px; height:22px; border:2px solid var(--accent);
+    border-radius:50%; pointer-events:none; z-index:10; transform:translate(-50%,-50%);
+    animation:rp .35s cubic-bezier(0,0,.2,1) forwards;
+  }
+  @keyframes rp { 0%{opacity:1; transform:translate(-50%,-50%) scale(.4)} 100%{opacity:0; transform:translate(-50%,-50%) scale(2.2)} }
   .live-dot { display:inline-block; width:9px; height:9px; border-radius:50%;
               background:#ff4d4d; margin-right:6px; animation:pulse 1.4s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
-  .live-panel img.down { display:none; }
   .live-panel.playable img { cursor: crosshair; }
   .live-toolbar { display:flex; gap:10px; align-items:center; margin-top:8px; font-size:12px; color:var(--dim); }
   .live-toolbar button { padding:3px 10px; font-size:12px; }
@@ -108,9 +118,49 @@
   .card .seal { position:absolute; right:4px; bottom:4px; width:13px; height:13px; border-radius:50%;
                 border:1.5px solid rgba(255,255,255,.75); }
   .seal.red{background:#d33;} .seal.blue{background:#39f;} .seal.gold{background:#e3b341;} .seal.purple{background:#9a5fd0;}
+  .card.sel { transform:translateY(-16px); box-shadow:0 8px 18px rgba(0,0,0,.6), 0 0 0 2.5px #fff; }
   .card.rec { transform:translateY(-14px); box-shadow:0 8px 18px rgba(0,0,0,.5), 0 0 0 3px var(--good), 0 0 18px rgba(95,208,138,.7); }
+  .card.rec.sel { transform:translateY(-20px); box-shadow:0 10px 22px rgba(0,0,0,.6), 0 0 0 3px var(--good), 0 0 0 5px #fff; }
   .card.act { box-shadow:0 4px 10px rgba(0,0,0,.45), 0 0 0 3px var(--accent); }
   .zone-label { text-align:center; color:rgba(255,255,255,.4); font-size:10px; letter-spacing:.15em; margin:2px 0 6px; }
+
+  .card.interactive { cursor:pointer; user-select:none; }
+  .card.interactive:hover { transform:translateY(-8px); }
+  .card.interactive.sel:hover { transform:translateY(-18px); }
+
+  /* 抽象操作控制条 */
+  .hand-actions { display:flex; gap:10px; justify-content:center; align-items:center; flex-wrap:wrap; margin:10px 0 14px; }
+  .act-btn { padding:8px 16px; font-size:13px; font-weight:700; border-radius:8px; border:1px solid transparent; cursor:pointer;
+             display:inline-flex; align-items:center; gap:6px; transition:all .15s ease; box-shadow:0 3px 8px rgba(0,0,0,.3); }
+  .act-btn:hover { filter:brightness(1.15); transform:translateY(-1px); }
+  .act-btn:active { transform:translateY(1px); }
+  .act-btn:disabled { opacity:.4; cursor:not-allowed; transform:none; }
+  .act-btn.play-btn { background:#2980b9; border-color:#1f618d; color:#fff; }
+  .act-btn.discard-btn { background:#c0392b; border-color:#962d22; color:#fff; }
+  .act-btn.util-btn { background:#34495e; border-color:#2c3e50; color:#ecf0f1; }
+  .act-btn.shop-btn { background:#d35400; border-color:#ba4a00; color:#fff; }
+  .act-btn.stage-btn { background:#27ae60; border-color:#229954; color:#fff; font-size:13px; padding:8px 16px; }
+
+  .stage-bar { background:rgba(39,174,96,.12); border:1px solid rgba(39,174,96,.35); border-radius:10px;
+               padding:10px 14px; margin:10px 0 14px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; }
+  .stage-bar .stage-title { font-weight:800; font-size:13px; color:#5fd08a; display:flex; align-items:center; gap:8px; }
+  .stage-bar .stage-desc { font-size:12px; color:var(--dim); }
+
+  .shop-section { background:rgba(211,84,0,.1); border:1px solid rgba(211,84,0,.3); border-radius:10px; padding:12px; margin:10px 0; }
+  .shop-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+  .shop-cards { display:flex; gap:10px; flex-wrap:wrap; justify-content:center; }
+  .shop-card { background:linear-gradient(165deg,#4a3220,#2b1c0f); border:2px solid #8a6a4f; border-radius:9px; padding:8px; width:90px;
+               display:flex; flex-direction:column; align-items:center; text-align:center; box-shadow:0 4px 10px rgba(0,0,0,.45); }
+  .shop-card .sc-name { font-size:11px; font-weight:800; color:#ffe9b8; margin-bottom:4px; }
+  .shop-card .sc-cost { font-size:12px; font-weight:900; color:#f1c40f; margin-bottom:6px; }
+  .shop-buy-btn { width:100%; padding:4px 0; font-size:11px; font-weight:800; background:#27ae60; border:none; border-radius:6px; color:#fff; cursor:pointer; }
+  .shop-buy-btn:hover { background:#2ecc71; }
+
+  .jcard-act-bar { display:flex; gap:4px; margin-top:auto; padding-top:4px; }
+  .jcard-btn { flex:1; padding:3px 0; font-size:10px; font-weight:700; border-radius:4px; border:none; cursor:pointer; }
+  .jcard-btn.use-btn { background:#27ae60; color:#fff; }
+  .jcard-btn.sell-btn { background:#c0392b; color:#fff; }
+  .jcard-btn:hover { filter:brightness(1.2); }
 
   /* 小丑/消耗品卡 */
   .jokerrow { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; min-height:100px;
@@ -127,7 +177,7 @@
   .jcard.rec-j { box-shadow:0 4px 10px rgba(0,0,0,.45), 0 0 0 3px var(--good); }
   .empty { color:rgba(255,255,255,.3); font-size:11px; align-self:center; }
 
-  /* 右栏 */
+  /* 右栏与决策看板 */
   #recBody .big { font-size:14px; font-weight:800; margin:6px 0; color:#fff; }
   .badge { display:inline-block; padding:2px 9px; border-radius:10px; font-size:11px; margin-right:6px; font-weight:700; }
   .badge.ok { background:rgba(95,208,138,.16); color:var(--good); }
@@ -140,11 +190,98 @@
   td,th { padding:4px 6px; border-bottom:1px solid var(--line); text-align:left; }
   th { color:var(--dim); font-weight:600; }
   .match { color:var(--good); } .diff { color:var(--bad); }
-  .snap { padding:7px 9px; border:1px solid var(--line); border-radius:8px; margin-bottom:7px;
-          cursor:pointer; font-size:12px; color:var(--dim); }
-  .snap:hover { border-color:var(--accent); }
-  .snap.active { border-color:var(--accent); color:var(--text); background:#1a212e; }
-  .snap .src { float:right; font-size:10px; color:var(--dim); }
+
+  /* 决策点卡片流 */
+  .snap-list-wrap { max-height:280px; overflow-y:auto; display:flex; flex-direction:column; gap:7px; padding-right:4px; }
+  .snap-card {
+    background:#141b26; border:1px solid var(--line); border-radius:8px; padding:8px 10px;
+    cursor:pointer; transition:all .15s ease; display:flex; flex-direction:column; gap:5px;
+  }
+  .snap-card:hover { border-color:var(--accent); background:#1c2536; transform:translateY(-1px); }
+  .snap-card.active { border-color:var(--accent); background:#1f2b3e; box-shadow:0 0 0 1px var(--accent); }
+  .snap-card.live { border-color:rgba(255,95,95,.45); background:rgba(255,95,95,.08); }
+  .snap-card.live.active { border-color:#ff5f5f; background:rgba(255,95,95,.22); box-shadow:0 0 0 1px #ff5f5f; }
+
+  .snap-row-top { display:flex; align-items:center; justify-content:space-between; font-size:11.5px; }
+  .snap-ante-badge { background:#2a3447; color:#fff; padding:1.5px 7px; border-radius:4px; font-weight:700; font-family:ui-monospace,monospace; }
+  .snap-blind-tag { font-weight:700; font-size:11px; padding:1.5px 7px; border-radius:4px; }
+  .snap-blind-tag.small { color:#8cb8ff; background:rgba(58,110,242,.18); }
+  .snap-blind-tag.big { color:#f1c40f; background:rgba(241,196,15,.18); }
+  .snap-blind-tag.boss { color:#ff8df0; background:rgba(164,74,184,.28); border:1px solid rgba(224,123,255,.3); }
+
+  .snap-row-mid { display:flex; align-items:center; justify-content:space-between; font-size:11px; color:var(--dim); }
+  .snap-chips { font-weight:800; color:#e8ecf3; }
+  .snap-counts { display:flex; gap:8px; font-size:11px; }
+
+  .snap-row-bot { display:flex; align-items:center; justify-content:space-between; font-size:10.5px; border-top:1px dashed rgba(255,255,255,.08); padding-top:5px; margin-top:2px; }
+  .snap-act-badge { padding:1px 6px; border-radius:4px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:210px; }
+  .snap-act-badge.play { color:#5fd08a; background:rgba(95,208,138,.14); }
+  .snap-act-badge.discard { color:#fe5f55; background:rgba(254,95,85,.14); }
+  .snap-act-badge.none { color:var(--dim); }
+  .snap-filename { font-size:9px; color:rgba(255,255,255,.3); font-family:ui-monospace,monospace; }
+
+  /* 顾问状态与核心卡片 */
+  .advisor-status { font-size:10.5px; padding:2px 7px; border-radius:8px; font-weight:700; }
+  .advisor-status.idle { background:rgba(255,255,255,.08); color:var(--dim); }
+  .advisor-status.busy { background:rgba(242,177,52,.16); color:var(--warn); }
+  .advisor-status.done { background:rgba(95,208,138,.16); color:var(--good); }
+
+  .rec-hero-card {
+    background:linear-gradient(165deg, rgba(20,28,42,.95), rgba(12,18,28,.98));
+    border:1px solid rgba(242,177,52,.25); border-radius:10px; padding:12px;
+    box-shadow:0 4px 14px rgba(0,0,0,.4); margin-bottom:10px;
+  }
+  .rec-hero-action {
+    font-size:14px; font-weight:800; color:#fff; display:flex; align-items:center;
+    justify-content:space-between; gap:8px; margin-bottom:8px;
+  }
+  .rec-hero-title { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  .rec-badge-clear { font-size:11px; padding:2px 7px; border-radius:6px; font-weight:700; }
+  .rec-badge-clear.win { background:#27ae60; color:#fff; }
+  .rec-badge-clear.gap { background:#d35400; color:#fff; }
+
+  /* 推荐出牌/弃牌卡片展示 */
+  .mini-card-row { display:flex; gap:6px; flex-wrap:wrap; margin:10px 0; align-items:center; }
+  .mini-card {
+    width:40px; height:56px; border-radius:6px; background:#fff; color:#242424;
+    border:1.5px solid #bbb; position:relative; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; box-shadow:0 2px 6px rgba(0,0,0,.35);
+    font-family:ui-monospace,monospace; user-select:none;
+  }
+  .mini-card.red { color:#c0392b; }
+  .mini-card.blk { color:#242424; }
+  .mini-card .mc-rk { position:absolute; top:2px; left:3px; font-size:11px; font-weight:800; line-height:1; }
+  .mini-card .mc-st { position:absolute; top:13px; left:3px; font-size:9px; line-height:1; }
+  .mini-card .mc-sym { font-size:20px; opacity:.88; }
+  .mini-card .mc-tag { position:absolute; bottom:0; left:0; right:0; font-size:8px; background:#555; color:#fff; text-align:center; border-radius:0 0 5px 5px; font-family:"Segoe UI",sans-serif; }
+
+  .rec-calc-bar {
+    background:rgba(0,0,0,.32); border:1px solid rgba(255,255,255,.08); border-radius:8px;
+    padding:8px 10px; margin:8px 0; display:flex; align-items:center; justify-content:space-between;
+    font-size:12px;
+  }
+  .rec-calc-formula { display:flex; align-items:center; gap:6px; font-weight:800; }
+  .rec-calc-formula .c-chips { color:#58b6ff; }
+  .rec-calc-formula .c-mult { color:#fe5f55; }
+  .rec-calc-formula .c-total { color:#5fd08a; font-size:14px; }
+  .rec-calc-rate { font-size:11px; color:var(--dim); }
+
+  .rec-exec-btn {
+    width:100%; padding:8px 14px; font-size:13.5px; font-weight:800; background:#27ae60;
+    border:1px solid #229954; border-radius:7px; color:#fff; cursor:pointer;
+    transition:all .15s ease; box-shadow:0 3px 8px rgba(0,0,0,.3); display:flex;
+    align-items:center; justify-content:center; gap:6px; margin-top:8px;
+  }
+  .rec-exec-btn:hover { background:#2ecc71; transform:translateY(-1px); }
+  .rec-exec-btn:active { transform:translateY(1px); }
+
+  .auto-rec-toggle { display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:700;
+                     color:#5fd08a; background:rgba(95,208,138,.12); padding:5px 10px;
+                     border-radius:7px; border:1px solid rgba(95,208,138,.3); cursor:pointer; user-select:none; }
+  .auto-rec-toggle input { cursor:pointer; margin:0; }
+  .auto-rec-toggle:hover { background:rgba(95,208,138,.2); }
+
+  .cmp-table-wrap { max-height:240px; overflow-y:auto; }
 </style>
 </head>
 <body>
@@ -156,7 +293,9 @@
     <option value="model">真实模型(Jev/Drex 四级路由)</option>
   </select>
   <button id="recBtn" class="primary">推荐</button>
-  <button id="runAll">跑整局</button>
+  <button id="execBtn" class="primary" style="background:#27ae60; border-color:#229954;" title="在游戏中执行当前推荐动作">⚡ 执行推荐</button>
+  <button id="runAll">🤖 自动跑整局</button>
+  <label class="auto-rec-toggle" title="手牌变动时自动计算推荐与概率"><input type="checkbox" id="autoAdvisorCheck" checked> <span>实时顾问跟随</span></label>
   <span id="authState" class="off">未登录</span>
   <button id="logoutBtn">退出</button>
   <span id="stats"></span>
@@ -165,10 +304,13 @@
 <div class="live-wrap">
   <div class="panel live-panel" id="livePanel">
     <h3><span class="live-dot"></span> 游戏实况 · LIVE(广州CVM 真机)</h3>
-    <img id="liveFeed" alt="live">
+    <div class="feed-wrap" id="feedWrap">
+      <img id="liveFeed" alt="live">
+    </div>
     <div class="live-toolbar">
       <button id="playToggle">操作:开</button>
-      <span id="ctrlHint">直接点击画面即可操作游戏(鼠标=点击,自动换算坐标)</span>
+      <span id="ctrlHint">直接点击画面即可操作游戏（已启用零延迟极速反馈）</span>
+      <span id="liveMetrics" style="margin-left:auto; font-family:monospace; font-size:11px; color:#5fd08a;"></span>
     </div>
   </div>
 </div>
@@ -202,30 +344,84 @@
       <div class="zone-label">HAND</div>
       <div class="handrow" id="hand"></div>
 
+      <div class="hand-actions" id="handActions">
+        <button id="btnPlay" class="act-btn play-btn" title="打出选中的牌">🃏 出牌 (Play)</button>
+        <button id="btnDiscard" class="act-btn discard-btn" title="弃掉选中的牌">🗑️ 弃牌 (Discard)</button>
+        <button id="btnSortRank" class="act-btn util-btn" title="按点数降序排列手牌">🔢 点数排序</button>
+        <button id="btnSortSuit" class="act-btn util-btn" title="按花色排列手牌">♠️ 花色排序</button>
+        <button id="btnUnsel" class="act-btn util-btn" title="清空手牌选中">🧹 取消选中</button>
+      </div>
+
+      <div class="stage-bar" id="stageBar" style="display:none;"></div>
+
       <div class="zone-label" style="margin-top:12px">JOKERS</div>
       <div class="jokerrow" id="jokers"></div>
 
       <div class="zone-label" style="margin-top:8px">CONSUMABLES</div>
       <div class="jokerrow" id="consumables" style="min-height:64px"></div>
+
+      <div id="shopSection" class="shop-section" style="display:none;">
+        <div class="shop-header">
+          <div class="stage-title">🛒 商店卡牌</div>
+          <div style="display:flex; gap:8px;">
+            <button id="btnShopReroll" class="act-btn shop-btn">🎲 重掷 ($5)</button>
+            <button id="btnShopExit" class="act-btn stage-btn">➡️ 下一轮</button>
+          </div>
+        </div>
+        <div class="shop-cards" id="shopCards"></div>
+      </div>
     </div>
   </div>
 
   <div>
+    <!-- 决策点历史/快照浏览面板 -->
     <div class="panel">
-      <h3>决策点</h3>
-      <div id="snapList"><div class="muted">加载中…</div></div>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <h3 style="margin:0;">🎯 决策点时间轴</h3>
+        <span id="snapCount" style="font-size:11px; color:var(--dim);"></span>
+      </div>
+      <div class="snap-list-wrap" id="snapList"><div class="muted">加载中…</div></div>
     </div>
-    <div class="panel" style="margin-top:12px">
-      <h3>优秀操作推荐</h3>
-      <div id="recBody"><div class="muted">点「推荐」或「跑整局」。</div></div>
-      <div id="vizBody"></div>
-      <h3 style="margin-top:12px">合法动作包络(TOP-10)</h3>
-      <div id="legal"></div>
+
+    <!-- AI 决策顾问与概率可视化看板 -->
+    <div class="panel" style="margin-top:12px;" id="advisorPanel">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+        <h3 style="margin:0;">💡 AI 推荐与概率洞察</h3>
+        <span id="advisorStatus" class="advisor-status idle">就绪</span>
+      </div>
+
+      <!-- 推荐核心卡片 -->
+      <div id="recHeroCard" class="rec-hero-card">
+        <div id="recBody"><div class="muted">点「推荐」或勾选「实时顾问跟随」自动分析。</div></div>
+      </div>
+
+      <!-- 概率分布与置信度组件 -->
+      <div class="viz-wrapper">
+        <div id="vizBody"></div>
+      </div>
+
+      <!-- 合法动作包络 -->
+      <div class="envelope-section">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin:14px 0 6px;">
+          <h3 style="margin:0; font-size:11px; color:var(--dim);">候选动作评估 (TOP-10)</h3>
+          <span id="envelopeCount" style="font-size:10px; color:var(--dim);"></span>
+        </div>
+        <div id="legal"></div>
+      </div>
     </div>
+
+    <!-- 顾问 vs 玩家 复盘面板 -->
     <div class="panel" style="margin-top:12px">
-      <h3>顾问 vs 玩家(整局)</h3>
-      <table id="cmpTable"><thead><tr><th>决策点</th><th>顾问</th><th>玩家</th></tr></thead>
-        <tbody></tbody></table>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <h3 style="margin:0;">📊 顾问 vs 玩家 (整局复盘)</h3>
+        <button id="btnReplayRefresh" class="util-btn" style="padding:2px 8px; font-size:11px;">开始比对</button>
+      </div>
+      <div class="cmp-table-wrap">
+        <table id="cmpTable">
+          <thead><tr><th>决策点</th><th>AI 建议</th><th>玩家实际</th></tr></thead>
+          <tbody><tr><td colspan="3" class="muted" style="text-align:center; padding:12px;">点「跑整局」或「开始比对」进行离线推演。</td></tr></tbody>
+        </table>
+      </div>
     </div>
   </div>
 </div>
@@ -234,10 +430,12 @@
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
-let GAMES = [], CURRENT = null, LAST = null;
+let GAMES = [], CURRENT = 'live', LAST = null;
+let _liveSyncTimer = null;
+let _lastStateFingerprint = '';
 
 async function jget(u){ const r = await fetch(u); if(!r.ok) throw new Error(await r.text()); return r.json(); }
-async function jpost(u,b){ const r = await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); if(!r.ok) throw new Error(await r.text()); return r.json(); }
+async function jpost(u,b){ const r = await fetch(u,{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'decidex-web'},body:JSON.stringify(b)}); if(!r.ok) throw new Error(await r.text()); return r.json(); }
 
 /* XSS 安全:一律 textContent 建节点 */
 function el(tag, cls, text){
@@ -251,44 +449,195 @@ const SUIT_RED = s => s==='H'||s==='D';
 const ENH_CN = {bonus:'筹码',mult:'倍率',wild:'万能',glass:'玻璃',steel:'钢铁',gold:'黄金',lucky:'幸运'};
 const ED_CN = {foil:'铝箔',holo:'全息',poly:'多彩'};
 
+async function refreshGamesList(){
+  try {
+    const h = await jget('/api/health');
+    GAMES = h.games || [];
+    const sel = $('gameSel');
+    while (sel.firstChild) sel.removeChild(sel.firstChild);
+
+    const oLive = el('option', null, '🔴 实时对局 (LIVE)');
+    oLive.value = 'live';
+    sel.appendChild(oLive);
+
+    GAMES.forEach(g=>{
+      const antePart = (g.ante != null && g.round != null) ? `[A${g.ante}-R${g.round}] ` : '';
+      const blindPart = g.blind_name ? `${g.blind_name} ` : '';
+      const chipsPart = (g.scored_chips != null && g.target_chips != null) ? `(${g.scored_chips}/${g.target_chips}) ` : '';
+      const handsPart = (g.hands_left != null && g.discards_left != null) ? `· 剩${g.hands_left}手${g.discards_left}弃 ` : '';
+      const o = el('option', null, `${antePart}${blindPart}${chipsPart}${handsPart}[${g.name}]`);
+      o.value = g.name;
+      sel.appendChild(o);
+    });
+    sel.value = CURRENT;
+    $('stats').textContent = `${GAMES.length} 快照 · ${h.bridge_dir}`;
+    if ($('snapCount')) $('snapCount').textContent = `${GAMES.length} 个快照`;
+    renderSnapList();
+  } catch(e) {
+    console.error('Failed to refresh games list', e);
+  }
+}
+
 async function boot(){
-  const h = await jget('/api/health');
-  GAMES = h.games;
-  const sel = $('gameSel');
-  while (sel.firstChild) sel.removeChild(sel.firstChild);
-  GAMES.forEach(g=>{
-    const o = el('option', null, `${g.name} (${g.size_kb}K${g.source? ' · '+g.source:''})`);
-    o.value = g.name; sel.appendChild(o);
-  });
-  $('stats').textContent = `${GAMES.length} 快照 · ${h.bridge_dir}`;
-  renderSnapList();
-  if(GAMES.length) await loadGame(GAMES[0].name);
+  await refreshGamesList();
+  await loadGame('live');
+  updateRunAllBtn();
+  scheduleLiveSync(1000);
 }
 
 function renderSnapList(){
-  const list = $('snapList'); while (list.firstChild) list.removeChild(list.firstChild);
+  const list = $('snapList');
+  while (list.firstChild) list.removeChild(list.firstChild);
+
+  if ($('snapCount')) $('snapCount').textContent = `${GAMES.length} 个快照`;
+
+  // 1. LIVE 卡片
+  const liveCard = el('div', 'snap-card live' + (CURRENT === 'live' ? ' active' : ''));
+  const liveTop = el('div', 'snap-row-top');
+  liveTop.appendChild(el('span', null, '🔴 实时对局 (LIVE)'));
+  liveTop.appendChild(el('span', 'snap-ante-badge', '真机同步'));
+  liveCard.appendChild(liveTop);
+
+  const liveMid = el('div', 'snap-row-mid');
+  liveMid.appendChild(el('span', null, '与广州 CVM 游戏机实时状态双向打通'));
+  liveCard.appendChild(liveMid);
+
+  const liveBot = el('div', 'snap-row-bot');
+  liveBot.appendChild(el('span', 'snap-act-badge play', '⚡ 自动分析 & 实时操控'));
+  liveCard.appendChild(liveBot);
+
+  liveCard.onclick = () => loadGame('live');
+  list.appendChild(liveCard);
+
   if (!GAMES.length){
-    list.appendChild(el('div','muted','暂无真机快照 — 游戏机装好 decidex-bridge mod 并进入对局后,快照会自动出现在这里。'));
+    list.appendChild(el('div', 'muted', '暂无历史快照 — 游戏推进后决策点会自动归档。'));
     return;
   }
-  GAMES.forEach(g=>{
-    const d = el('div', 'snap' + (g.name===CURRENT ? ' active' : ''));
-    d.appendChild(el('span', null, g.name));
-    d.appendChild(el('span','src', g.source || ''));
-    d.onclick = () => loadGame(g.name);
-    list.appendChild(d);
+
+  // 2. 历史快照卡片
+  GAMES.forEach(g => {
+    const card = el('div', 'snap-card' + (g.name === CURRENT ? ' active' : ''));
+
+    // Top Row: Ante & Round badge + Blind tag
+    const topRow = el('div', 'snap-row-top');
+    const anteText = (g.ante != null && g.round != null) ? `A${g.ante} · R${g.round}` : 'A1·R1';
+    topRow.appendChild(el('span', 'snap-ante-badge', anteText));
+    const bType = g.blind_type || 'small';
+    topRow.appendChild(el('span', `snap-blind-tag ${bType}`, g.blind_name || 'Small Blind'));
+    card.appendChild(topRow);
+
+    // Mid Row: Chips & Hands/Discards
+    const midRow = el('div', 'snap-row-mid');
+    const scored = g.scored_chips != null ? g.scored_chips : 0;
+    const target = g.target_chips != null ? g.target_chips : 300;
+    midRow.appendChild(el('span', null, `筹码: ${scored} / ${target}`));
+    const counts = el('span', 'snap-counts');
+    counts.appendChild(el('span', null, `🎴 ${g.hands_left != null ? g.hands_left : '—'}`));
+    counts.appendChild(el('span', null, `🗑️ ${g.discards_left != null ? g.discards_left : '—'}`));
+    midRow.appendChild(counts);
+    card.appendChild(midRow);
+
+    // Bot Row: Player Action description + File name
+    const botRow = el('div', 'snap-row-bot');
+    const actBadge = el('span', `snap-act-badge ${g.actual_type || 'none'}`,
+      g.actual_desc ? `👤 ${g.actual_desc}` : (g.actual_type ? `👤 ${g.actual_type}` : '等待决策'));
+    botRow.appendChild(actBadge);
+    botRow.appendChild(el('span', 'snap-filename', g.name));
+    card.appendChild(botRow);
+
+    card.onclick = () => loadGame(g.name);
+    list.appendChild(card);
   });
 }
 
 async function loadGame(name){
-  CURRENT = name; LAST = null;
-  const s = await jget('/api/game?name='+encodeURIComponent(name));
-  render(s);
+  if (CURRENT === 'live' && name !== 'live' && _autoPlayActive) {
+    _autoPlayActive = false;
+    if (_autoPlayTimer) clearTimeout(_autoPlayTimer);
+  }
+  CURRENT = name || 'live';
+  const sel = $('gameSel');
+  if (sel) sel.value = CURRENT;
+  updateRunAllBtn();
   renderSnapList();
-  const rb = $('recBody');
-  while (rb.firstChild) rb.removeChild(rb.firstChild);
-  rb.appendChild(el('div','muted','点「推荐」。'));
-  const lg = $('legal'); while (lg.firstChild) lg.removeChild(lg.firstChild);
+  await syncGameState(true);
+  await recommend();
+}
+
+async function syncGameState(force = false) {
+  if (CURRENT !== 'live' && !force) return;
+  try {
+    const url = '/api/game?name=' + encodeURIComponent(CURRENT) + (force ? '&_t=' + Date.now() : '');
+    const s = await jget(url);
+    const fingerprint = JSON.stringify({
+      h: s.hand,
+      b: s.blind,
+      j: s.jokers,
+      c: s.consumables,
+      hl: s.hands_left,
+      dl: s.discards_left,
+      m: s.money,
+      a: s.ante,
+      r: s.round,
+      st: s.state_name,
+      sh: s.shop,
+      ac: s.actual
+    });
+    if (force || fingerprint !== _lastStateFingerprint) {
+      const stateChanged = (fingerprint !== _lastStateFingerprint && !force);
+      _lastStateFingerprint = fingerprint;
+      render(s);
+
+      const autoAdvisor = $('autoAdvisorCheck') && $('autoAdvisorCheck').checked;
+      if (CURRENT === 'live') {
+        if (autoAdvisor && s.state_name === 'SELECTING_HAND' && s.hand && s.hand.length > 0) {
+          recommend(true);
+        } else if (s.state_name && s.state_name !== 'SELECTING_HAND') {
+          renderStageAdvisor(s);
+        } else if (stateChanged && !autoAdvisor) {
+          LAST = null;
+          updateAdvisorIdle();
+        }
+      }
+    }
+  } catch(e) {
+    // transient network error
+  }
+}
+
+function scheduleLiveSync(delay) {
+  clearTimeout(_liveSyncTimer);
+  _liveSyncTimer = setTimeout(async () => {
+    if (document.visibilityState === 'visible' && CURRENT === 'live') {
+      await syncGameState(false);
+    }
+    scheduleLiveSync(1000);
+  }, delay);
+}
+
+async function executeApiAction(action, extraArgs = {}) {
+  if (!LOGGED_IN) {
+    alert("需要登录后方可执行游戏操作");
+    location.href = '/login';
+    return;
+  }
+  $('stats').textContent = `正在执行 API: ${action}...`;
+  try {
+    const res = await jpost('/api/execute', {
+      action: action,
+      action_type: action,
+      ...extraArgs
+    });
+    if (res.ok) {
+      $('stats').textContent = `已执行: ${res.description || action} · ${new Date().toLocaleTimeString()}`;
+      triggerPostActionFrame();
+      await syncGameState(true);
+    } else {
+      $('stats').textContent = `执行失败: ${res.error || res.description}`;
+    }
+  } catch (e) {
+    $('stats').textContent = `执行出错: ${e.message}`;
+  }
 }
 
 function render(s){
@@ -313,12 +662,17 @@ function render(s){
   $('orbScore').appendChild(document.createTextNode(
     LAST && LAST.expected_score != null ? Math.round(LAST.expected_score) : '—'));
 
-  // 手牌
+  // 手牌与选中收集
+  const selIndices = [];
+  const isLive = CURRENT === 'live';
   const hand = $('hand'); while (hand.firstChild) hand.removeChild(hand.firstChild);
   s.hand.forEach((c,i)=>{
-    const d = el('div', 'card ' + (SUIT_RED(c.suit)?'red':'blk')
+    const isSel = !!c.highlighted;
+    if (isSel) selIndices.push(i);
+    const d = el('div', 'card ' + (isLive ? 'interactive ' : '') + (SUIT_RED(c.suit)?'red':'blk')
       + (c.enhancement? ' e-'+c.enhancement : '')
       + (c.edition? ' d-'+c.edition : '')
+      + (isSel ? ' sel' : '')
       + (recIdx.has(i)? ' rec':'') + (actIdx.has(i)? ' act':''));
     d.appendChild(el('div','rk', c.rank));
     d.appendChild(el('div','st', suitSym(c.suit)));
@@ -326,9 +680,117 @@ function render(s){
     if (c.enhancement) d.appendChild(el('div','tag', ENH_CN[c.enhancement]||c.enhancement));
     if (c.edition && !c.enhancement) d.appendChild(el('div','tag', ED_CN[c.edition]||c.edition));
     if (c.seal) d.appendChild(el('div','seal '+c.seal));
-    d.title = `${c.rank}${suitSym(c.suit)}${c.enhancement? ' · '+c.enhancement:''}${c.edition? ' · '+c.edition:''}${c.seal? ' · '+c.seal+' seal':''}`;
+    d.title = `点击切换选中: ${c.rank}${suitSym(c.suit)}${c.enhancement? ' · '+c.enhancement:''}`;
+
+    // 点击直接切换卡牌高亮状态
+    d.onclick = async () => {
+      if (CURRENT !== 'live') return;
+      if (!LOGGED_IN) {
+        alert("需要登录后方可操作游戏卡牌");
+        location.href = '/login';
+        return;
+      }
+      d.classList.toggle('sel');
+      try {
+        await jpost('/api/execute', { action: 'toggle_card', index: i });
+        triggerPostActionFrame();
+        await syncGameState(true);
+      } catch (err) {
+        console.error('toggle_card error', err);
+        await syncGameState(true);
+      }
+    };
     hand.appendChild(d);
   });
+
+  // 手牌操作控制条
+  const btnPlay = $('btnPlay');
+  const btnDiscard = $('btnDiscard');
+  const btnSortRank = $('btnSortRank');
+  const btnSortSuit = $('btnSortSuit');
+  const btnUnsel = $('btnUnsel');
+  if (btnPlay) {
+    btnPlay.textContent = selIndices.length ? `🃏 出牌 (Play · ${selIndices.length}张)` : '🃏 出牌 (Play)';
+    btnPlay.onclick = () => executeApiAction('play', selIndices.length ? { indices: selIndices } : {});
+  }
+  if (btnDiscard) {
+    btnDiscard.textContent = selIndices.length ? `🗑️ 弃牌 (Discard · ${selIndices.length}张)` : '🗑️ 弃牌 (Discard)';
+    btnDiscard.onclick = () => executeApiAction('discard', selIndices.length ? { indices: selIndices } : {});
+  }
+  if (btnSortRank) btnSortRank.onclick = () => executeApiAction('sort_rank');
+  if (btnSortSuit) btnSortSuit.onclick = () => executeApiAction('sort_suit');
+  if (btnUnsel) btnUnsel.onclick = () => executeApiAction('unhighlight_all');
+
+  // 动态阶段操作条 (盲注/结算/商店/菜单)
+  const sb = $('stageBar');
+  while (sb.firstChild) sb.removeChild(sb.firstChild);
+  const stName = s.state_name || 'unknown';
+  if (stName === 'BLIND_SELECT') {
+    sb.style.display = 'flex';
+    const info = el('div');
+    info.appendChild(el('div', 'stage-title', '🎯 阶段: 盲注选择 (Blind Select)'));
+    info.appendChild(el('div', 'stage-desc', `下一盲注: ${s.blind.name || 'Small Blind'} (目标 ${s.blind.chips} 筹码)`));
+    sb.appendChild(info);
+    const b = el('button', 'act-btn stage-btn', '🎯 选择该盲注 (Select Blind)');
+    b.onclick = () => executeApiAction('select_blind');
+    sb.appendChild(b);
+  } else if (stName === 'ROUND_EVAL') {
+    sb.style.display = 'flex';
+    const info = el('div');
+    info.appendChild(el('div', 'stage-title', '💰 阶段: 本轮结算 (Round Eval)'));
+    info.appendChild(el('div', 'stage-desc', '本盲注已顺利过关，获得结算收益'));
+    sb.appendChild(info);
+    const b = el('button', 'act-btn stage-btn', '💰 结算收益进入商店 (Cash Out)');
+    b.onclick = () => executeApiAction('cash_out');
+    sb.appendChild(b);
+  } else if (stName === 'SHOP') {
+    sb.style.display = 'flex';
+    const info = el('div');
+    info.appendChild(el('div', 'stage-title', '🛒 阶段: 商店 (Shop)'));
+    info.appendChild(el('div', 'stage-desc', `当前金钱: $${s.money} · 重掷费用: $${(s.shop && s.shop.reroll_cost) || 5}`));
+    sb.appendChild(info);
+    const acts = el('div', null);
+    acts.style.display = 'flex'; acts.style.gap = '8px';
+    const btnReroll = el('button', 'act-btn shop-btn', `🎲 重掷商店 ($${(s.shop && s.shop.reroll_cost) || 5})`);
+    btnReroll.onclick = () => executeApiAction('reroll_shop');
+    const btnExit = el('button', 'act-btn stage-btn', '➡️ 离开商店 (Next Round)');
+    btnExit.onclick = () => executeApiAction('toggle_shop');
+    acts.appendChild(btnReroll); acts.appendChild(btnExit);
+    sb.appendChild(acts);
+  } else if (stName === 'MENU') {
+    sb.style.display = 'flex';
+    const info = el('div');
+    info.appendChild(el('div', 'stage-title', '🎮 阶段: 游戏主菜单'));
+    info.appendChild(el('div', 'stage-desc', '点击直接开始新一轮小丑牌对局'));
+    sb.appendChild(info);
+    const b = el('button', 'act-btn stage-btn', '🎮 开始新对局 (Start Run)');
+    b.onclick = () => executeApiAction('start_run');
+    sb.appendChild(b);
+  } else {
+    sb.style.display = 'none';
+  }
+
+  // 商店卡牌区
+  const shopSec = $('shopSection');
+  if (stName === 'SHOP' && s.shop && s.shop.cards && s.shop.cards.length) {
+    shopSec.style.display = 'block';
+    const shopList = $('shopCards');
+    while (shopList.firstChild) shopList.removeChild(shopList.firstChild);
+    $('btnShopReroll').textContent = `🎲 重掷 ($${s.shop.reroll_cost || 5})`;
+    $('btnShopReroll').onclick = () => executeApiAction('reroll_shop');
+    $('btnShopExit').onclick = () => executeApiAction('toggle_shop');
+    s.shop.cards.forEach((card, idx) => {
+      const cd = el('div', 'shop-card');
+      cd.appendChild(el('div', 'sc-name', card.name || 'Joker'));
+      cd.appendChild(el('div', 'sc-cost', `$${card.cost || 0}`));
+      const buyBtn = el('button', 'shop-buy-btn', `购买 $${card.cost || 0}`);
+      buyBtn.onclick = () => executeApiAction('buy_card', { index: idx, area: 'shop_jokers' });
+      cd.appendChild(buyBtn);
+      shopList.appendChild(cd);
+    });
+  } else {
+    shopSec.style.display = 'none';
+  }
 
   // 打牌区:推荐要打的牌
   const pz = $('playzone'); while (pz.firstChild) pz.removeChild(pz.firstChild);
@@ -354,7 +816,7 @@ function render(s){
   // 小丑卡
   const js = $('jokers'); while (js.firstChild) js.removeChild(js.firstChild);
   if (!s.jokers.length) js.appendChild(el('span','empty','(无小丑)'));
-  s.jokers.forEach(j=>{
+  s.jokers.forEach((j, i)=>{
     const d = el('div','jcard');
     d.appendChild(el('div','jn', j.name));
     const st = el('div','jst');
@@ -364,53 +826,357 @@ function render(s){
     d.appendChild(st);
     d.appendChild(el('div','jd', j.counter != null ? `累计: ${j.counter}` : ''));
     d.title = j.name;
+    if (CURRENT === 'live') {
+      const actRow = el('div', 'jcard-act-bar');
+      const sellBtn = el('button', 'jcard-btn sell-btn', '出售');
+      sellBtn.title = '出售此小丑卡';
+      sellBtn.onclick = (e) => { e.stopPropagation(); executeApiAction('sell_card', { index: i, area: 'jokers' }); };
+      actRow.appendChild(sellBtn);
+      d.appendChild(actRow);
+    }
     js.appendChild(d);
   });
 
   // 消耗品
   const cs = $('consumables'); while (cs.firstChild) cs.removeChild(cs.firstChild);
   if (!s.consumables.length) cs.appendChild(el('span','empty','(无消耗品)'));
-  s.consumables.forEach(c=>{
+  s.consumables.forEach((c, i)=>{
     const d = el('div','jcard ccard' + (c.type==='planet'?' planet':''));
     d.appendChild(el('div','jn', c.name));
     d.appendChild(el('div','jd', c.type==='planet'?'行星牌(升级牌型)':'塔罗牌'));
+    if (CURRENT === 'live') {
+      const actRow = el('div', 'jcard-act-bar');
+      const useBtn = el('button', 'jcard-btn use-btn', '使用');
+      useBtn.title = '使用该消耗牌';
+      useBtn.onclick = (e) => { e.stopPropagation(); executeApiAction('use_card', { index: i, area: 'consumables' }); };
+      const sellBtn = el('button', 'jcard-btn sell-btn', '出售');
+      sellBtn.title = '出售该消耗牌';
+      sellBtn.onclick = (e) => { e.stopPropagation(); executeApiAction('sell_card', { index: i, area: 'consumables' }); };
+      actRow.appendChild(useBtn);
+      actRow.appendChild(sellBtn);
+      d.appendChild(actRow);
+    }
     cs.appendChild(d);
   });
 }
 
-async function recommend(){
-  if(!CURRENT) return;
-  const rb = $('recBody'); while (rb.firstChild) rb.removeChild(rb.firstChild);
-  rb.appendChild(el('div','muted','计算中…'));
-  try{
-    const r = await jpost('/api/recommend',{name:CURRENT, kind:$('provSel').value});
-    LAST = r;
-    render(await jget('/api/game?name='+encodeURIComponent(CURRENT)));
-    while (rb.firstChild) rb.removeChild(rb.firstChild);
-    const big = el('div','big', r.description);
-    const meta = el('div');
-    meta.appendChild(el('span', 'badge '+(r.is_fallback?'fb':'ok'), r.is_fallback?'回落':'模型'));
-    meta.appendChild(el('span','muted', `置信度 ${(r.confidence*100).toFixed(0)}% · ${r.candidate_id}`));
-    rb.appendChild(big); rb.appendChild(meta);
-    if (r.expected_score != null){
-      rb.appendChild(el('div','muted',
-        `模拟得分 ${Math.round(r.expected_score)} · ${r.clears_blind?'足够过关':'未达目标'}`));
+function updateAdvisorIdle() {
+  const rb = $('recBody');
+  if (!rb) return;
+  while (rb.firstChild) rb.removeChild(rb.firstChild);
+  rb.appendChild(el('div', 'muted', '手牌发生变动。点「推荐」或勾选「实时顾问跟随」自动分析。'));
+  DecidexViz.clear($('vizBody'));
+  const lg = $('legal'); if (lg) while (lg.firstChild) lg.removeChild(lg.firstChild);
+  const statusEl = $('advisorStatus');
+  if (statusEl) {
+    statusEl.textContent = '待触发';
+    statusEl.className = 'advisor-status idle';
+  }
+}
+
+function renderStageAdvisor(s) {
+  const rb = $('recBody');
+  if (!rb) return;
+  while (rb.firstChild) rb.removeChild(rb.firstChild);
+  DecidexViz.clear($('vizBody'));
+  const lg = $('legal'); if (lg) while (lg.firstChild) lg.removeChild(lg.firstChild);
+  const statusEl = $('advisorStatus');
+  if (statusEl) {
+    statusEl.textContent = '阶段等待';
+    statusEl.className = 'advisor-status idle';
+  }
+
+  const stName = s.state_name || 'unknown';
+  let title = '非手牌出牌阶段';
+  let desc = '等待进入手牌出牌阶段以生成出牌与弃牌分析。';
+  let btnText = '';
+  let btnAction = '';
+
+  if (stName === 'BLIND_SELECT') {
+    title = '🎯 阶段: 盲注选择 (Blind Select)';
+    desc = `下一盲注: ${s.blind.name || 'Small Blind'} (目标 ${s.blind.chips} 筹码)，点击直接开战。`;
+    btnText = '🎯 选择该盲注';
+    btnAction = 'select_blind';
+  } else if (stName === 'ROUND_EVAL') {
+    title = '💰 阶段: 本轮结算 (Round Eval)';
+    desc = '当前盲注已达成目标过关，点击结算进入商店领钱！';
+    btnText = '💰 结算收益进入商店';
+    btnAction = 'cash_out';
+  } else if (stName === 'SHOP') {
+    title = '🛒 阶段: 商店 (Shop)';
+    desc = `当前金钱: $${s.money} · 可在左侧购买小丑卡/消耗牌，选好后前往下一轮。`;
+    btnText = '➡️ 离开商店 (Next Round)';
+    btnAction = 'toggle_shop';
+  } else if (stName === 'MENU') {
+    title = '🎮 阶段: 游戏主菜单';
+    desc = '游戏当前处于主菜单，点击开始全新一局 Balatro。';
+    btnText = '🎮 开始新对局';
+    btnAction = 'start_run';
+  }
+
+  const card = el('div', 'rec-hero-action');
+  card.appendChild(el('div', 'rec-hero-title', title));
+  rb.appendChild(card);
+  rb.appendChild(el('div', 'muted', desc));
+
+  if (CURRENT === 'live' && btnText && btnAction) {
+    const doBtn = el('button', 'rec-exec-btn', btnText);
+    doBtn.onclick = () => executeApiAction(btnAction);
+    rb.appendChild(doBtn);
+  }
+}
+
+function renderAdvisorDashboard(r, gameState) {
+  const rb = $('recBody');
+  if (!rb) return;
+  while (rb.firstChild) rb.removeChild(rb.firstChild);
+
+  // 1. 顶部行动横幅
+  const actRow = el('div', 'rec-hero-action');
+  const titleWrap = el('div', 'rec-hero-title');
+  const icon = r.action_type === 'play' ? '🃏' : (r.action_type === 'discard' ? '🗑️' : '⚡');
+  titleWrap.appendChild(el('span', null, `${icon} ${r.description}`));
+  actRow.appendChild(titleWrap);
+
+  const remChips = (gameState.blind && gameState.blind.chips)
+    ? Math.max(0, gameState.blind.chips - (gameState.blind.scored || 0))
+    : 300;
+
+  if (r.action_type === 'play') {
+    if (r.clears_blind) {
+      actRow.appendChild(el('span', 'rec-badge-clear win', '🎉 保证过关'));
+    } else if (r.expected_score != null) {
+      const gap = Math.max(0, Math.round(remChips - r.expected_score));
+      actRow.appendChild(el('span', 'rec-badge-clear gap', `距过关差 ${gap}`));
     }
-    if (r.fallback_reason) rb.appendChild(el('div','muted', '回落原因: '+r.fallback_reason));
-    // 概率分布 / 置信三档 / token 预算 / 发前体检:全部来自服务端的展示模型
-    // (src/decidex/viz.py),前端只画不算,阈值不在两端各写一份。
-    DecidexViz.render($('vizBody'), r.viz);
-    const lg = $('legal'); while (lg.firstChild) lg.removeChild(lg.firstChild);
-    r.legal_actions.forEach(a=>{
-      const row = el('div', a.id===r.candidate_id?'best':null, `[${a.action_type}] ${a.description}`);
+  }
+  rb.appendChild(actRow);
+
+  // 2. 状态标签 (置信度、决策模型/兜底、动作ID)
+  const metaRow = el('div', null);
+  metaRow.style.display = 'flex';
+  metaRow.style.alignItems = 'center';
+  metaRow.style.gap = '6px';
+  metaRow.style.flexWrap = 'wrap';
+
+  metaRow.appendChild(el('span', 'badge ' + (r.is_fallback ? 'fb' : 'ok'), r.is_fallback ? '规则兜底' : 'AI 模型'));
+  const confPct = Math.round((r.confidence || 0) * 100);
+  metaRow.appendChild(el('span', 'badge ' + (confPct >= 70 ? 'ok' : 'fb'), `置信度 ${confPct}%`));
+  if (r.candidate_id) {
+    const idSpan = el('span', 'snap-filename', r.candidate_id);
+    idSpan.style.marginLeft = 'auto';
+    metaRow.appendChild(idSpan);
+  }
+  rb.appendChild(metaRow);
+
+  // 3. 推荐选牌迷你卡片预览
+  if ((r.action_type === 'play' || r.action_type === 'discard') && r.indices && r.indices.length) {
+    const previewWrap = el('div');
+    previewWrap.style.margin = '8px 0 4px';
+    const previewLabel = el('div', 'zone-label', r.action_type === 'play' ? '推荐打出选牌' : '推荐弃掉选牌');
+    previewLabel.style.textAlign = 'left';
+    previewWrap.appendChild(previewLabel);
+
+    const cardRow = el('div', 'mini-card-row');
+    r.indices.forEach(idx => {
+      const c = gameState.hand && gameState.hand[idx];
+      if (!c) return;
+      const isRed = SUIT_RED(c.suit);
+      const mc = el('div', 'mini-card ' + (isRed ? 'red' : 'blk')
+        + (c.enhancement ? ' e-' + c.enhancement : '')
+        + (c.edition ? ' d-' + c.edition : ''));
+      mc.appendChild(el('div', 'mc-rk', c.rank));
+      mc.appendChild(el('div', 'mc-st', suitSym(c.suit)));
+      mc.appendChild(el('div', 'mc-sym', suitSym(c.suit)));
+      if (c.enhancement) mc.appendChild(el('div', 'mc-tag', ENH_CN[c.enhancement] || c.enhancement));
+      mc.title = `${c.rank}${suitSym(c.suit)} (#${idx + 1})`;
+      cardRow.appendChild(mc);
+    });
+    previewWrap.appendChild(cardRow);
+    rb.appendChild(previewWrap);
+  }
+
+  // 4. 预期计分算式展示 (出牌动作)
+  if (r.action_type === 'play' && (r.chips != null || r.mult != null || r.expected_score != null)) {
+    const calcBox = el('div', 'rec-calc-bar');
+    const formula = el('div', 'rec-calc-formula');
+    formula.appendChild(el('span', 'c-chips', `${r.chips != null ? r.chips : '—'}`));
+    formula.appendChild(document.createTextNode(' × '));
+    formula.appendChild(el('span', 'c-mult', `${r.mult != null ? r.mult : '—'}`));
+    formula.appendChild(document.createTextNode(' = '));
+    const scoreVal = r.expected_score != null ? Math.round(r.expected_score) : '—';
+    formula.appendChild(el('span', 'c-total', `${scoreVal} 分`));
+    calcBox.appendChild(formula);
+
+    if (remChips > 0 && r.expected_score != null) {
+      const rate = Math.round((r.expected_score / remChips) * 100);
+      calcBox.appendChild(el('span', 'rec-calc-rate', `达成需求 ${rate}%`));
+    }
+    rb.appendChild(calcBox);
+  }
+
+  // 5. 回落原因提示 (如有)
+  if (r.fallback_reason) {
+    rb.appendChild(el('div', 'muted', '回落提示: ' + r.fallback_reason));
+  }
+
+  // 6. 实时模式一键执行大按钮
+  if (CURRENT === 'live') {
+    const doBtn = el('button', 'rec-exec-btn', `⚡ 立即执行本次${r.action_type === 'play' ? '出牌' : '弃牌'}`);
+    doBtn.onclick = async () => {
+      await executeApiAction(r.action_type, { indices: r.indices, description: r.description });
+    };
+    rb.appendChild(doBtn);
+  }
+
+  // 7. 渲染概率分布与置信度组件 (DecidexViz)
+  DecidexViz.render($('vizBody'), r.viz);
+
+  // 8. 候选动作包络 TOP-10
+  const lg = $('legal');
+  if (lg) {
+    while (lg.firstChild) lg.removeChild(lg.firstChild);
+    if ($('envelopeCount')) $('envelopeCount').textContent = `共 ${r.legal_actions ? r.legal_actions.length : 0} 项`;
+    (r.legal_actions || []).forEach(a => {
+      const row = el('div', a.id === r.candidate_id ? 'best' : null, `[${a.action_type}] ${a.description}`);
       lg.appendChild(row);
     });
-  }catch(e){ const rb2=$('recBody'); while(rb2.firstChild) rb2.removeChild(rb2.firstChild);
-    rb2.appendChild(el('div','muted','失败: '+e.message));
-    DecidexViz.clear($('vizBody')); }
+  }
+}
+
+let _isRecommending = false;
+let _hasPendingRecommend = false;
+
+async function recommend(isSilent = false){
+  if (!CURRENT) return;
+  if (_isRecommending) {
+    _hasPendingRecommend = true;
+    return;
+  }
+  _isRecommending = true;
+  _hasPendingRecommend = false;
+
+  const statusEl = $('advisorStatus');
+  if (statusEl) {
+    statusEl.textContent = '分析中…';
+    statusEl.className = 'advisor-status busy';
+  }
+
+  const rb = $('recBody');
+  if (!isSilent && rb) {
+    while (rb.firstChild) rb.removeChild(rb.firstChild);
+    rb.appendChild(el('div', 'muted', 'AI 顾问正在评估所有合法出牌与弃牌方案…'));
+  }
+
+  try {
+    const r = await jpost('/api/recommend', { name: CURRENT, kind: $('provSel').value });
+    LAST = r;
+    const gameState = await jget('/api/game?name=' + encodeURIComponent(CURRENT));
+    render(gameState);
+    renderAdvisorDashboard(r, gameState);
+    if (statusEl) {
+      statusEl.textContent = '已就绪';
+      statusEl.className = 'advisor-status done';
+    }
+  } catch(e) {
+    if (statusEl) {
+      statusEl.textContent = '分析失败';
+      statusEl.className = 'advisor-status idle';
+    }
+    if (rb) {
+      while (rb.firstChild) rb.removeChild(rb.firstChild);
+      rb.appendChild(el('div', 'muted', '分析出错: ' + e.message));
+    }
+    DecidexViz.clear($('vizBody'));
+  } finally {
+    _isRecommending = false;
+    if (_hasPendingRecommend) {
+      _hasPendingRecommend = false;
+      setTimeout(() => recommend(true), 10);
+    }
+  }
+}
+
+let _autoPlayActive = false;
+let _autoPlayTimer = null;
+
+function updateRunAllBtn() {
+  const btn = $('runAll');
+  if (!btn) return;
+  if (CURRENT === 'live') {
+    if (_autoPlayActive) {
+      btn.textContent = '⏹ 停止代打';
+      btn.style.background = '#e74c3c';
+      btn.style.borderColor = '#c0392b';
+      btn.title = '点击停止自动代打';
+    } else {
+      btn.textContent = '🤖 自动跑整局';
+      btn.style.background = '#8e44ad';
+      btn.style.borderColor = '#7d3c98';
+      btn.title = 'AI 实时托管，自动出牌、弃牌、选盲注与结算';
+    }
+  } else {
+    btn.textContent = '📊 跑整局(对比)';
+    btn.style.background = '';
+    btn.style.borderColor = '';
+    btn.title = '离线快照复盘对比';
+  }
+}
+
+async function autoPlayLoop() {
+  if (!_autoPlayActive || CURRENT !== 'live') return;
+  if (!LOGGED_IN) {
+    alert("需要登录后方可自动代打");
+    _autoPlayActive = false;
+    updateRunAllBtn();
+    return;
+  }
+
+  $('stats').textContent = `🤖 自动代打中 · 正在分析局势...`;
+  try {
+    const res = await jpost('/api/execute', {
+      action_type: 'auto',
+      kind: $('provSel').value,
+    });
+    if (res.ok) {
+      if (res.executed) {
+        $('stats').textContent = `🤖 已代打: ${res.description} · ${new Date().toLocaleTimeString()}`;
+        triggerPostActionFrame();
+        await syncGameState(true);
+        if (res.recommendation) {
+          LAST = res.recommendation;
+          const url = '/api/game?name=' + encodeURIComponent(CURRENT);
+          render(await jget(url));
+        }
+      } else if (res.waiting) {
+        $('stats').textContent = `🤖 ${res.description}...`;
+      }
+    } else {
+      $('stats').textContent = `🤖 自动代打提示: ${res.error || '等待中'}`;
+    }
+  } catch (e) {
+    $('stats').textContent = `🤖 代打通信重试: ${e.message}`;
+  }
+
+  if (_autoPlayActive && CURRENT === 'live') {
+    _autoPlayTimer = setTimeout(autoPlayLoop, 2500);
+  }
 }
 
 async function runAll(){
+  if (CURRENT === 'live') {
+    _autoPlayActive = !_autoPlayActive;
+    updateRunAllBtn();
+    if (_autoPlayActive) {
+      $('stats').textContent = `🤖 自动跑整局已开启...`;
+      autoPlayLoop();
+    } else {
+      if (_autoPlayTimer) clearTimeout(_autoPlayTimer);
+      $('stats').textContent = `🤖 自动代打已停止 · ${new Date().toLocaleTimeString()}`;
+    }
+    return;
+  }
+
   const rb = $('recBody'); while (rb.firstChild) rb.removeChild(rb.firstChild);
   DecidexViz.clear($('vizBody'));
   rb.appendChild(el('div','muted','整局计算中…'));
@@ -421,10 +1187,16 @@ async function runAll(){
     while (tb.firstChild) tb.removeChild(tb.firstChild);
     r.reports.forEach(x=>{
       const tr = document.createElement('tr');
-      tr.appendChild(el('td',null,x.name));
-      tr.appendChild(el('td',null,x.advisor));
+      const label = (x.ante != null && x.round != null) ? `[A${x.ante}-R${x.round}] ${x.blind || ''} (${x.name})` : x.name;
+      const tdName = el('td', null, label);
+      tdName.style.cursor = 'pointer';
+      tdName.title = `点击加载 ${x.name}`;
+      tr.appendChild(tdName);
+      tr.appendChild(el('td', null, x.advisor_desc || x.advisor));
       const hcls = x.human ? (x.advisor===x.human?'match':'diff') : 'muted';
-      tr.appendChild(el('td',hcls, x.human || '(未记录)'));
+      tr.appendChild(el('td', hcls, x.human || '(未记录)'));
+      tr.style.cursor = 'pointer';
+      tr.onclick = () => loadGame(x.name);
       tb.appendChild(tr);
     });
     rb.appendChild(el('div','big', `整局完成:${r.reports.length} 个决策点`));
@@ -443,54 +1215,115 @@ async function runAll(){
    会把我们发的 max-age=1 改写成 4h,<img src> 会直接吃浏览器缓存、画面冻结;
    所以这里用 fetch(cache:'no-store') 强制每次走网络(边缘命中不额外占出网),
    再用 blob URL 喂给 <img>,既保活又不破坏边缘合并。*/
-const FRAME_POLL_MS = 1000;   // 不快于服务端产帧节奏(0.5s),避免空转拉帧
+/* 实况帧与输入:自适应节拍轮询 + 点击瞬间响应反馈 */
 let _frameBlobURL = null;
-async function loadFrame() {
+let _frameInFlight = false;
+let _frameTimer = null;
+let _fpsCount = 0;
+let _fpsTimer = performance.now();
+
+async function loadFrame(forceFresh = false) {
+  if (_frameInFlight && !forceFresh) return false;
+  _frameInFlight = true;
   const img = $('liveFeed');
-  if (!img) return false;
-  const r = await fetch('/api/frame.jpg', { cache: 'no-store' });
-  if (!r.ok) return false;
-  const url = URL.createObjectURL(await r.blob());
-  const ok = await new Promise((res) => {
-    img.onload = () => res(true);
-    img.onerror = () => res(false);
-    img.src = url;
-  });
-  if (ok) {
-    if (_frameBlobURL) URL.revokeObjectURL(_frameBlobURL);
-    _frameBlobURL = url;
-  } else {
-    URL.revokeObjectURL(url);
+  if (!img) { _frameInFlight = false; return false; }
+  const t0 = performance.now();
+  // forceFresh 带时间戳防止命中 CDN 旧缓存，用于点击交互后即刻刷出最新画面
+  const url = forceFresh ? `/api/frame.jpg?_t=${Date.now()}` : '/api/frame.jpg';
+  try {
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) return false;
+    const blob = await r.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    // 使用离屏 Image 预加载解码，断流或解码失败时不触碰页面已有画面，实现无缝防闪并保持最后一帧静止
+    const testImg = new Image();
+    const ok = await new Promise((res) => {
+      testImg.onload = () => res(true);
+      testImg.onerror = () => res(false);
+      testImg.src = blobUrl;
+    });
+    if (ok) {
+      img.src = blobUrl;
+      if (_frameBlobURL) URL.revokeObjectURL(_frameBlobURL);
+      _frameBlobURL = blobUrl;
+
+      // 实时统计 FPS 与单帧 RTT
+      const now = performance.now();
+      const rtt = Math.round(now - t0);
+      _fpsCount++;
+      if (now - _fpsTimer >= 1000) {
+        const fps = (_fpsCount * 1000 / (now - _fpsTimer)).toFixed(1);
+        _fpsCount = 0;
+        _fpsTimer = now;
+        const met = $('liveMetrics');
+        if (met) {
+          met.textContent = `FPS: ${fps} | RTT: ${rtt}ms`;
+          met.style.color = '#5fd08a';
+        }
+      }
+    } else {
+      URL.revokeObjectURL(blobUrl);
+    }
+    return ok;
+  } catch(e) {
+    return false;
+  } finally {
+    _frameInFlight = false;
   }
-  return ok;
 }
-function scheduleFrame(delay) {
-  const img = $('liveFeed');
-  if (!img) return;
-  setTimeout(async () => {
-    if (document.visibilityState !== 'visible') { scheduleFrame(1000); return; }
-    let ok = false;
-    try { ok = await loadFrame(); } catch { ok = false; }
-    img.classList.toggle('down', !ok);
-    scheduleFrame(ok ? FRAME_POLL_MS : 2000);   // 成功按产帧节奏,失败退避
+
+function scheduleNextFrame(delay) {
+  clearTimeout(_frameTimer);
+  _frameTimer = setTimeout(async () => {
+    if (document.visibilityState !== 'visible') {
+      scheduleNextFrame(1000);
+      return;
+    }
+    const t0 = performance.now();
+    const ok = await loadFrame(false);
+    const loadDuration = performance.now() - t0;
+    const met = $('liveMetrics');
+    if (!ok && met) {
+      met.textContent = '重连中 (保持上一帧)...';
+      met.style.color = '#e0a23c';
+    }
+    
+    // 服务端约 0.5s (500ms) 产出一帧。
+    // 自适应填补等待时间：网络越好越流畅，断流时等待 1s 继续重试重连，画面始终静止停留
+    const nextDelay = ok ? Math.max(50, 480 - loadDuration) : 1000;
+    scheduleNextFrame(nextDelay);
   }, delay);
 }
-scheduleFrame(0);
+scheduleNextFrame(0);
+
+// 动作后极速帧更新与数据同步（给服务端 xdotool 执行 + 游戏引擎重绘约 70ms，然后强拉最新帧和实时抽象）
+function triggerPostActionFrame() {
+  clearTimeout(_frameTimer);
+  setTimeout(() => {
+    loadFrame(true).then(() => {
+      // 280ms 后再补拉一帧，保证复杂动画彻底画全
+      setTimeout(() => loadFrame(true), 280);
+      scheduleNextFrame(480);
+    });
+    // 动作后迅速拉取最新游戏抽象（牌/高亮/计分/资源）
+    setTimeout(() => syncGameState(true), 120);
+    setTimeout(() => {
+      syncGameState(true);
+      refreshGamesList();
+    }, 450);
+  }, 70);
+}
 
 /* ---- 操作游戏:点击实况画面 → 服务端 xdotool ---- */
 let PLAY_MODE = true;
 let LOGGED_IN = false;
-/* 游戏渲染分辨率 = Xvfb :66 屏幕尺寸。服务端把它注入 <meta name="game-dims">,
-   这里读回来,保证点击坐标映射与服务端 xdotool 夹取范围一致。占位符未替换时退回默认。 */
 const _GD = ($('game-dims')?.content || '').match(/^(\d+)x(\d+)$/);
 const GAME_W = _GD ? +_GD[1] : 960, GAME_H = _GD ? +_GD[2] : 600;
-// DOM KeyboardEvent.key → 服务端 xdotool 键名
 const KEY_SEND = { ' ': 'space', 'ArrowUp': 'arrowup', 'ArrowDown': 'arrowdown',
                    'ArrowLeft': 'arrowleft', 'ArrowRight': 'arrowright',
                    'Enter': 'enter', 'Escape': 'escape', 'Backspace': 'backspace',
                    'Tab': 'tab' };
 
-/* 交互输入走登录会话 cookie。401 表示会话过期或尚未登录,直接跳登录页并带回跳。 */
 async function sendInput(path, body) {
   const r = await fetch(path, { method:'POST',
     headers: {'Content-Type':'application/json', 'X-Requested-With':'decidex-web'},
@@ -503,24 +1336,71 @@ async function sendInput(path, body) {
 }
 
 function gameCoords(ev) {
-  const rect = ev.target.getBoundingClientRect();
-  return { x: Math.round((ev.clientX - rect.left) * GAME_W / rect.width),
-           y: Math.round((ev.clientY - rect.top) * GAME_H / rect.height) };
+  const img = $('liveFeed');
+  if (!img) return { x: 0, y: 0, outside: true };
+  const rect = img.getBoundingClientRect();
+  const nw = img.naturalWidth || GAME_W;
+  const nh = img.naturalHeight || GAME_H;
+  const imgRatio = nw / nh;
+  const boxRatio = rect.width / rect.height;
+  let renderW, renderH, offsetX, offsetY;
+  if (boxRatio > imgRatio) {
+    // 宽比高大：左右黑边 (pillarbox)
+    renderH = rect.height;
+    renderW = renderH * imgRatio;
+    offsetX = (rect.width - renderW) / 2;
+    offsetY = 0;
+  } else {
+    // 高比宽大：上下黑边 (letterbox)
+    renderW = rect.width;
+    renderH = renderW / imgRatio;
+    offsetX = 0;
+    offsetY = (rect.height - renderH) / 2;
+  }
+  const relX = ev.clientX - rect.left - offsetX;
+  const relY = ev.clientY - rect.top - offsetY;
+  const outside = relX < -1 || relX > renderW + 1 || relY < -1 || relY > renderH + 1;
+  const clampedX = Math.max(0, Math.min(renderW, relX));
+  const clampedY = Math.max(0, Math.min(renderH, relY));
+  return {
+    x: Math.round(clampedX * (GAME_W - 1) / renderW),
+    y: Math.round(clampedY * (GAME_H - 1) / renderH),
+    outside
+  };
 }
 
-let clickTimer = null;   // 单击要等双击判定窗口,避免一次点击注入两次
+function showRipple(ev) {
+  const wrap = $('feedWrap');
+  if (!wrap) return;
+  const rect = wrap.getBoundingClientRect();
+  const rp = document.createElement('div');
+  rp.className = 'ripple';
+  rp.style.left = (ev.clientX - rect.left) + 'px';
+  rp.style.top = (ev.clientY - rect.top) + 'px';
+  wrap.appendChild(rp);
+  setTimeout(() => rp.remove(), 350);
+}
+
 $('liveFeed').addEventListener('click', (ev) => {
   if (!PLAY_MODE) return;
-  const {x, y} = gameCoords(ev);
-  clearTimeout(clickTimer);
-  clickTimer = setTimeout(() => sendInput('/api/input/click', {x, y}), 220);
+  const coords = gameCoords(ev);
+  if (coords.outside) return;
+  showRipple(ev);
+  // 零防抖、零等待，立即发往服务端
+  sendInput('/api/input/click', {x: coords.x, y: coords.y});
+  // 动作后极速捕获新画面
+  triggerPostActionFrame();
 });
+
 $('liveFeed').addEventListener('dblclick', (ev) => {
   if (!PLAY_MODE) return;
-  clearTimeout(clickTimer);   // 取消挂起的单击,只发这一次双击
-  const {x, y} = gameCoords(ev);
-  sendInput('/api/input/click', {x, y, double:true});
+  const coords = gameCoords(ev);
+  if (coords.outside) return;
+  showRipple(ev);
+  sendInput('/api/input/click', {x: coords.x, y: coords.y, double:true});
+  triggerPostActionFrame();
 });
+
 document.addEventListener('keydown', async (ev) => {
   if (!PLAY_MODE || ev.target.tagName === 'INPUT' || ev.target.tagName === 'SELECT') return;
   const k = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
@@ -528,7 +1408,9 @@ document.addEventListener('keydown', async (ev) => {
   if (!send) return;
   ev.preventDefault();
   await sendInput('/api/input/key', {key: send});
+  triggerPostActionFrame();
 });
+
 $('playToggle').onclick = () => {
   PLAY_MODE = !PLAY_MODE;
   $('playToggle').textContent = PLAY_MODE ? '操作:开' : '操作:关';
@@ -563,7 +1445,18 @@ $('logoutBtn').onclick = async () => {
 syncAuth();
 $('gameSel').onchange = e => loadGame(e.target.value);
 $('recBtn').onclick = recommend;
+$('execBtn').onclick = async () => {
+  if (LAST && LAST.action_type && LAST.indices) {
+    await executeApiAction(LAST.action_type, { indices: LAST.indices, description: LAST.description });
+  } else {
+    await recommend();
+    if (LAST && LAST.action_type && LAST.indices) {
+      await executeApiAction(LAST.action_type, { indices: LAST.indices, description: LAST.description });
+    }
+  }
+};
 $('runAll').onclick = runAll;
+if ($('btnReplayRefresh')) $('btnReplayRefresh').onclick = runAll;
 boot();
 </script>
 </body>

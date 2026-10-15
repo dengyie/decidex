@@ -24,5 +24,7 @@ htmlcov/
 *.sqlite
 *.log
 
-# Runtime data (game bridge snapshots, replay logs, downloaded APKs ~1.3G)
+# Runtime data (game bridge snapshots, replay logs, downloaded APKs ~1.3G, test frame dumps)
 data/
+*.jpg
+*.jpeg
