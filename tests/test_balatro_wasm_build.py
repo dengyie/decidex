@@ -230,14 +230,14 @@ def test_frontend_arbitration_and_autopilot():
 
     assert "arbitrateAction" in js_content
     assert "AutoPilot" in js_content
-    assert "balatro-asset-cache-v19" in js_content
+    assert "balatro-asset-cache-v20" in js_content
     assert "executePlayAction" in js_content
     assert "executeDiscardAction" in js_content
 
     index_html = WEB_DIR / "index.html"
     html_content = index_html.read_text(encoding="utf-8")
     assert "autopilot-toggle" in html_content
-    assert "app.js?v=19" in html_content
+    assert "app.js?v=20" in html_content
 
 
 

@@ -297,9 +297,9 @@ end
   setInterval(syncSaveFileSystem, 15000);
   window.addEventListener("beforeunload", syncSaveFileSystem);
 
-  const CACHE_NAME = "balatro-asset-cache-v19";
-  const ASSET_URL = "balatro.love.zip?v=19";
-  const WASM_URL = "love.wasm.bin?v=19";
+  const CACHE_NAME = "balatro-asset-cache-v20";
+  const ASSET_URL = "balatro.love.zip?v=20";
+  const WASM_URL = "love.wasm.bin?v=20";
 
   // Cache reset and reload utility
   window.decidexClearCacheAndReload = async function () {
