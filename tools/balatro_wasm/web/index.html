@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Balatro Web · DecideX 小丑牌沉浸式顾问</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🃏</text></svg>">
+  <link rel="stylesheet" href="viz.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app-container">
+    <!-- Game Canvas Viewport -->
+    <main id="canvas-viewport">
+      <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+    </main>
+
+    <!-- Splash / Audio Gesture & Loading Overlay -->
+    <div id="splash-overlay">
+      <div class="splash-logo">BALATRO</div>
+      <div class="splash-subtitle">WebAssembly + DecideX 决策基座</div>
+      <div class="progress-container">
+        <div id="progress-bar" class="progress-bar"></div>
+      </div>
+      <div id="status-text" class="status-text">准备加载 WebAssembly 运行环境...</div>
+      <button id="btn-launch" class="btn-launch">▶️ 点击启动游戏 (开启音画)</button>
+    </div>
+
+    <!-- DecideX AI Real-Time HUD Overlay -->
+    <aside id="decidex-hud">
+      <div class="hud-header">
+        <div class="hud-title">
+          <span>🃏 DecideX 顾问</span>
+          <span class="hud-badge-online">● WASM 实时</span>
+        </div>
+        <button id="hud-toggle-btn" class="hud-toggle-btn" title="收起/展开看板">▼</button>
+      </div>
+
+      <div class="hud-content">
+        <!-- AutoPilot Toolbar -->
+        <div class="hud-autopilot-strip">
+          <div class="autopilot-left">
+            <label class="autopilot-switch">
+              <input type="checkbox" id="autopilot-toggle" onchange="window.AutoPilot && window.AutoPilot.toggle(this.checked)">
+              <span class="autopilot-slider"></span>
+            </label>
+            <span class="autopilot-title">🤖 自动托管 (Auto-Play)</span>
+          </div>
+          <span id="autopilot-status" class="vz-badge vz-warn">已暂停</span>
+        </div>
+
+        <!-- Quick Status Strip -->
+        <div class="hud-strip">
+          <div class="strip-item">
+            <span class="strip-label">Ante</span>
+            <span id="hud-ante" class="strip-value gold">1</span>
+          </div>
+          <div class="strip-item">
+            <span class="strip-label">回合</span>
+            <span id="hud-round" class="strip-value">1</span>
+          </div>
+          <div class="strip-item">
+            <span class="strip-label">资金</span>
+            <span id="hud-money" class="strip-value gold">$0</span>
+          </div>
+          <div class="strip-item">
+            <span class="strip-label">出/弃</span>
+            <span class="strip-value blue"><span id="hud-hands">4</span>/<span id="hud-discards">3</span></span>
+          </div>
+        </div>
+
+        <!-- Detailed Game Context Bar -->
+        <div class="hud-context-bar" style="display:flex; justify-content:space-between; align-items:center; background:rgba(0,0,0,0.25); padding:6px 10px; border-radius:8px; border:1px solid rgba(255,255,255,0.05); font-size:0.75rem; color:var(--text-muted);">
+          <span>牌库: <b id="hud-deck" style="color:#e2e8f0; font-family:var(--font-mono);">52</b></span>
+          <span>弃牌堆: <b id="hud-discard-pile" style="color:#e2e8f0; font-family:var(--font-mono);">0</b></span>
+          <span>小丑槽: <b id="hud-joker-slots" style="color:#c084fc; font-family:var(--font-mono);">0/5</b></span>
+        </div>
+
+        <!-- Primary Recommendation Card -->
+        <div id="primary-rec-container">
+          <div class="recommend-card">
+            <div class="rec-header">
+              <span class="rec-action-type">等待开局或出牌...</span>
+            </div>
+            <div style="color: var(--text-muted); font-size: 0.85rem; padding: 12px 0;">
+              启动游戏进入选牌阶段后，AI 将自动分析当前手牌的最优打法。
+            </div>
+          </div>
+        </div>
+
+        <!-- Candidates List -->
+        <div>
+          <div style="font-size: 0.8rem; font-weight: 700; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase;">
+            候选动作评估
+          </div>
+          <div id="candidates-container" class="candidates-list">
+            <div style="font-size: 0.8rem; color: var(--text-muted);">暂无候选动作</div>
+          </div>
+        </div>
+
+        <!-- Footer Utilities -->
+        <div class="hud-footer">
+          <div>
+            <button class="btn-util" onclick="decidexSortRank()">按点数整理</button>
+            <span>·</span>
+            <button class="btn-util" onclick="decidexSortSuit()">按花色整理</button>
+            <span>·</span>
+            <button class="btn-util" onclick="decidexReEvaluate()">重新分析</button>
+          </div>
+          <div>
+            <button class="btn-util" onclick="decidexExportSave()">导出存档</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Scripts with cache buster -->
+  <script src="love.js?v=19"></script>
+  <script src="viz.js?v=19"></script>
+  <script src="app.js?v=19"></script>
+</body>
+</html>

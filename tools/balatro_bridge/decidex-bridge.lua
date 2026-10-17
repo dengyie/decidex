@@ -217,14 +217,14 @@ local function find_next_round_button()
 end
 
 local function find_select_blind_button()
-  if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT and G.blind_select) then return nil, nil end
+  if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then return nil, nil end
   local on_deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or "Small"
   local opt = G.blind_select_opts and G.blind_select_opts[string.lower(on_deck)]
   if opt and opt.get_UIE_by_ID then
     local btn = opt:get_UIE_by_ID('select_blind_button')
     if btn then return btn, on_deck end
   end
-  if G.blind_select.get_UIE_by_ID then
+  if G.blind_select and G.blind_select.get_UIE_by_ID then
     local btn = G.blind_select:get_UIE_by_ID('select_blind_button')
     if btn then return btn, on_deck end
   end
@@ -236,6 +236,9 @@ local function find_select_blind_button()
   end
   local choice_key = G.GAME and G.GAME.round_resets and G.GAME.round_resets.blind_choices and G.GAME.round_resets.blind_choices[on_deck]
   local pb = choice_key and G.P_BLINDS and G.P_BLINDS[choice_key]
+  if not pb and G.P_BLINDS then
+    pb = (on_deck == "Big") and G.P_BLINDS.bl_big or (on_deck == "Boss") and G.P_BLINDS.bl_hook or G.P_BLINDS.bl_small
+  end
   if pb then
     return {config = {ref_table = pb}}, on_deck
   end

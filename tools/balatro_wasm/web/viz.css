@@ -1,0 +1,75 @@
+/* DecideX 可视化组件样式(共享)
+ * 与 viz.js 配套。两个 web 工具都引这一份,只靠各自 :root 变量适配主题。
+ * 用到的变量(缺省值已给,页面不定义也能看):
+ *   --good / --warn / --bad  三档语义色
+ *   --accent / --dim / --text / --line  与各站既有的调色板
+ */
+.vz-badge { display:inline-block; padding:2px 9px; border-radius:10px; font-size:11px;
+            font-weight:700; margin-right:6px; white-space:nowrap; }
+.vz-badge .vz-pct { margin-left:5px; opacity:.85; }
+.vz-good { color:var(--good,#5fd08a); }
+.vz-warn { color:var(--warn,#f2b134); }
+.vz-bad  { color:var(--bad,#e06c6c); }
+.vz-badge.vz-good { background:rgba(95,208,138,.16); }
+.vz-badge.vz-warn { background:rgba(242,177,52,.16); }
+.vz-badge.vz-bad  { background:rgba(224,108,108,.16); }
+
+.vz-card { margin-top:8px; }
+.vz-kind { font-size:10px; letter-spacing:.12em; text-transform:uppercase;
+           color:var(--dim,#93a0b4); margin:6px 0 5px; }
+.vz-note { font-size:11px; color:var(--dim,#93a0b4); margin-top:5px; line-height:1.45; }
+
+/* 概率条 */
+.vz-bars { display:flex; flex-direction:column; gap:4px; }
+.vz-bar { display:grid; grid-template-columns:88px 1fr 46px; gap:7px;
+          align-items:center; font-size:11px; }
+.vz-bar-lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+              color:var(--dim,#93a0b4); }
+.vz-bar.vz-win .vz-bar-lbl { color:var(--text,#e8ecf3); font-weight:700; }
+.vz-bar.vz-sel .vz-track { box-shadow:0 0 0 1px var(--accent,#f2b134); }
+.vz-track { position:relative; height:9px; border-radius:5px; overflow:hidden;
+            background:rgba(255,255,255,.09); }
+.vz-fill { height:100%; border-radius:5px; background:var(--dim,#93a0b4); opacity:.75;
+           transition:width .18s ease-out; }
+.vz-fill.vz-fill-win { background:var(--good,#5fd08a); opacity:1; }
+.vz-bar-pct { text-align:right; font-variant-numeric:tabular-nums;
+              color:var(--dim,#93a0b4); }
+.vz-bar.vz-win .vz-bar-pct { color:var(--text,#e8ecf3); }
+
+/* score 刻度 */
+.vz-ticks { position:relative; display:flex; justify-content:space-between;
+            align-items:center; height:20px; padding:0 2px; }
+.vz-tick { width:2px; height:9px; border-radius:1px; background:var(--line,#2a2f3c); }
+.vz-pin { position:absolute; top:-3px; width:0; height:0; transform:translateX(-50%);
+          border-left:5px solid transparent; border-right:5px solid transparent;
+          border-top:8px solid var(--accent,#f2b134); }
+
+/* noul 渐变条 */
+.vz-pyes { font-size:20px; color:var(--text,#e8ecf3); }
+.vz-pyes .vz-note { display:inline; margin:0; }
+.vz-grad { position:relative; height:10px; border-radius:5px; margin:6px 0 2px;
+           background:linear-gradient(90deg,
+             var(--bad,#e06c6c) 0%, rgba(255,255,255,.14) 42%,
+             rgba(255,255,255,.14) 58%, var(--good,#5fd08a) 100%); }
+.vz-grad .vz-pin { top:-4px; border-top-color:#fff; }
+
+/* token 仪表 */
+.vz-tokens { margin-top:10px; }
+.vz-gauge { display:grid; grid-template-columns:1fr 46px; gap:7px; align-items:center; }
+.vz-gauge .vz-fill { opacity:1; }
+.vz-gauge.vz-good .vz-fill { background:var(--good,#5fd08a); }
+.vz-gauge.vz-warn .vz-fill { background:var(--warn,#f2b134); }
+.vz-gauge.vz-bad  .vz-fill { background:var(--bad,#e06c6c); }
+
+/* lint 面板 */
+.vz-lint { margin-top:10px; }
+.vz-issue { display:grid; grid-template-columns:38px 1fr; gap:6px;
+            font-size:11px; padding:4px 0; border-top:1px dashed var(--line,#2a2f3c);
+            line-height:1.4; }
+.vz-issue .vz-lv { font-weight:800; }
+.vz-issue .vz-code { grid-column:2; color:var(--dim,#93a0b4); font-size:10px;
+                     font-family:ui-monospace,Consolas,monospace; }
+.vz-issue .vz-msg { grid-column:2; color:var(--text,#e8ecf3); }
+.vz-issue.vz-error .vz-lv { color:var(--bad,#e06c6c); }
+.vz-issue.vz-warning .vz-lv { color:var(--warn,#f2b134); }
+.vz-issue.vz-info .vz-lv { color:var(--dim,#93a0b4); }

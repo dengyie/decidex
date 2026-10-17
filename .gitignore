@@ -26,5 +26,7 @@ htmlcov/
 
 # Runtime data (game bridge snapshots, replay logs, downloaded APKs ~1.3G, test frame dumps)
 data/
+.browser_cache/
 *.jpg
 *.jpeg
+*.love

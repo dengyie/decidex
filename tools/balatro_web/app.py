@@ -41,6 +41,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import sys
 import subprocess
 import threading
@@ -68,6 +69,7 @@ from decidex.viz import build_report  # noqa: E402
 logging.getLogger().setLevel(logging.ERROR)
 
 BRIDGE_DIR = Path(os.environ.get("BALATRO_BRIDGE_DIR", ROOT / "data" / "balatro_bridge"))
+WASM_WEB_DIR = ROOT / "tools" / "balatro_wasm" / "web"
 # Shared, framework-free visualization assets used by every DecideX web viewer
 # (see tools/web_shared/viz.js). Served from this app too so a viewer needs one
 # origin, and so the two viewers cannot drift.
@@ -837,16 +839,122 @@ class Handler(BaseHTTPRequestHandler):
             return asyncio.run(coro)
         return asyncio.run_coroutine_threadsafe(coro, _LOOP).result(timeout=120)
 
-    def do_GET(self):
+    @staticmethod
+    def _guess_wasm_ctype(fname: str) -> str:
+        if fname.endswith((".wasm", ".wasm.bin")):
+            return "application/wasm"
+        if fname.endswith((".love", ".love.zip", ".bin", ".zip")):
+            return "application/octet-stream"
+        if fname.endswith(".js"):
+            return "application/javascript; charset=utf-8"
+        if fname.endswith(".css"):
+            return "text/css; charset=utf-8"
+        if fname.endswith(".html"):
+            return "text/html; charset=utf-8"
+        if fname.endswith(".json"):
+            return "application/json; charset=utf-8"
+        return "application/octet-stream"
+
+    @classmethod
+    def _resolve_wasm_file(cls, fname: str) -> tuple[Path | None, str]:
+        real_name = fname
+        if fname in ("balatro.love.zip", "balatro.bin"):
+            real_name = "balatro.love"
+        elif fname == "love.wasm.bin":
+            real_name = "love.wasm"
+
+        if not real_name or real_name.startswith("."):
+            return None, ""
+
         try:
-            # self.path still carries the query string; route on the bare path
-            # so /login?next=%2F (the 401 redirect target) is served, not 404'd.
+            target = (WASM_WEB_DIR / real_name).resolve()
+            root = WASM_WEB_DIR.resolve()
+            if not target.is_relative_to(root) or not target.is_file():
+                return None, ""
+            return target, cls._guess_wasm_ctype(fname)
+        except (ValueError, OSError):
+            return None, ""
+
+    def _send_file(self, target: Path, ctype: str, cache_seconds: int = 0, is_head: bool = False):
+        if not target.is_file():
+            return self._json({"error": f"file not found: {target.name}"}, 404)
+        stat = target.stat()
+        file_size = stat.st_size
+
+        # Check for HTTP Range header
+        range_header = self.headers.get("Range")
+        start = 0
+        end = file_size - 1
+        is_range = False
+
+        if range_header and range_header.startswith("bytes="):
+            try:
+                range_spec = range_header[6:].strip()
+                if "," not in range_spec:
+                    parts = range_spec.split("-", 1)
+                    if parts[0] and parts[1]:
+                        start = int(parts[0])
+                        end = min(int(parts[1]), file_size - 1)
+                    elif parts[0]:
+                        start = int(parts[0])
+                    elif parts[1]:
+                        start = max(file_size - int(parts[1]), 0)
+
+                    if start >= file_size or start > end:
+                        # RFC 7233 Section 4.4: 416 Range Not Satisfiable
+                        self.send_response(416)
+                        self.send_header("Content-Range", f"bytes */{file_size}")
+                        self.send_header("Content-Type", "text/plain; charset=utf-8")
+                        self.end_headers()
+                        return
+                    if 0 <= start <= end < file_size:
+                        is_range = True
+            except ValueError:
+                pass
+
+        if is_range:
+            content_length = end - start + 1
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+        else:
+            content_length = file_size
+            self.send_response(200)
+
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(content_length))
+        self.send_header("Accept-Ranges", "bytes")
+        if cache_seconds > 0:
+            self.send_header("Cache-Control", f"public, max-age={cache_seconds}")
+        else:
+            self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
+        self.end_headers()
+
+        if not is_head:
+            try:
+                with open(target, "rb") as f:
+                    if start > 0:
+                        f.seek(start)
+                    remaining = content_length
+                    bufsize = 64 * 1024
+                    while remaining > 0:
+                        chunk = f.read(min(remaining, bufsize))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                return
+
+    def do_HEAD(self):
+        try:
             path = self.path.split("?", 1)[0]
             if path in ("/", "/index.html"):
+                wasm_index = WASM_WEB_DIR / "index.html"
+                if wasm_index.is_file():
+                    return self._send_file(wasm_index, "text/html; charset=utf-8", 0, is_head=True)
                 page = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
-                # Inject the real game screen size so the page's click-coordinate
-                # mapping can never drift from the server's xdotool clamp.
-                page = page.replace("__GAME_DIMS__", f"{GAME_W}x{GAME_H}")
                 return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             if path in ("/viz.js", "/viz.css"):
                 name = Path(path).name
@@ -855,7 +963,59 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "shared asset missing: " + name}, 404)
                 ctype = ("application/javascript; charset=utf-8" if name.endswith(".js")
                          else "text/css; charset=utf-8")
+                return self._send(200, b"", ctype)
+
+            fname = path.lstrip("/")
+            wasm_target, ctype = self._resolve_wasm_file(fname)
+            if wasm_target:
+                cache_sec = 604800 if fname.endswith((".wasm", ".wasm.bin", ".love", ".love.zip", ".bin", ".zip")) else 86400
+                return self._send_file(wasm_target, ctype, cache_seconds=cache_sec, is_head=True)
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception:
+            try:
+                self.send_response(500)
+                self.end_headers()
+            except Exception:
+                pass
+
+    def do_GET(self):
+        try:
+            # self.path still carries the query string; route on the bare path
+            # so /login?next=%2F (the 401 redirect target) is served, not 404'd.
+            path = self.path.split("?", 1)[0]
+            if path in ("/", "/index.html"):
+                wasm_index = WASM_WEB_DIR / "index.html"
+                if wasm_index.is_file():
+                    return self._send_file(wasm_index, "text/html; charset=utf-8", cache_seconds=0)
+                page = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+                # Inject the real game screen size so the page's click-coordinate
+                # mapping can never drift from the server's xdotool clamp.
+                page = page.replace("__GAME_DIMS__", f"{GAME_W}x{GAME_H}")
+                return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+            if path in ("/stream", "/stream/", "/stream/index.html"):
+                page = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+                page = page.replace("__GAME_DIMS__", f"{GAME_W}x{GAME_H}")
+                return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+
+            if path in ("/viz.js", "/viz.css"):
+                name = Path(path).name
+                target = SHARED_DIR / name
+                if not target.is_file():
+                    return self._json({"error": "shared asset missing: " + name}, 404)
+                ctype = ("application/javascript; charset=utf-8" if name.endswith(".js")
+                         else "text/css; charset=utf-8")
                 return self._send(200, target.read_bytes(), ctype)
+
+            # Serve WASM static bundle assets if requested
+            fname = path.lstrip("/")
+            wasm_target, ctype = self._resolve_wasm_file(fname)
+            if wasm_target:
+                cache_sec = 604800 if fname.endswith((".wasm", ".wasm.bin", ".love", ".love.zip", ".bin", ".zip")) else 86400
+                return self._send_file(wasm_target, ctype, cache_seconds=cache_sec)
             if path in ("/login", "/login.html"):
                 balatro_tok, sso_tok = _cookie_tokens(self.headers.get("Cookie"))
                 if _valid_session(balatro_tok, sso_tok):
@@ -907,6 +1067,7 @@ class Handler(BaseHTTPRequestHandler):
                     limit_val = 60
                 return self._json({
                     "ok": True, "engine": "balatro-advisor",
+                    "wasm_available": (WASM_WEB_DIR / "balatro.love").is_file(),
                     "bridge_dir": str(BRIDGE_DIR),
                     "has_live": has_live,
                     "games": list_games(limit=limit_val),
