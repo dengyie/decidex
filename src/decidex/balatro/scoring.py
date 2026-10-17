@@ -20,7 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .poker import base_values, detect_hand_type
+from .constraints import DEBUFFED_SUIT_BOSSES, FACE_RANKS
+from .poker import base_values, detect_hand_type, get_scoring_cards
 from .state import Card, Joker
 
 # ---- Curated vanilla joker table -------------------------------------------
@@ -116,7 +117,29 @@ def simulate_play(
 ) -> ScoreResult:
     """Score one played selection deterministically. ``played`` is in play order."""
     hand_type = detect_hand_type(played)
+    blind_name = getattr(getattr(state, "blind", None), "name", "")
+
+    # Boss: The Psychic requires exactly 5 cards; fewer than 5 cards score 0!
+    if blind_name == "The Psychic" and len(played) < 5:
+        return ScoreResult(
+            hand_type,
+            0,
+            0.0,
+            0.0,
+            [f"The Psychic: 必须打满 5 张牌 (当前打出 {len(played)} 张，判定为 0 分)"],
+        )
+
+    # Boss: The Psychic requires exact 5 cards played, otherwise 0 score
+    if blind_name == "The Psychic" and len(played) < 5:
+        return ScoreResult(hand_type, 0, 0.0, 0, ["The Psychic: 强制要求出满5张牌，当前出牌不足5张判0分"])
+
     base_chips, base_mult = base_values(hand_type)
+
+    # Boss: The Flint halves base chips and mult
+    if blind_name == "The Flint":
+        base_chips = max(1, base_chips // 2)
+        base_mult = max(1.0, base_mult / 2.0)
+
     chips, mult = float(base_chips), float(base_mult)
     log: List[str] = [f"base {base_chips}×{base_mult}"]
 
@@ -145,30 +168,48 @@ def simulate_play(
     joker_static = [(j.chips, j.mult, j.xmult) for j, hooks in zip(state.jokers, known)
                     if not hooks]
 
+    # Scoring cards identification (junk/filtering cards in played do not score chips or mult)
+    scoring_cards = get_scoring_cards(played, hand_type)
+
+    # Boss Debuffs
+    debuffed_suit = DEBUFFED_SUIT_BOSSES.get(blind_name)
+    is_plant = (blind_name == "The Plant")
+
+    def _is_card_debuffed(c: Card) -> bool:
+        if is_plant and _is_face(c):
+            return True
+        if debuffed_suit and debuffed_suit in c.suits():
+            return True
+        return False
+
     def _run(cards: Sequence[Card], held_mode: bool) -> None:
         nonlocal chips, mult
         for c in cards:
+            debuffed = not held_mode and _is_card_debuffed(c)
             if held_mode:
                 add_c, add_m = 0, 0.0
                 xm = 2.0 if c.enhancement == "steel" else 1.0
                 lg = [f"held {c.label}" + (" steel×2" if xm > 1 else "")]
+            elif debuffed:
+                add_c, add_m, xm, lg = 0, 0.0, 1.0, [f"{c.label} (封印失效)"]
             else:
                 add_c, add_m, xm, lg = _card_score(c)
-            retriggers = 2 if (c.seal == "red" and not held_mode) else 1
+            retriggers = 2 if (c.seal == "red" and not held_mode and not debuffed) else 1
             for _ in range(retriggers):
                 chips += add_c
                 mult += add_m
                 mult *= xm
                 log.extend(lg)
-                for hooks, joker in zip(known, state.jokers):
-                    pc = hooks.get("per_card")
-                    if pc and bool(pc.get("held", False)) != held_mode:
-                        continue
-                    if pc and (pc.get("match") is None or pc["match"](c)):
-                        chips += pc.get("chips", 0)
-                        mult += pc.get("mult", 0)
-                        mult *= pc.get("xmult", 1.0)
-                        log.append(f"{joker.name} → {c.label}")
+                if not debuffed:
+                    for hooks, joker in zip(known, state.jokers):
+                        pc = hooks.get("per_card")
+                        if pc and bool(pc.get("held", False)) != held_mode:
+                            continue
+                        if pc and (pc.get("match") is None or pc["match"](c)):
+                            chips += pc.get("chips", 0)
+                            mult += pc.get("mult", 0)
+                            mult *= pc.get("xmult", 1.0)
+                            log.append(f"{joker.name} → {c.label}")
 
     # 1) played cards left-to-right (joker per-card hooks interleave).
     _run(played, held_mode=False)

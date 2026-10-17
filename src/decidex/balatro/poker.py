@@ -126,6 +126,135 @@ def base_values(hand_type: str) -> Tuple[int, int]:
     return BASE_VALUES.get(hand_type, (5, 1))
 
 
+def get_scoring_cards(cards: Sequence[Card], hand_type: Optional[str] = None) -> List[Card]:
+    """
+    Identifies the subset of played cards that actually score for the detected hand type.
+    In Balatro:
+      - Stone cards always score regardless of the hand type.
+      - High Card: Only the single highest-value card scores.
+      - Pair: Only the 2 cards matching the pair's rank score.
+      - Two Pair: Only the 4 cards matching the two pairs score.
+      - Three of a Kind: Only the 3 matching cards score.
+      - Four of a Kind: Only the 4 matching cards score.
+      - Full House, Flush, Straight, Straight Flush, Five of a Kind, Flush House, Flush Five: All 5 cards score.
+    """
+    if not cards:
+        return []
+    if hand_type is None:
+        hand_type = detect_hand_type(cards)
+
+    # 5-card combinations: all cards score
+    if hand_type in (
+        "Full House", "Flush", "Straight", "Straight Flush",
+        "Five of a Kind", "Flush House", "Flush Five"
+    ):
+        return list(cards)
+
+    scoring: List[Card] = []
+    stone_cards = [c for c in cards if getattr(c, "enhancement", "") == "stone"]
+    non_stone = [c for c in cards if getattr(c, "enhancement", "") != "stone"]
+
+    # Rank frequency map for non-stone cards
+    counts: Dict[str, List[Card]] = {}
+    for c in non_stone:
+        counts.setdefault(c.rank, []).append(c)
+
+    if hand_type == "Four of a Kind":
+        for rank, group in counts.items():
+            if len(group) >= 4:
+                scoring.extend(group[:4])
+                break
+    elif hand_type == "Three of a Kind":
+        for rank, group in counts.items():
+            if len(group) >= 3:
+                scoring.extend(group[:3])
+                break
+    elif hand_type == "Two Pair":
+        pairs = [group for rank, group in counts.items() if len(group) >= 2]
+        pairs.sort(key=lambda g: _rank_value(g[0]), reverse=True)
+        for p in pairs[:2]:
+            scoring.extend(p[:2])
+    elif hand_type == "Pair":
+        for rank, group in sorted(counts.items(), key=lambda item: _rank_value(item[1][0]), reverse=True):
+            if len(group) >= 2:
+                scoring.extend(group[:2])
+                break
+    elif hand_type == "High Card":
+        if non_stone:
+            highest_card = max(non_stone, key=_rank_value)
+            scoring.append(highest_card)
+
+    for sc in stone_cards:
+        if sc not in scoring:
+            scoring.append(sc)
+
+    return scoring if scoring else list(cards)
+
+
+def can_attach_junk(core_cards: Sequence[Card], target_hand_type: str, candidate_junk: Sequence[Card]) -> bool:
+    """
+    Validates whether candidate junk cards can be attached to the core cards
+    without altering or corrupting the intended poker hand type.
+    """
+    combined = list(core_cards) + list(candidate_junk)
+    if len(combined) > 5:
+        return False
+    return detect_hand_type(combined) == target_hand_type
+
+
+def _card_keep_priority(card: Card) -> float:
+    """
+    Lower score = less desirable to keep = better candidate to dump/filter out.
+    """
+    score = float(_rank_value(card))
+    if getattr(card, "enhancement", None):
+        score += 20.0
+    if getattr(card, "edition", None):
+        score += 30.0
+    if getattr(card, "seal", None):
+        score += 40.0
+    return score
+
+
+def find_safe_junk_combinations(
+    hand: Sequence[Card],
+    core_indices: Sequence[int],
+    target_hand_type: str,
+    max_total_cards: int = 5,
+) -> List[List[int]]:
+    """
+    Finds legal, safe combinations of junk cards from the remaining hand cards
+    that can be attached to the core cards while strictly preserving target_hand_type.
+    Returns list of junk index lists, ordered by best junk to dump (lowest keep priority).
+    """
+    core_cards = [hand[i] for i in core_indices]
+    core_len = len(core_indices)
+    max_junk = max_total_cards - core_len
+    if max_junk <= 0:
+        return []
+
+    available_indices = [i for i in range(len(hand)) if i not in core_indices]
+    if not available_indices:
+        return []
+
+    # Sort available cards by dump priority (lowest keep priority first)
+    available_indices.sort(key=lambda idx: _card_keep_priority(hand[idx]))
+
+    safe_combos: List[List[int]] = []
+    # Test junk combinations of sizes from 1 up to max_junk
+    for k in range(1, min(max_junk, len(available_indices)) + 1):
+        for combo in combinations(available_indices, k):
+            junk_cards = [hand[i] for i in combo]
+            if can_attach_junk(core_cards, target_hand_type, junk_cards):
+                safe_combos.append(list(combo))
+                if len(safe_combos) >= 8:
+                    break
+        if len(safe_combos) >= 12:
+            break
+
+    return safe_combos
+
+
 def enumerate_selections(hand: Sequence[Card], max_played: int = 5) -> List[Tuple[int, ...]]:
     """All legal played-card selections of a hand (index tuples), 1..max_played."""
     n = len(hand)

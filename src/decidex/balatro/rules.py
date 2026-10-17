@@ -19,7 +19,7 @@ from decidex.types import ActionCandidate
 from .constraints import detect_active_constraints, evaluate_play_safety
 from .economy import calculate_economy_status, evaluate_purchase_budget
 from .joker_order import compute_optimal_joker_order, estimate_ordering_gain
-from .poker import enumerate_selections
+from .poker import enumerate_selections, get_scoring_cards
 from .scoring import simulate_play
 from .state import BalatroState
 from .synergy import analyze_synergy, score_joker_candidate
@@ -42,7 +42,15 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
     state_name = getattr(state, "state_name", "SELECTING_HAND")
 
     # 1. Active Constraints & Synergy Context
-    constraints = detect_active_constraints(state.jokers, getattr(state.blind, "name", ""))
+    blind_name = getattr(getattr(state, "blind", None), "name", "")
+    most_played = getattr(state, "most_played_hand", None)
+    money = getattr(state, "money", 0)
+    constraints = detect_active_constraints(
+        state.jokers,
+        blind_name=blind_name,
+        most_played_hand=most_played,
+        money=money,
+    )
     synergy = analyze_synergy(state.jokers, getattr(state, "ante", 1))
     econ = calculate_economy_status(getattr(state, "money", 0), getattr(state, "ante", 1))
 
@@ -107,24 +115,45 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
     for sel in enumerate_selections(state.hand, MAX_SELECT):
         cards = [state.hand[i] for i in sel]
         result = simulate_play(cards, state)
-        safety = evaluate_play_safety(cards, result.hand_type, constraints)
-        scored_plays.append((sel, cards, result, safety))
+        scoring = get_scoring_cards(cards, result.hand_type)
+        junk = [c for c in cards if c not in scoring]
+        safety = evaluate_play_safety(cards, result.hand_type, constraints, scoring_cards=scoring)
+        scored_plays.append((sel, cards, result, scoring, junk, safety))
         if not safety.is_fatal_violation:
             best_play_score = max(best_play_score, result.score)
 
     hopeless = best_play_score * max(1, state.hands_left) < blind
 
-    # Pass 2: Build play candidates with constraint-aware tiered priors
-    for sel, cards, result, safety in scored_plays:
+    # Pass 2: Build play candidates with constraint-aware tiered priors & filtering bonus
+    for sel, cards, result, scoring, junk, safety in scored_plays:
         clears = result.score >= blind and not safety.is_fatal_violation
         base_h = 2.0 + result.score / max(1.0, blind) + (3.0 if clears else 0.0)
 
-        # Apply safety penalty (e.g. 0.01 for Ride the Bus violation) and growth bonus
-        heuristic = base_h * safety.penalty_multiplier * safety.bonus_multiplier
+        # Filtering heuristics: dumping junk cards alongside the main hand
+        is_filtering = len(junk) > 0
+        filtering_mod = 1.0
+        if is_filtering:
+            # The Psychic: 5-card play with junk attached is the essential survival technique
+            if constraints.is_the_psychic and len(cards) == 5:
+                filtering_mod *= 1.45
+            # Zero discards / The Water / Green Joker: recycling junk cards via plays is optimal
+            if constraints.is_the_water or state.discards_left == 0:
+                filtering_mod += 0.08 * len(junk)
+            if constraints.has_green_joker:
+                filtering_mod += 0.12 * len(junk)
+            # The Tooth: each card costs $1, so dumping extra junk is heavily penalized
+            if constraints.is_the_tooth:
+                filtering_mod *= 0.70 ** len(junk)
+
+        heuristic = base_h * safety.penalty_multiplier * safety.bonus_multiplier * filtering_mod
         if safety.is_fatal_violation:
             heuristic = 0.05  # Dropped below all legal moves to protect the run
 
         desc = f"打出 {result.display}"
+        if is_filtering:
+            dumped_str = " ".join(c.label for c in junk)
+            desc += f" (附带弃牌: {dumped_str})"
+
         if safety.is_fatal_violation:
             desc += f" (⚠️ {safety.reason})"
         elif clears:
@@ -147,13 +176,21 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
                 "clears": clears,
                 "fatal_violation": safety.is_fatal_violation,
                 "safety_reason": safety.reason,
+                "is_filtering_play": is_filtering,
+                "scoring_cards": [c.label for c in scoring],
+                "dumped_cards": [c.label for c in junk],
             },
         ))
 
     # Pass 3: Discards
-    if state.discards_left > 0:
+    # The Water forbids discarding completely (0 discards)
+    if state.discards_left > 0 and not constraints.is_the_water:
         # Green Joker penalty: Discarding incurs -1 mult penalty
         discard_penalty = 0.6 if constraints.has_green_joker else 1.0
+
+        # The Needle: Only 1 hand allowed. If hand doesn't clear, burning discards is imperative!
+        if constraints.is_the_needle and not any(p[5].is_fatal_violation is False and p[2].score >= blind for p in scored_plays):
+            discard_penalty *= 2.0
 
         for sel in enumerate_selections(state.hand, MAX_SELECT):
             cards = [state.hand[i] for i in sel]
@@ -204,9 +241,9 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
 def choose_safe_default(candidates: List[ActionCandidate], state: BalatroState) -> ActionCandidate:
     """
     Deterministic fallback policy enhanced with safety constraints and clear priority:
-      1. Guaranteed clearing play that does NOT violate fatal constraints (e.g. no Ride the Bus face cards).
+      1. Guaranteed clearing play that does NOT violate fatal constraints (e.g. no Ride the Bus face cards, meets The Psychic 5-card rule).
       2. If jokers are out of order and reordering yields substantial gain, reorder first.
-      3. Highest scoring safe play.
+      3. Highest heuristic-scoring safe play (prefers filtering plays when 0 discards/The Water/Green Joker).
       4. Strategic discard if all plays are hopeless and discards remain.
       5. Safe non-violating play.
     """
@@ -218,20 +255,20 @@ def choose_safe_default(candidates: List[ActionCandidate], state: BalatroState) 
     safe_plays = [c for c in plays if not c.metadata.get("fatal_violation", False)]
     clears = [c for c in safe_plays if c.metadata.get("clears")]
 
-    # 1. Prefer guaranteed clearing safe play
+    # 1. Prefer guaranteed clearing safe play (highest score, ties broken by heuristic filtering score)
     if clears:
-        return max(clears, key=lambda c: c.metadata.get("score", 0))
+        return max(clears, key=lambda c: (c.metadata.get("score", 0), c.heuristic_score))
 
     # 2. If jokers need reordering to maximize multipliers, prioritize reorder before playing
     reorders = [c for c in candidates if c.metadata.get("action_type") == "reorder_jokers"]
     if reorders:
         return max(reorders, key=lambda c: c.heuristic_score)
 
-    # 3. If safe plays exist, take the highest score
+    # 3. If safe plays exist, take the highest heuristic score (factors in filtering utility & growth)
     if safe_plays:
-        return max(safe_plays, key=lambda c: c.metadata.get("score", 0))
+        return max(safe_plays, key=lambda c: c.heuristic_score)
 
-    # 3. If in shop phase, prefer legal buy with highest score or toggle_shop
+    # 4. If in shop phase, prefer legal buy with highest score or toggle_shop
     shop_actions = [c for c in candidates if c.metadata.get("action_type") in ("buy_joker", "toggle_shop")]
     if shop_actions:
         return max(shop_actions, key=lambda c: c.heuristic_score)

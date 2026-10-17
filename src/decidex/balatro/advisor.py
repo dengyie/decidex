@@ -33,12 +33,18 @@ def build_evidence(state: BalatroState, n_candidates: int) -> Dict[str, Any]:
     """Rich domain evidence dict handed to DecisionEngine as observation payload."""
     ante = getattr(state, "ante", 1)
     money = getattr(state, "money", 0)
-    blind_name = getattr(state.blind, "name", "")
+    blind_name = getattr(getattr(state, "blind", None), "name", "")
+    most_played = getattr(state, "most_played_hand", None)
 
     # Domain strategies
     synergy = analyze_synergy(state.jokers, ante)
     econ = calculate_economy_status(money, ante)
-    constraints = detect_active_constraints(state.jokers, blind_name)
+    constraints = detect_active_constraints(
+        state.jokers,
+        blind_name=blind_name,
+        most_played_hand=most_played,
+        money=money,
+    )
     opt_order, needs_reorder, order_reason = compute_optimal_joker_order(state.jokers)
     order_gain = estimate_ordering_gain(state.jokers)
 
@@ -59,6 +65,23 @@ def build_evidence(state: BalatroState, n_candidates: int) -> Dict[str, Any]:
         "jokers": [j.name for j in state.jokers],
         "consumables": [c.name for c in state.consumables],
         "n_legal_actions": n_candidates,
+
+        # Boss Blind first-class model context
+        "boss_blind": {
+            "name": constraints.boss_name,
+            "has_boss": bool(constraints.boss_rule),
+            "description": constraints.boss_rule.description if constraints.boss_rule else "普通盲注 (无特殊限制)",
+            "strategic_directive": constraints.strategic_directive or "正常构筑高倍率或高筹码牌型斩杀",
+            "requires_5_cards": constraints.is_the_psychic,
+            "no_repeat_hand": constraints.is_the_eye,
+            "single_hand_type": constraints.is_the_mouth,
+            "zero_discards": constraints.is_the_water,
+            "single_hand_only": constraints.is_the_needle,
+            "wipes_money": constraints.is_the_ox,
+            "debuffed_suit": constraints.debuffed_suit,
+            "debuff_face_cards": constraints.is_the_plant,
+            "active_warnings": constraints.active_warnings,
+        },
 
         # High-tier strategic context
         "strategy": {
@@ -129,20 +152,33 @@ class BalatroAdvisor:
         top_candidates = CandidatePruner.prune_to_top_k(all_actions, k=self.top_k)
         option_ids, lookup, descriptions = CandidatePruner.to_choice_bundle(top_candidates)
 
+        evidence = build_evidence(state, len(all_actions))
+        boss_info = evidence.get("boss_blind", {})
+        active_boss = boss_info.get("name") if boss_info.get("has_boss") else None
+
+        question_desc = "选择最优 Balatro 动作 (打牌/弃牌/购买/离开)"
+        if active_boss:
+            question_desc += f" [⚠️ Boss: {active_boss} - {boss_info.get('strategic_directive')}]"
+        elif boss_info.get("active_warnings"):
+            question_desc += f" [⚠️ 警报: {'; '.join(boss_info.get('active_warnings', []))}]"
+
         question = QuestionSpec(
             id="balatro_move",
             primitive=PrimitiveType.CHOICE,
-            description="选择最优 Balatro 动作 (打牌/弃牌/购买/离开)",
+            description=question_desc,
             options=option_ids,
             criteria=descriptions,
         )
 
-        evidence = build_evidence(state, len(all_actions))
         domain_state = dict(evidence)
         domain_state["top_actions"] = [
             {"id": c.candidate_id, "desc": c.description, "priors": c.heuristic_score}
             for c in top_candidates
         ]
+        domain_state["hand_filtering_guidance"] = (
+            "出牌带杂牌 (Filtering Play) 机制：当选择的牌型不足5张时，可在保证目标牌型不变的前提下附带废牌打出，充当伪弃牌以洗牌换牌；"
+            "在遭遇 The Psychic 时，必须附带杂牌补满 5 张牌打出，否则直接判定为 0 分！"
+        )
 
         phase = TurnPhase.SHOP if getattr(state, "shop", None) else TurnPhase.MAIN
         verdicts = await self.engine.step(

@@ -11,7 +11,7 @@ from decidex.balatro.benchmark import BalatroABBenchmark, PolicyVariant
 @pytest.mark.asyncio
 async def test_benchmark_scenario_generation():
     bench = BalatroABBenchmark()
-    assert len(bench.scenarios) == 5
+    assert len(bench.scenarios) == 6
     categories = {s.category for s in bench.scenarios}
     assert "constraints" in categories
     assert "economy" in categories
@@ -66,14 +66,32 @@ async def test_ab_benchmark_joker_ordering():
 
 
 @pytest.mark.asyncio
+async def test_ab_benchmark_the_psychic_and_junk_filtering():
+    bench = BalatroABBenchmark()
+    s6 = next(s for s in bench.scenarios if s.id == "scen_06_the_psychic_filtering_play")
+
+    # Baseline plays only 2 cards (bare pair of Aces), which violates The Psychic's 5-card rule
+    base_res = await bench.run_scenario(s6, PolicyVariant.BASELINE_GREEDY)
+    assert base_res.violated_constraint is True
+    assert base_res.cleared_target is False
+
+    # DecideX v2 recognizes The Psychic and attaches 3 junk cards, fulfilling the 5-card rule and clearing!
+    decidex_res = await bench.run_scenario(s6, PolicyVariant.DECIDEX_HEURISTIC_V2)
+    assert decidex_res.violated_constraint is False
+    assert decidex_res.cleared_target is True
+    assert "play" in decidex_res.chosen_candidate_id
+    assert len(decidex_res.chosen_candidate_id.split(":")[1].split("-")) == 5
+
+
+@pytest.mark.asyncio
 async def test_ab_benchmark_full_suite_and_report():
     bench = BalatroABBenchmark()
     results = await bench.run_all()
 
-    # Verify each variant has 5 scenario outcomes
-    assert len(results[PolicyVariant.BASELINE_GREEDY]) == 5
-    assert len(results[PolicyVariant.DECIDEX_HEURISTIC_V2]) == 5
-    assert len(results[PolicyVariant.DECIDEX_MODEL_V2]) == 5
+    # Verify each variant has 6 scenario outcomes
+    assert len(results[PolicyVariant.BASELINE_GREEDY]) == 6
+    assert len(results[PolicyVariant.DECIDEX_HEURISTIC_V2]) == 6
+    assert len(results[PolicyVariant.DECIDEX_MODEL_V2]) == 6
 
     # Check constraint violation rates: Baseline has violations; DecideX has 0%
     base_violations = sum(1 for o in results[PolicyVariant.BASELINE_GREEDY] if o.violated_constraint)

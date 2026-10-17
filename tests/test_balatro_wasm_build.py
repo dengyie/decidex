@@ -225,19 +225,20 @@ def test_dynamic_blind_selection_and_readiness_flags():
 
 
 def test_frontend_arbitration_and_autopilot():
+    import re
     app_js = WEB_DIR / "app.js"
     js_content = app_js.read_text(encoding="utf-8")
 
     assert "arbitrateAction" in js_content
     assert "AutoPilot" in js_content
-    assert "balatro-asset-cache-v22" in js_content
+    assert re.search(r"balatro-asset-cache-v\d+", js_content) is not None
     assert "executePlayAction" in js_content
     assert "executeDiscardAction" in js_content
 
     index_html = WEB_DIR / "index.html"
     html_content = index_html.read_text(encoding="utf-8")
     assert "autopilot-toggle" in html_content
-    assert "app.js?v=22" in html_content
+    assert re.search(r"app\.js\?v=\d+", html_content) is not None
 
 
 def test_coordinate_mapping_patches():

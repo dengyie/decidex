@@ -234,42 +234,60 @@ local function find_uie_by_id(id)
   return nil
 end
 
+local function find_next_round_button()
+  if not (G and G.shop) then return nil end
+  if G.CONTROLLER and G.CONTROLLER.locks and G.CONTROLLER.locks.toggle_shop then
+    return nil
+  end
+  if G.shop.get_UIE_by_ID then
+    local btn = nil
+    pcall(function() btn = G.shop:get_UIE_by_ID('next_round_button') end)
+    if btn and btn.config and btn.config.button == 'toggle_shop' then return btn end
+    if btn then return btn end
+  end
+  if G.I and G.I.UIBOX then
+    for _, uibox in ipairs(G.I.UIBOX) do
+      if (not uibox.config or uibox.config.major == G.shop) and not uibox.REMOVED and uibox.get_UIE_by_ID then
+        local btn = nil
+        pcall(function() btn = uibox:get_UIE_by_ID('next_round_button') end)
+        if btn and btn.config and btn.config.button == 'toggle_shop' then return btn end
+        if btn then return btn end
+      end
+    end
+  end
+  local btn = find_uie_by_id('next_round_button')
+  if btn then return btn end
+  return nil
+end
+
 local function find_select_blind_button()
   if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then return nil end
   if G.GAME and G.GAME.facing_blind then return nil end
   if not G.blind_select or not G.blind_prompt_box then return nil end
-
-  local dt_ok = false
-  pcall(function()
-    local p1 = G.blind_prompt_box.get_UIE_by_ID and G.blind_prompt_box:get_UIE_by_ID('prompt_dynatext1')
-    local p2 = G.blind_prompt_box.get_UIE_by_ID and G.blind_prompt_box:get_UIE_by_ID('prompt_dynatext2')
-    if p1 and p1.config and p1.config.object and p2 and p2.config and p2.config.object then
-      dt_ok = true
-    end
-  end)
-  if not dt_ok then return nil end
 
   local on_deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or "Small"
   local opt = G.blind_select_opts and G.blind_select_opts[string.lower(on_deck)]
   if opt and opt.get_UIE_by_ID then
     local btn = nil
     pcall(function() btn = opt:get_UIE_by_ID('select_blind_button') end)
-    if btn then return btn, on_deck end
+    if btn and btn.config and btn.config.ref_table then return btn, on_deck end
   end
   if G.blind_select and G.blind_select.get_UIE_by_ID then
     local btn = nil
     pcall(function() btn = G.blind_select:get_UIE_by_ID('select_blind_button') end)
-    if btn then return btn, on_deck end
+    if btn and btn.config and btn.config.ref_table then return btn, on_deck end
   end
-  if G.blind_select and G.blind_select.UIRoot then
-    local btn = nil
-    pcall(function()
-      btn = G.blind_select.UIRoot.children[1].children[1].config.object:get_UIE_by_ID('select_blind_button')
-    end)
-    if btn then return btn, on_deck end
+  if G.I and G.I.UIBOX then
+    for _, uibox in ipairs(G.I.UIBOX) do
+      if uibox and uibox.get_UIE_by_ID and not uibox.REMOVED then
+        local btn = nil
+        pcall(function() btn = uibox:get_UIE_by_ID('select_blind_button') end)
+        if btn and btn.config and btn.config.ref_table then return btn, on_deck end
+      end
+    end
   end
   local btn = find_uie_by_id('select_blind_button')
-  if btn then return btn, on_deck end
+  if btn and btn.config and btn.config.ref_table then return btn, on_deck end
 
   local choice_key = G.GAME and G.GAME.round_resets and G.GAME.round_resets.blind_choices and G.GAME.round_resets.blind_choices[on_deck]
   local pb = choice_key and G.P_BLINDS and G.P_BLINDS[choice_key]
@@ -340,10 +358,8 @@ local function build_state_json(actual)
 
   local can_toggle_shop = false
   if G.STATE and G.STATES and G.STATE == G.STATES.SHOP and G.shop then
-    if not (G.CONTROLLER and G.CONTROLLER.locks and G.CONTROLLER.locks.toggle_shop) then
-      if find_uie_by_id('next_round_button') then
-        can_toggle_shop = true
-      end
+    if find_next_round_button() then
+      can_toggle_shop = true
     end
   end
   parts[#parts + 1] = '"can_toggle_shop":' .. (can_toggle_shop and "true" or "false")
@@ -420,8 +436,9 @@ local function check_and_emit_state()
     local jokers = (G.jokers and G.jokers.cards) or {}
     local dollars = (G.GAME and G.GAME.dollars) or 0
     local reroll = (G.GAME and G.GAME.current_round and G.GAME.current_round.reroll_cost) or 5
-    local can_toggle = (find_uie_by_id('next_round_button') ~= nil)
-    local cur_shop_sig = tostring(dollars) .. ":" .. tostring(reroll) .. ":" .. tostring(#shop_cards) .. ":" .. tostring(#booster_cards) .. ":" .. tostring(#voucher_cards) .. ":" .. tostring(#jokers) .. ":" .. tostring(can_toggle)
+    local locked = (G.CONTROLLER and G.CONTROLLER.locks and G.CONTROLLER.locks.toggle_shop) and "1" or "0"
+    local can_toggle = (find_next_round_button() ~= nil) and "1" or "0"
+    local cur_shop_sig = tostring(dollars) .. ":" .. tostring(reroll) .. ":" .. tostring(#shop_cards) .. ":" .. tostring(#booster_cards) .. ":" .. tostring(#voucher_cards) .. ":" .. tostring(#jokers) .. ":" .. can_toggle .. ":" .. locked
     if cur_shop_sig ~= LAST_SHOP_SIG or state_changed then
       LAST_SHOP_SIG = cur_shop_sig
       local ok, json = pcall(build_state_json, nil)
@@ -541,9 +558,23 @@ local function decidex_execute(action, args)
     if not btn then
       return false, "blind_select UI not ready"
     end
+    -- Defensive pop_out guard for blind_prompt_box to guarantee select_blind never crashes
+    if G.blind_prompt_box and G.blind_prompt_box.get_UIE_by_ID then
+      for _, dt_id in ipairs({'prompt_dynatext1', 'prompt_dynatext2'}) do
+        local uie = G.blind_prompt_box:get_UIE_by_ID(dt_id)
+        if uie and uie.config and not uie.config.object then
+          uie.config.object = { pop_delay = 0, pop_out = function() end }
+        end
+      end
+    end
     if G.FUNCS and G.FUNCS.select_blind then
+      local prev_facing = G.GAME and G.GAME.facing_blind
       local ok, err = pcall(G.FUNCS.select_blind, btn)
-      return ok, tostring(err or ("selected blind " .. tostring(on_deck)))
+      if not ok then
+        if G.GAME then G.GAME.facing_blind = prev_facing end
+        return false, "select_blind error: " .. tostring(err)
+      end
+      return true, "selected blind " .. tostring(on_deck)
     end
     return false, "no select_blind function"
   end
@@ -592,7 +623,7 @@ local function decidex_execute(action, args)
       return false, "toggle_shop locked"
     end
     if G.FUNCS and G.FUNCS.toggle_shop then
-      local btn = find_uie_by_id('next_round_button') or { config = {} }
+      local btn = find_next_round_button() or find_uie_by_id('next_round_button') or { config = { button = 'toggle_shop' } }
       local ok, err = pcall(G.FUNCS.toggle_shop, btn)
       return ok, tostring(err or "toggled shop")
     end
@@ -637,10 +668,53 @@ local function decidex_execute(action, args)
     return false, "no use/sell card func"
   end
 
-  if action == "start_run" then
-    if G.main_menu then
-      pcall(function() G:main_menu() end)
+  if action == "reorder_jokers" then
+    if not (G.jokers and G.jokers.cards) then
+      return false, "no G.jokers"
     end
+    local order = args and args.order
+    if not order or #order == 0 then
+      return false, "no order provided"
+    end
+    local is_zero_based = false
+    for _, idx in ipairs(order) do
+      if idx == 0 then is_zero_based = true break end
+    end
+    local new_cards = {}
+    for _, idx in ipairs(order) do
+      local lua_idx = is_zero_based and (idx + 1) or idx
+      local card = G.jokers.cards[lua_idx]
+      if card then
+        table.insert(new_cards, card)
+      end
+    end
+    if #new_cards == #G.jokers.cards then
+      G.jokers.cards = new_cards
+      if G.jokers.set_ranks then pcall(function() G.jokers:set_ranks() end) end
+      if G.jokers.align_cards then pcall(function() G.jokers:align_cards() end) end
+      return true, "reordered jokers"
+    end
+    return false, "mismatched joker card count"
+  end
+
+  if action == "start_run" then
+    if G then
+      G.F_SKIP_TUTORIAL = true
+      if G.SETTINGS then
+        G.SETTINGS.tutorial_complete = true
+        G.SETTINGS.tutorial_progress = nil
+      end
+    end
+    local now = (love.timer and love.timer.getTime()) or os.clock()
+    if _G._last_start_run_time and (now - _G._last_start_run_time < 3.0) then
+      return false, "start_run already in progress"
+    end
+    _G._last_start_run_time = now
+
+    if G.STAGE and G.STAGES and G.STAGE == G.STAGES.RUN and G.STATE ~= G.STATES.SPLASH and G.STATE ~= G.STATES.MENU then
+      return false, "already in run"
+    end
+
     if G.FUNCS and G.FUNCS.start_run then
       local ok, err = pcall(G.FUNCS.start_run, nil, {stake = 1})
       return ok, tostring(err or "started run")
@@ -668,6 +742,50 @@ local function decidex_step(dt)
   if G and G.SETTINGS and G.SETTINGS.GAMESPEED and G.SETTINGS.GAMESPEED < 4 then
     G.SETTINGS.GAMESPEED = 4
   end
+
+  -- Auto-suppress tutorial popups, locks and pauses, and disable heavy synchronous saves
+  if G then
+    G.F_SKIP_TUTORIAL = true
+    G.F_NO_SAVING = true
+    if G.FUNCS and not G.FUNCS._tutorial_part_patched then
+      G.FUNCS._tutorial_part_patched = true
+      G.FUNCS.tutorial_part = function(_part)
+        if G.SETTINGS then
+          G.SETTINGS.tutorial_complete = true
+          G.SETTINGS.paused = false
+          if G.SETTINGS.tutorial_progress then
+            G.SETTINGS.tutorial_progress.completed_parts = G.SETTINGS.tutorial_progress.completed_parts or {}
+            G.SETTINGS.tutorial_progress.completed_parts[_part] = true
+          end
+        end
+        return 1
+      end
+    end
+    if G.SETTINGS then
+      G.SETTINGS.tutorial_complete = true
+      if G.SETTINGS.paused and (G.OVERLAY_TUTORIAL or not G.OVERLAY_MENU) then
+        G.SETTINGS.paused = false
+      end
+      if G.SETTINGS.tutorial_progress then
+        G.SETTINGS.tutorial_progress.completed_parts = G.SETTINGS.tutorial_progress.completed_parts or {}
+        local t_parts = {'first_hand', 'first_hand_2', 'first_hand_3', 'first_hand_4', 'first_hand_section', 'small_blind', 'big_blind', 'second_hand', 'shop_1'}
+        for _, part in ipairs(t_parts) do
+          G.SETTINGS.tutorial_progress.completed_parts[part] = true
+        end
+      end
+    end
+    if G.OVERLAY_TUTORIAL then
+      if G.OVERLAY_TUTORIAL.Jimbo then pcall(function() G.OVERLAY_TUTORIAL.Jimbo:remove() end) end
+      if G.OVERLAY_TUTORIAL.content then pcall(function() G.OVERLAY_TUTORIAL.content:remove() end) end
+      pcall(function() G.OVERLAY_TUTORIAL:remove() end)
+      G.OVERLAY_TUTORIAL = nil
+      if G.E_MANAGER and G.E_MANAGER.clear_queue then
+        pcall(function() G.E_MANAGER:clear_queue('tutorial') end)
+      end
+      if G.SETTINGS then G.SETTINGS.paused = false end
+    end
+  end
+
   if not _G._decidex_step_logged then
     _G._decidex_step_logged = true
     print("[DecideX Web] DECIDEX_STEP actively ticking in game loop")
@@ -685,6 +803,8 @@ local function decidex_step(dt)
         local ok, run_err = pcall(chunk)
         if not ok then
           print("[DecideX Bridge Error]: " .. tostring(run_err))
+        else
+          print("[DecideX Executed]: " .. tostring(code:sub(1, 80)))
         end
       else
         print("[DecideX Bridge Parse Error]: " .. tostring(err))

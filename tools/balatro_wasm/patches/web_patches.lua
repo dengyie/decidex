@@ -72,68 +72,14 @@ end
 -- 6. Synchronous & Coroutine-safe Channel / Thread emulation for browser
 local channels = {}
 
+-- In single-threaded browser WASM, bypass heavy synchronous deflate serialization on main thread
+compress_and_save = function(_file, _data) end
+
 local function handle_save_request(request)
   if not request or type(request) ~= "table" then return end
   local ok, err = pcall(function()
-    if request.type == 'save_progress' then
-      local prefix_profile = (request.save_progress.SETTINGS.profile or 1)..''
-      if not love.filesystem.getInfo(prefix_profile) then love.filesystem.createDirectory( prefix_profile ) end
-      prefix_profile = prefix_profile..'/'
-
-      if not love.filesystem.getInfo(prefix_profile..'meta.jkr') then
-        love.filesystem.append( prefix_profile..'meta.jkr', 'return {}' )
-      end
-
-      local meta = STR_UNPACK(get_compressed(prefix_profile..'meta.jkr') or 'return {}')
-      meta.unlocked = meta.unlocked or {}
-      meta.discovered = meta.discovered or {}
-      meta.alerted = meta.alerted or {}
-
-      local _append = false
-      for k, v in pairs(request.save_progress.UDA or {}) do
-        if string.find(v, 'u') and not meta.unlocked[k] then 
-          meta.unlocked[k] = true
-          _append = true
-        end
-        if string.find(v, 'd') and not meta.discovered[k] then 
-          meta.discovered[k] = true
-          _append = true
-        end
-        if string.find(v, 'a') and not meta.alerted[k] then 
-          meta.alerted[k] = true
-          _append = true
-        end
-      end
-      if _append then compress_and_save( prefix_profile..'meta.jkr', STR_PACK(meta)) end
-
-      compress_and_save('settings.jkr', request.save_progress.SETTINGS)
-      compress_and_save(prefix_profile..'profile.jkr', request.save_progress.PROFILE)
-
-      if channels["save_request"] then
-        table.insert(channels["save_request"].items, 'done')
-      end
-    elseif request.type == 'save_settings' then 
-      compress_and_save('settings.jkr', request.save_settings)
-      compress_and_save(request.profile_num..'/profile.jkr', request.save_profile)
-    elseif request.type == 'save_metrics' then 
-      compress_and_save('metrics.jkr', request.save_metrics)
-    elseif request.type == 'save_notify' then 
-      local prefix_profile = (request.profile_num or 1)..''
-      if not love.filesystem.getInfo(prefix_profile) then love.filesystem.createDirectory( prefix_profile ) end
-      prefix_profile = prefix_profile..'/'
-
-      if not love.filesystem.getInfo(prefix_profile..'unlock_notify.jkr') then love.filesystem.append( prefix_profile..'unlock_notify.jkr', '') end
-      local unlock_notify = get_compressed(prefix_profile..'unlock_notify.jkr') or ''
-
-      if request.save_notify and not string.find(unlock_notify, request.save_notify) then 
-        compress_and_save( prefix_profile..'unlock_notify.jkr', unlock_notify..request.save_notify..'\n')
-      end
-    elseif request.type == 'save_run' then 
-      local prefix_profile = (request.profile_num or 1)..''
-      if not love.filesystem.getInfo(prefix_profile) then love.filesystem.createDirectory( prefix_profile ) end
-      prefix_profile = prefix_profile..'/'
-
-      compress_and_save(prefix_profile..'save.jkr', request.save_table)
+    if channels["save_request"] then
+      table.insert(channels["save_request"].items, 'done')
     end
   end)
   if not ok then

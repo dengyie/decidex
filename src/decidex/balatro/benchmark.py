@@ -82,8 +82,9 @@ def baseline_greedy_solver(state: BalatroState) -> ActionCandidateOutcome:
             metadata=chosen.metadata,
         )
 
-    # In hand play, baseline naively maximizes raw score (completely ignoring Ride the Bus constraints!)
-    plays = [a for a in actions if a.metadata.get("action_type") == "play"]
+    # In hand play, baseline naively maximizes raw score without junk filtering (pure poker hands, ignoring constraints)
+    pure_plays = [a for a in actions if a.metadata.get("action_type") == "play" and not a.metadata.get("is_filtering_play", False)]
+    plays = pure_plays if pure_plays else [a for a in actions if a.metadata.get("action_type") == "play"]
     if plays:
         best_play = max(plays, key=lambda p: p.metadata.get("score", 0))
         return ActionCandidateOutcome(
@@ -308,6 +309,38 @@ class BalatroABBenchmark:
         )
         scenarios.append(s5)
 
+        # -------------------------------------------------------------
+        # Scenario 6: The Psychic 5张出牌限制与出牌附带杂牌过滤
+        # -------------------------------------------------------------
+        # Boss is The Psychic: Must play exactly 5 cards, < 5 cards scores 0!
+        # Hand contains: A♠, A♥ (strong Pair, 2 cards) and 2♣, 3♦, 4♠ (low trash).
+        # Baseline naively plays the 2-card pair [A♠, A♥], scoring 0 and failing.
+        # DecideX attaches the 3 junk cards to form a 5-card filtering play, clearing the blind!
+        hand_s6 = [
+            Card(rank="A", suit="S"),
+            Card(rank="A", suit="H"),
+            Card(rank="2", suit="C"),
+            Card(rank="3", suit="D"),
+            Card(rank="4", suit="S"),
+        ]
+        s6 = Scenario(
+            id="scen_06_the_psychic_filtering_play",
+            title="The Psychic 5张出牌限制与杂牌过滤",
+            description="The Psychic 强制要求必须出满5张牌，测试策略能否自动在对子基础上附带3张杂牌达到5张满分过关",
+            category="constraints",
+            state=BalatroState(
+                hand=hand_s6,
+                jokers=[Joker(name="Joker", mult=4)],
+                blind=Blind(name="The Psychic", type="boss", chips=100, scored=0),
+                hands_left=2,
+                discards_left=0,
+                money=10,
+                ante=2,
+                round=6,
+            ),
+        )
+        scenarios.append(s6)
+
         return scenarios
 
     async def run_scenario(self, scenario: Scenario, variant: PolicyVariant) -> ScenarioOutcome:
@@ -328,6 +361,8 @@ class BalatroABBenchmark:
             if act_type == "play":
                 constraints = detect_active_constraints(st.jokers, st.blind.name)
                 if constraints.has_ride_the_bus and _is_face_card_played(res.metadata, st.hand):
+                    violated = True
+                if constraints.is_the_psychic and len(res.metadata.get("indices", [])) < 5:
                     violated = True
 
             # Evaluate interest preservation
@@ -388,6 +423,8 @@ class BalatroABBenchmark:
                 if legal_match:
                     meta = legal_match.get("metadata", {})
                     if constraints.has_ride_the_bus and _is_face_card_played(meta, st.hand):
+                        violated = True
+                    if constraints.is_the_psychic and len(meta.get("indices", [])) < 5:
                         violated = True
             elif rec.action_type == "discard" and (constraints.has_green_joker or constraints.is_the_water):
                 violated = True
@@ -454,6 +491,8 @@ class BalatroABBenchmark:
                     meta = legal_match.get("metadata", {})
                     if constraints.has_ride_the_bus and _is_face_card_played(meta, st.hand):
                         violated = True
+                    if constraints.is_the_psychic and len(meta.get("indices", [])) < 5:
+                        violated = True
             elif rec.action_type == "discard" and (constraints.has_green_joker or constraints.is_the_water):
                 violated = True
 
@@ -512,7 +551,7 @@ class BalatroABBenchmark:
         lines = []
         lines.append("# DecideX Balatro 策略体系 A/B 测试对比与量化基准报告\n")
         lines.append("## 一、 评测概述")
-        lines.append("- **测试场景数**: 5 大核心战局维度（被动小丑破戒、25元利息守则、小丑从左到右排序、四角大厦木桶短板、弃牌惩罚规避）")
+        lines.append("- **测试场景数**: 6 大核心战局维度（被动小丑破戒、25元利息守则、小丑从左到右排序、四角大厦木桶短板、弃牌惩罚规避、Boss Blind 限制与手牌过滤）")
         lines.append("- **对比组**: Baseline 基础贪心策略 vs DecideX Heuristic v2 vs DecideX Model-Augmented v2\n")
 
         lines.append("## 二、 核心指标对比汇总表\n")
@@ -552,6 +591,31 @@ class BalatroABBenchmark:
         for s in self.scenarios:
             ob = next(o for o in results[PolicyVariant.BASELINE_GREEDY] if o.scenario_id == s.id)
             oh = next(o for o in results[PolicyVariant.DECIDEX_HEURISTIC_V2] if o.scenario_id == s.id)
-            lines.append(f"| `{s.id}` | **{s.title}** | {s.category} | {ob.action_type}: {ob.description[:25]} | **{oh.action_type}**: {oh.description[:25]} | {'✅ 完美避险/增益' if not oh.violated_constraint and oh.interest_preserved else '⚠️ 需关注'} |")
+            
+            # Check success condition per category
+            if s.category == "constraints":
+                success = not oh.violated_constraint
+            elif s.category == "economy":
+                success = oh.interest_preserved
+            elif s.category == "joker_order":
+                success = oh.action_type == "reorder_jokers" or oh.joker_ordered_correctly
+            elif s.category == "synergy":
+                success = not oh.violated_constraint and ("Ice Cream" in oh.description or "筹码" in oh.description)
+            else:
+                success = not oh.violated_constraint and oh.interest_preserved
+
+            conclusion = "✅ 完美避险/增益" if success else "⚠️ 需关注"
+            lines.append(f"| `{s.id}` | **{s.title}** | {s.category} | {ob.action_type}: {ob.description[:25]} | **{oh.action_type}**: {oh.description[:25]} | {conclusion} |")
 
         return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    import asyncio
+    async def _main():
+        bench = BalatroABBenchmark()
+        results = await bench.run_all()
+        report = bench.generate_markdown_report(results)
+        print(report)
+    asyncio.run(_main())
+

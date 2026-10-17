@@ -45,8 +45,13 @@ def patch_globals(content: str) -> str:
     """
     Disable F_SOUND_THREAD so audio processing runs on the main thread
     without triggering pthread / thread blocking errors in WASM.
+    Disable F_NO_SAVING and enable F_SKIP_TUTORIAL to eliminate blocking
+    synchronous file deflate serialization and modal tutorial popups in browser.
     """
-    return content.replace("self.F_SOUND_THREAD = true", "self.F_SOUND_THREAD = false")
+    content = content.replace("self.F_SOUND_THREAD = true", "self.F_SOUND_THREAD = false")
+    content = content.replace("self.F_SKIP_TUTORIAL = false", "self.F_SKIP_TUTORIAL = true")
+    content = content.replace("self.F_NO_SAVING = false", "self.F_NO_SAVING = true")
+    return content
 
 
 def patch_main(content: str) -> str:
