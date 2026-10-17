@@ -10810,6 +10810,49 @@ var Love = (function() {
         _emscripten_set_main_loop(func, fps, simulateInfiniteLoop, arg)
       }
 
+      function __calculateTargetCoords(clientX, clientY, target) {
+        var rect = Browser.getBoundingClientRect(target);
+        var targetW = (target && target.width) ? target.width : rect.width;
+        var targetH = (target && target.height) ? target.height : rect.height;
+        if (!rect.width || !rect.height || !targetW || !targetH) {
+          return {
+            x: Math.round(clientX - (rect.left || 0)),
+            y: Math.round(clientY - (rect.top || 0)),
+            scaleX: 1,
+            scaleY: 1
+          };
+        }
+        var imageRatio = targetW / targetH;
+        var elementRatio = rect.width / rect.height;
+        var renderedWidth = rect.width;
+        var renderedHeight = rect.height;
+        var offsetX = 0;
+        var offsetY = 0;
+        if (elementRatio > imageRatio) {
+          renderedHeight = rect.height;
+          renderedWidth = renderedHeight * imageRatio;
+          offsetX = (rect.width - renderedWidth) / 2;
+        } else if (elementRatio < imageRatio) {
+          renderedWidth = rect.width;
+          renderedHeight = renderedWidth / imageRatio;
+          offsetY = (rect.height - renderedHeight) / 2;
+        }
+        var relX = clientX - rect.left - offsetX;
+        var relY = clientY - rect.top - offsetY;
+        var scaleX = targetW / renderedWidth;
+        var scaleY = targetH / renderedHeight;
+        var targetX = Math.round(relX * scaleX);
+        var targetY = Math.round(relY * scaleY);
+        targetX = Math.max(0, Math.min(targetW - 1, targetX));
+        targetY = Math.max(0, Math.min(targetH - 1, targetY));
+        return {
+          x: targetX,
+          y: targetY,
+          scaleX: scaleX,
+          scaleY: scaleY
+        };
+      }
+
       function __fillMouseEventData(eventStruct, e, target) {
         var idx = eventStruct >> 2;
         HEAP32[idx + 0] = e.screenX;
@@ -10822,11 +10865,11 @@ var Love = (function() {
         HEAP32[idx + 7] = e.metaKey;
         HEAP16[idx * 2 + 16] = e.button;
         HEAP16[idx * 2 + 17] = e.buttons;
-        HEAP32[idx + 9] = e["movementX"];
-        HEAP32[idx + 10] = e["movementY"];
-        var rect = Browser.getBoundingClientRect(target);
-        HEAP32[idx + 11] = e.clientX - rect.left;
-        HEAP32[idx + 12] = e.clientY - rect.top
+        var coords = __calculateTargetCoords(e.clientX, e.clientY, target);
+        HEAP32[idx + 9] = Math.round((e["movementX"] || 0) * coords.scaleX);
+        HEAP32[idx + 10] = Math.round((e["movementY"] || 0) * coords.scaleY);
+        HEAP32[idx + 11] = coords.x;
+        HEAP32[idx + 12] = coords.y;
       }
 
       function __registerMouseEventCallback(target, userData, useCapture, callbackfunc, eventTypeId, eventTypeString, targetThread) {
@@ -10984,8 +11027,9 @@ var Love = (function() {
             HEAP32[idx + 6] = t.pageY;
             HEAP32[idx + 7] = t.isChanged;
             HEAP32[idx + 8] = t.onTarget;
-            HEAP32[idx + 9] = t.clientX - targetRect.left;
-            HEAP32[idx + 10] = t.clientY - targetRect.top;
+            var tc = __calculateTargetCoords(t.clientX, t.clientY, target);
+            HEAP32[idx + 9] = tc.x;
+            HEAP32[idx + 10] = tc.y;
             idx += 13;
             if (++numTouches > 31) {
               break

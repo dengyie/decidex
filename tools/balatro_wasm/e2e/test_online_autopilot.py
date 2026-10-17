@@ -3,24 +3,27 @@ from playwright.async_api import async_playwright
 
 async def run():
     print("[Online Test] Launching Chromium to test https://balatro.mangoqwq.com ...", flush=True)
-    import os
-    user_data_dir = os.path.abspath("E:/code/decidex/.browser_cache")
-    os.makedirs(user_data_dir, exist_ok=True)
+    import os, tempfile, shutil
+    user_data_dir = tempfile.mkdtemp(prefix="balatro_pw_")
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(user_data_dir, headless=True)
         page = context.pages[0] if context.pages else await context.new_page()
 
         page.on('console', lambda msg: print(f"[Console] {msg.text}", flush=True) if any(x in msg.text for x in ["[AutoPilot]", "[DecideX] Dispatched", "arbitration"]) else None)
 
+        # Route large 53.7MB balatro.love from local disk to avoid slow public network download
+        local_love_path = os.path.abspath("tools/balatro_wasm/web/balatro.love")
+        await page.route("**/balatro.love*", lambda route: route.fulfill(path=local_love_path))
+
         print("[Online Test] Navigating to https://balatro.mangoqwq.com ...", flush=True)
         await page.goto("https://balatro.mangoqwq.com", wait_until="domcontentloaded", timeout=45000)
 
-        # Clear any old CacheStorage except v20
+        # Clear any old CacheStorage except v22
         await page.evaluate("""async () => {
             if (window.caches) {
                 const keys = await caches.keys();
                 for (const k of keys) {
-                    if (k !== 'balatro-asset-cache-v20') {
+                    if (k !== 'balatro-asset-cache-v22') {
                         await caches.delete(k);
                     }
                 }

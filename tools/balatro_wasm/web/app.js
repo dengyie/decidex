@@ -297,9 +297,9 @@ end
   setInterval(syncSaveFileSystem, 15000);
   window.addEventListener("beforeunload", syncSaveFileSystem);
 
-  const CACHE_NAME = "balatro-asset-cache-v20";
-  const ASSET_URL = "balatro.love.zip?v=20";
-  const WASM_URL = "love.wasm.bin?v=20";
+  const CACHE_NAME = "balatro-asset-cache-v22";
+  const ASSET_URL = "balatro.love.zip?v=22";
+  const WASM_URL = "love.wasm.bin?v=22";
 
   // Cache reset and reload utility
   window.decidexClearCacheAndReload = async function () {
@@ -451,7 +451,7 @@ end
       } else {
         console.log("[DecideX] Loading love.js dynamically...");
         const script = document.createElement("script");
-        script.src = "love.js?v=18";
+        script.src = "love.js?v=22";
         script.onload = () => {
           if (typeof Love === "function") {
             try {
@@ -1707,19 +1707,28 @@ end
           executedAction = true;
           unlockCooldownMs = 350;
         } else if (sname === "BLIND_SELECT") {
-          const now = Date.now();
-          // Debounce repeated blind selection in the same transition window
-          if (now - this.lastBlindSelectTime > 800) {
-            this.lastBlindSelectTime = now;
-            this.updateStatus("自动选择盲注...", true);
-            console.log("[AutoPilot] In BLIND_SELECT, auto selecting blind");
-            window.decidexSelectBlind();
-            executedAction = true;
-            unlockCooldownMs = 400;
+          if (state.can_select_blind) {
+            const now = Date.now();
+            // Debounce repeated blind selection in the same transition window
+            if (now - this.lastBlindSelectTime > 500) {
+              this.lastBlindSelectTime = now;
+              this.updateStatus("自动选择盲注...", true);
+              console.log("[AutoPilot] In BLIND_SELECT, auto selecting blind");
+              window.decidexSelectBlind();
+              executedAction = true;
+              unlockCooldownMs = 400;
+            } else {
+              this.updateStatus("盲注确认中...", true);
+              executedAction = false;
+              unlockCooldownMs = 120;
+            }
           } else {
-            this.updateStatus("盲注确认中...", true);
+            this.updateStatus("等待盲注界面就绪...", false);
             executedAction = false;
-            unlockCooldownMs = 150;
+            unlockCooldownMs = 100;
+            if (window.decidexReEvaluate) {
+              window.decidexReEvaluate();
+            }
           }
         } else if (sname === "SELECTING_HAND") {
           if (!state.hand || state.hand.length === 0) {
@@ -1749,11 +1758,17 @@ end
             }
           }
         } else if (sname === "ROUND_EVAL") {
-          this.updateStatus("通关结算中...", true);
-          console.log("[AutoPilot] Auto cash out");
-          window.decidexCashOut();
-          executedAction = true;
-          unlockCooldownMs = 350;
+          if (state.can_cash_out !== false) {
+            this.updateStatus("通关结算中...", true);
+            console.log("[AutoPilot] Auto cash out");
+            window.decidexCashOut();
+            executedAction = true;
+            unlockCooldownMs = 350;
+          } else {
+            this.updateStatus("等待结算就绪...", false);
+            executedAction = false;
+            unlockCooldownMs = 100;
+          }
         } else if (sname === "SHOP") {
           if (state.can_toggle_shop !== false) {
             const shopAdv = findBestShopPurchases(state);

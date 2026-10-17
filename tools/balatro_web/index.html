@@ -1359,12 +1359,12 @@ function gameCoords(ev) {
   }
   const relX = ev.clientX - rect.left - offsetX;
   const relY = ev.clientY - rect.top - offsetY;
-  const outside = relX < -1 || relX > renderW + 1 || relY < -1 || relY > renderH + 1;
-  const clampedX = Math.max(0, Math.min(renderW, relX));
-  const clampedY = Math.max(0, Math.min(renderH, relY));
+  const outside = relX < 0 || relX >= renderW || relY < 0 || relY >= renderH;
+  const clampedX = Math.max(0, Math.min(renderW - 1e-4, relX));
+  const clampedY = Math.max(0, Math.min(renderH - 1e-4, relY));
   return {
-    x: Math.round(clampedX * (GAME_W - 1) / renderW),
-    y: Math.round(clampedY * (GAME_H - 1) / renderH),
+    x: Math.max(0, Math.min(GAME_W - 1, Math.floor(clampedX * GAME_W / renderW))),
+    y: Math.max(0, Math.min(GAME_H - 1, Math.floor(clampedY * GAME_H / renderH))),
     outside
   };
 }
