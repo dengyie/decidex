@@ -744,6 +744,12 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
 
             has_baron = any(j.name == "Baron" for j in state.jokers)
             has_shoot_moon = any(j.name == "Shoot the Moon" for j in state.jokers)
+            has_half_joker = "Half Joker" in active_joker_names
+
+            # Half Joker Protection: strictly penalize dumping junk cards if it pushes hand size above 3!
+            if has_half_joker and not constraints.is_the_psychic:
+                if len(cards) > 3 and len(scoring) <= 3:
+                    filtering_mod *= 0.001  # Hard veto: dumping junk cancels Half Joker (+20 Mult)
 
             if constraints.is_the_psychic:
                 filtering_mod += 0.25 * len(junk)  # Strongly encourage padding to 5 cards under The Psychic
@@ -830,9 +836,12 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
                     elif in_straight_connector:
                         filtering_mod *= 0.05
                     elif crank in ("2", "3", "4", "5", "6"):
-                        filtering_mod += 0.05  # Valid isolated low-rank junk
+                        filtering_mod *= 1.05  # Valid isolated low-rank junk
                     else:
                         filtering_mod *= 0.20  # 7-10 mid cards avoided unless necessary
+
+            if has_half_joker and not constraints.is_the_psychic and len(cards) > 3 and len(scoring) <= 3:
+                filtering_mod *= 0.001  # Definitive veto: dumping junk broke Half Joker (+20 Mult)
 
         heuristic = base_h * safety.penalty_multiplier * safety.bonus_multiplier * filtering_mod
         if safety.is_fatal_violation:

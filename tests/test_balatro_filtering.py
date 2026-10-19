@@ -531,4 +531,40 @@ def test_straight_connector_protection_from_junk_dumping():
     assert dump_isolated_2.heuristic_score > dump_connector_6.heuristic_score * 1.5
 
 
+def test_half_joker_protection_from_junk_dumping():
+    """Verify that Half Joker (+20 Mult if hand <= 3) strictly vetoes padding with junk beyond 3 cards."""
+    hand = [
+        _card("10", "S"),
+        _card("10", "D"),
+        _card("2", "C"),
+        _card("3", "H"),
+        _card("4", "S"),
+    ]
+    st = BalatroState(
+        hand=hand,
+        blind=Blind(name="Big Blind", chips=2000, scored=0),
+        jokers=[Joker(name="Half Joker")],
+        hands_left=2,
+        discards_left=0,
+    )
+    actions = enumerate_legal_actions(st)
+    plays = [a for a in actions if a.metadata.get("action_type") == "play"]
+
+    # 2-card pure play (triggers Half Joker)
+    pure_pair_play = next(
+        p for p in plays
+        if len(p.metadata["cards"]) == 2 and "10♠" in p.metadata["cards"] and "10♦" in p.metadata["cards"]
+    )
+
+    # 4-card or 5-card play with junk dumped (breaks Half Joker)
+    padded_plays = [
+        p for p in plays
+        if len(p.metadata["cards"]) > 3 and "10♠" in p.metadata["cards"] and "10♦" in p.metadata["cards"]
+    ]
+    assert len(padded_plays) > 0
+    for p in padded_plays:
+        assert pure_pair_play.heuristic_score > p.heuristic_score * 50.0
+
+
+
 

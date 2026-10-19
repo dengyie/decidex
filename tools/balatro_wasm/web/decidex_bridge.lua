@@ -629,12 +629,16 @@ local function build_state_json(actual)
       if G.STATE == v then state_str = k break end
     end
   end
+  if G.GAME and G.GAME.won then
+    state_str = "GAME_WON"
+  end
   parts[#parts + 1] = '"state_name":' .. jstr(state_str)
   parts[#parts + 1] = '"actual":' .. (actual and jmap(actual) or "null")
 
   local now = (love.timer and love.timer.getTime()) or os.clock()
   local eval_elapsed = _G._round_eval_enter_time and (now - _G._round_eval_enter_time) or 0
-  local can_cash_out = (find_cash_out_button() ~= nil) or (G.STATE == G.STATES.ROUND_EVAL and eval_elapsed >= 1.2)
+  local has_cash_btn = (find_cash_out_button() ~= nil)
+  local can_cash_out = has_cash_btn or (G.STATE == G.STATES.ROUND_EVAL and eval_elapsed >= 5.0)
   parts[#parts + 1] = '"can_cash_out":' .. (can_cash_out and "true" or "false")
 
   local can_toggle_shop = false
@@ -803,17 +807,17 @@ local function check_and_emit_state()
       G.cashing_out = false
       _G._round_eval_enter_time = now
     end
-    if G.cashing_out and _G._last_cash_out_time and (now - _G._last_cash_out_time > 1.5) then
+    if G.cashing_out and _G._last_cash_out_time and (now - _G._last_cash_out_time > 1.8) then
       G.cashing_out = false
     end
     if not G.round_eval or G.round_eval.REMOVED then
       if now - _G._round_eval_enter_time > 1.0 then
         force_advance_to_shop()
       end
-    elseif now - _G._round_eval_enter_time > 3.0 then
+    elseif now - _G._round_eval_enter_time > 6.0 then
       force_advance_to_shop()
     end
-    local can_cash = (find_cash_out_button() ~= nil) or (_G._round_eval_enter_time and (now - _G._round_eval_enter_time > 1.2))
+    local can_cash = (find_cash_out_button() ~= nil) or (_G._round_eval_enter_time and (now - _G._round_eval_enter_time > 5.0))
     local eval_sig = can_cash and "1" or "0"
     if eval_sig ~= LAST_EVAL_SIG or state_changed then
       LAST_EVAL_SIG = eval_sig
@@ -1115,23 +1119,37 @@ local function decidex_execute_inner(action, args)
     if G.STATES and G.STATE ~= G.STATES.ROUND_EVAL and G.STATE ~= G.STATES.HAND_PLAYED then
       return false, "not in ROUND_EVAL"
     end
+    if G.GAME and G.GAME.won then
+      return false, "game already won"
+    end
     local now = (love.timer and love.timer.getTime()) or os.clock()
-    if G.cashing_out and _G._last_cash_out_time and (now - _G._last_cash_out_time > 1.5) then
+    if G.cashing_out and _G._last_cash_out_time and (now - _G._last_cash_out_time > 1.8) then
       G.cashing_out = false
     end
-    if _G._last_cash_out_time and (now - _G._last_cash_out_time < 0.3) then
+    if _G._last_cash_out_time and (now - _G._last_cash_out_time < 0.4) then
       return false, "cash_out debounced"
     end
     _G._last_cash_out_time = now
-    local btn = find_cash_out_button() or { config = { button = 'cash_out' } }
-    if G.FUNCS and G.FUNCS.cash_out and G.round_eval and not G.round_eval.REMOVED then
+    local btn = find_cash_out_button()
+    if btn and G.FUNCS and G.FUNCS.cash_out and G.round_eval and not G.round_eval.REMOVED then
       G.cashing_out = true
       local ok, err = pcall(G.FUNCS.cash_out, btn)
       if ok then return true, "cashed out via G.FUNCS.cash_out" end
     end
-    -- Fallback: force advance to shop immediately
-    force_advance_to_shop()
-    return true, "force advanced to shop"
+    local eval_elapsed = _G._round_eval_enter_time and (now - _G._round_eval_enter_time) or 0
+    if eval_elapsed > 4.5 or (not G.round_eval or G.round_eval.REMOVED) then
+      force_advance_to_shop()
+      return true, "force advanced to shop after timeout"
+    end
+    return false, "cash_out button not ready yet"
+  end
+
+  if action == "continue_endless" then
+    if G.FUNCS and G.FUNCS.exit_overlay_menu then
+      local ok, err = pcall(G.FUNCS.exit_overlay_menu)
+      return ok, tostring(err or "continued endless")
+    end
+    return false, "no exit_overlay_menu func"
   end
 
   if action == "skip_booster" then

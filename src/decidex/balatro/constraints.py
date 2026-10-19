@@ -253,6 +253,7 @@ class ActiveConstraints:
     has_green_joker: bool = False
     has_square_joker: bool = False
     has_banner: bool = False
+    has_half_joker: bool = False
 
     # Boss Blind constraints
     boss_name: str = ""
@@ -281,6 +282,7 @@ class ActiveConstraints:
             "has_green_joker": self.has_green_joker,
             "has_square_joker": self.has_square_joker,
             "has_banner": self.has_banner,
+            "has_half_joker": self.has_half_joker,
             "boss_name": self.boss_name,
             "boss_rule": self.boss_rule.to_dict() if self.boss_rule else None,
             "is_the_psychic": self.is_the_psychic,
@@ -315,6 +317,7 @@ def detect_active_constraints(
     has_green = "Green Joker" in jnames
     has_square = "Square Joker" in jnames
     has_banner = "Banner" in jnames
+    has_half = "Half Joker" in jnames
 
     boss_rule = BOSS_CATALOG.get(blind_name)
     is_psychic = boss_rule.requires_exact_5_cards if boss_rule else False
@@ -333,6 +336,8 @@ def detect_active_constraints(
         warnings.append("🚨 [Ride the Bus] 严禁打出计分的人头牌 (J/Q/K)，否则倍率归零！")
     if has_green:
         warnings.append("⚠️ [Green Joker] 每次弃牌 -1 Mult；优先出杂牌单打充当伪弃牌。")
+    if has_half:
+        warnings.append("🃏 [Half Joker] 打出手牌必须 ≤ 3 张才能触发 +20 Mult！严禁附带杂牌超过 3 张！")
     if is_psychic:
         warnings.append("🔮 [The Psychic] 必须打满 5 张牌！少于 5 张判定为 0 分，务必附带杂牌打出。")
     if is_needle:
@@ -357,6 +362,7 @@ def detect_active_constraints(
         has_green_joker=has_green,
         has_square_joker=has_square,
         has_banner=has_banner,
+        has_half_joker=has_half,
         boss_name=blind_name,
         boss_rule=boss_rule,
         is_the_psychic=is_psychic,

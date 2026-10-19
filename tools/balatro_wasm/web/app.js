@@ -1579,6 +1579,18 @@ end
       return basePlay;
     }
 
+    // 3. Half Joker gives +20 Mult ONLY if hand size <= 3 cards!
+    const activeJokers = (state.jokers || []).filter(j => !j.debuff);
+    const hasHalfJoker = activeJokers.some(j => j.name === "Half Joker");
+    const isPsychic = !!constraints.requires5Cards;
+
+    if (hasHalfJoker && !isPsychic) {
+      // If base play is already 3 cards (e.g. Three of a Kind), never add junk cards!
+      if (basePlay.cards.length >= 3) {
+        return basePlay;
+      }
+    }
+
     const blindGoal = Number(state.blind?.chips || 300);
     const scored = Number(state.blind?.scored || 0);
     const need = Math.max(0, blindGoal - scored);
@@ -1591,7 +1603,6 @@ end
     // 2) Square Joker: target exactly 4 cards if currently < 4 to gain permanent +4 chips
     // 3) Zero discards left AND hand does not beat blind: cycle truly useless isolated junk
     // In all other cases (normal plays with discards left or already winning): keep hand pure!
-    const isPsychic = !!constraints.requires5Cards;
     const isSquareJoker = !!constraints.hasSquareJoker && basePlay.cards.length < 4;
     const isZeroDiscards = (discardsLeft === 0 && basePlay.totalScore < need);
 
@@ -1600,6 +1611,9 @@ end
     }
 
     let targetCount = isPsychic ? 5 : (isSquareJoker ? 4 : 5);
+    if (hasHalfJoker && !isPsychic) {
+      targetCount = Math.min(targetCount, 3);
+    }
 
     // If play already beats the blind AND not The Psychic AND not Square Joker:
     // Never dump extra cards.
@@ -2572,6 +2586,33 @@ end
       return;
     }
 
+    // Phase: GAME_WON / Victory
+    if (state.state_name === "GAME_WON" || state.won) {
+      container.innerHTML = `
+        <div class="rec-placeholder">
+          <div style="font-weight: bold; margin-bottom: 6px; color: #4ade80; font-size: 15px;">🏆 恭喜通关！胜利击败 Ante 8 终极 Boss</div>
+          <div style="font-size: 12px; margin-bottom: 12px; color: #94a3b8;">本局已达成通关胜利！可继续无尽模式挑战极限高分或重开新对局</div>
+          <div style="display:flex; gap: 8px; justify-content: center;">
+            <button class="btn-act btn-play" style="padding: 7px 16px;" onclick="window.decidexContinueEndless()">🚀 无尽模式 (Endless)</button>
+            <button class="btn-act btn-discard" style="padding: 7px 16px;" onclick="window.decidexStartRun()">🔄 重新开启新局</button>
+          </div>
+        </div>`;
+      if (candList) candList.innerHTML = `<div style="font-size:11px;color:#888;">通关胜利！</div>`;
+      return;
+    }
+
+    // Phase: GAME_OVER
+    if (state.state_name === "GAME_OVER") {
+      container.innerHTML = `
+        <div class="rec-placeholder">
+          <div style="font-weight: bold; margin-bottom: 6px; color: #ef4444; font-size: 15px;">💀 游戏结束 (Game Over)</div>
+          <div style="font-size: 12px; margin-bottom: 12px; color: #94a3b8;">到达 Ante ${state.ante || 1} · 回合 ${state.round || 1} · 资金 $${state.money || 0}</div>
+          <button class="btn-act btn-play" style="padding: 8px 20px; margin: 4px auto;" onclick="window.decidexStartRun()">🔄 重新开始新一局</button>
+        </div>`;
+      if (candList) candList.innerHTML = `<div style="font-size:11px;color:#888;">游戏已结算，点击上方按钮开启全新对局</div>`;
+      return;
+    }
+
     // Phase: ROUND_EVAL
     if (state.state_name === "ROUND_EVAL") {
       container.innerHTML = `
@@ -2935,6 +2976,12 @@ end
     if (!window.Module || !window.Module.FS) return unavailableAction("start_run");
     console.log("[AutoPilot] Dispatched start_run action");
     return dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("start_run") end', "start_run");
+  };
+
+  window.decidexContinueEndless = function () {
+    if (!window.Module || !window.Module.FS) return unavailableAction("continue_endless");
+    console.log("[AutoPilot] Dispatched continue_endless action");
+    return dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("continue_endless") end', "continue_endless");
   };
 
 
@@ -3355,11 +3402,11 @@ end
           if (!this._roundEvalEnterTime) this._roundEvalEnterTime = now;
           const timeInEval = now - this._roundEvalEnterTime;
 
-          if (now - (this.lastCashOutTime || 0) < 1000) {
+          if (now - (this.lastCashOutTime || 0) < 1200) {
             this.updateStatus("正在进入商店...", true);
             executedAction = false;
-            unlockCooldownMs = 250;
-          } else if (state.can_cash_out || timeInEval > 1500) {
+            unlockCooldownMs = 300;
+          } else if (state.can_cash_out || timeInEval > 5000) {
             this.lastCashOutTime = now;
             this._lastProgressTimestamp = now;
             this.updateStatus("通关结算，前往商店...", true);
@@ -3368,9 +3415,9 @@ end
             executedAction = true;
             unlockCooldownMs = 800;
           } else {
-            this.updateStatus("清算通关奖励中...", true);
+            this.updateStatus("清算通关奖励与利息中...", true);
             executedAction = false;
-            unlockCooldownMs = 150;
+            unlockCooldownMs = 300;
           }
         } else if (sname === "SHOP") {
           this.lastCashOutTime = 0;
@@ -3571,6 +3618,10 @@ end
             executedAction = true;
             unlockCooldownMs = 400;
           }
+        } else if (sname === "GAME_WON" || state.won) {
+          this.updateStatus("🎉 达成通关胜利！", false);
+          this.toggle(false);
+          executedAction = true;
         } else if (sname === "GAME_OVER") {
           this.updateStatus("游戏结束", false);
           this.toggle(false);
