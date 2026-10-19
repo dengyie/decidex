@@ -82,17 +82,9 @@
 
   let initialSyncState = "pending";
   let initialSyncStarted = false;
-  let initialSyncDependencyAdded = false;
   function onInitSuccess() {
-    if (isLoveRunning || initialSyncState === "failed") return;
-    if (initialSyncState !== "ready") {
-      statusText.textContent = initialSyncState === "failed"
-        ? "存档同步失败，请点击重试"
-        : "正在同步本地存档，请稍候...";
-      return;
-    }
+    if (isLoveRunning || initialSyncState !== "ready") return;
     isLoveRunning = true;
-    initialSyncState = "ready";
     splashOverlay.classList.add("hidden");
     console.log("[DecideX] Balatro initialized successfully in love.js WASM.");
     syncSaveFileSystem();
@@ -129,9 +121,7 @@
     printErr: function (text) {
       console.warn("[LÖVE stderr]", text);
     },
-    prerun: setupFileSystem,
     preRun: [setupFileSystem],
-    postrun: onInitSuccess,
     postRun: [onInitSuccess]
   };
 
@@ -301,62 +291,66 @@ end
       // Ignored if already exists
     }
 
-    // Timeout guard for FS.syncfs to prevent IDBFS hanging indefinitely
-    if (FS && FS.syncfs && !FS._syncfs_guarded) {
-      FS._syncfs_guarded = true;
+    // Wrap the runtime's single initial sync so the UI observes its completion.
+    // love.js starts FS.syncfs(true) after preRun; starting another sync here races
+    // with that operation and can leave the UI waiting on a stale pending state.
+    if (FS && FS.syncfs && !FS._decidex_syncfs_wrapped) {
+      FS._decidex_syncfs_wrapped = true;
       const originalSyncfs = FS.syncfs;
       FS.syncfs = function (populate, callback) {
         let done = false;
+        const timeoutMs = populate ? 15000 : 5000;
         const timer = setTimeout(() => {
-          if (!done) {
-            done = true;
-            console.error("[DecideX] FS.syncfs timed out after 1000ms.");
-            if (callback) callback(new Error("FS.syncfs timed out after 1000ms"));
+          if (done) return;
+          done = true;
+          const error = new Error(`FS.syncfs timed out after ${timeoutMs}ms`);
+          console.error("[DecideX] FS.syncfs failed:", error);
+          if (populate) {
+            initialSyncState = "failed";
+            initialSyncStarted = false;
+            btnLaunch.style.display = "block";
+            statusText.textContent = "存档同步失败，请点击重试";
           }
-        }, 1000);
+          if (callback) callback(error);
+        }, timeoutMs);
         try {
           originalSyncfs.call(FS, populate, function (err) {
             clearTimeout(timer);
-            if (!done) {
-              done = true;
-              if (callback) callback(err);
+            if (done) return;
+            done = true;
+            if (populate) {
+              initialSyncStarted = false;
+              if (err) {
+                initialSyncState = "failed";
+                btnLaunch.style.display = "block";
+                statusText.textContent = "存档同步失败，请点击重试";
+                console.error("[DecideX] Initial IDBFS sync failed:", err);
+              } else {
+                initialSyncState = "ready";
+                console.log("[DecideX] Initial IDBFS sync completed.");
+              }
             }
+            if (callback) callback(err);
           });
         } catch (err) {
           clearTimeout(timer);
-          if (!done) {
-            done = true;
-            if (callback) callback(err);
+          if (done) return;
+          done = true;
+          if (populate) {
+            initialSyncState = "failed";
+            initialSyncStarted = false;
+            btnLaunch.style.display = "block";
+            statusText.textContent = "存档同步失败，请点击重试";
+            console.error("[DecideX] Initial IDBFS sync failed:", err);
           }
+          if (callback) callback(err);
         }
       };
-    }
-
-    if (!initialSyncStarted && FS && FS.syncfs && window.Module.addRunDependency) {
-      initialSyncStarted = true;
-      initialSyncState = "pending";
-      window.Module.addRunDependency("decidex-idbfs-sync");
-      initialSyncDependencyAdded = true;
-      FS.syncfs(true, (err) => {
-        if (err) {
-          initialSyncState = "failed";
-          initialSyncStarted = false;
-          btnLaunch.style.display = "block";
-          statusText.textContent = "存档同步失败，请点击重试";
-          console.error("[DecideX] Initial IDBFS sync failed:", err);
-          return;
-        }
-        initialSyncState = "ready";
-        if (initialSyncDependencyAdded) {
-          initialSyncDependencyAdded = false;
-          window.Module.removeRunDependency("decidex-idbfs-sync");
-        }
-      });
     }
   }
 
   function syncSaveFileSystem() {
-    const FS = window.Module.FS;
+    const FS = window.Module && window.Module.FS;
     if (FS && FS.syncfs) {
       FS.syncfs(false, function (err) {
         if (err) console.warn("[DecideX] IDBFS write sync error:", err);
@@ -372,6 +366,7 @@ end
     }
     initialSyncState = "pending";
     initialSyncStarted = true;
+    btnLaunch.style.display = "none";
     statusText.textContent = "正在同步本地存档，请稍候...";
     FS.syncfs(true, function (err) {
       if (err) {
@@ -383,10 +378,7 @@ end
         return;
       }
       initialSyncState = "ready";
-      if (initialSyncDependencyAdded) {
-        initialSyncDependencyAdded = false;
-        window.Module.removeRunDependency("decidex-idbfs-sync");
-      }
+      initialSyncStarted = false;
       onInitSuccess();
     });
   }
@@ -397,6 +389,7 @@ end
     } catch (err) {
       initialSyncState = "failed";
       initialSyncStarted = false;
+      btnLaunch.style.display = "block";
       statusText.textContent = "存档同步不可用，请重试";
       console.error("[DecideX] Initial IDBFS sync retry failed:", err);
     }
@@ -407,13 +400,13 @@ end
   window.addEventListener("beforeunload", syncSaveFileSystem);
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
-  // Cache key: balatro-asset-cache-v54 / decidex-balatro-core-v54
-  const ASSET_VERSION = "v54";
+  // Cache key: balatro-asset-cache-v56 / decidex-balatro-core-v56
+  const ASSET_VERSION = "v56";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_" + ASSET_VERSION;
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=54";
-  const ASSET_WASM_URL = "love.wasm.bin?v=54";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=56";
+  const ASSET_WASM_URL = "love.wasm.bin?v=56";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -699,7 +692,7 @@ end
       } else {
         console.log("[DecideX] Loading love.js dynamically...");
         const script = document.createElement("script");
-        script.src = "love.js?v=22";
+        script.src = "love.js?v=56";
         script.onload = () => {
           if (typeof Love === "function") {
             try {
@@ -732,17 +725,16 @@ end
         clearInterval(bootWatchdog);
         return;
       }
-      if (window.Module && window.Module.asm && (window._lastDecidexState || bootElapsed >= 2000)) {
+      if (window.Module && window.Module.asm && (window._lastDecidexState || bootElapsed >= 1500)) {
         console.log("[DecideX] Watchdog: WASM runtime ready, revealing game canvas.");
         clearInterval(bootWatchdog);
         onInitSuccess();
-      } else if (bootElapsed >= 8000) {
+      } else if (bootElapsed >= 6000) {
         clearInterval(bootWatchdog);
-        statusText.innerHTML = `
-          <span style="color:#f59e0b;">启动时间稍长，可能由于设备显卡编译着色器较慢</span><br>
-          <button class="btn-util" style="margin-top:10px;padding:6px 14px;background:#3b82f6;color:#fff;border:none;border-radius:4px;cursor:pointer;" onclick="onInitSuccess()">直接进入游戏画布</button>
-          <button class="btn-util" style="margin-top:10px;margin-left:8px;padding:6px 14px;background:#ef4444;color:#fff;border:none;border-radius:4px;cursor:pointer;" onclick="decidexClearCacheAndReload()">清除缓存并刷新</button>
-        `;
+        console.warn("[DecideX] Runtime startup is taking longer than expected.");
+        statusText.textContent = initialSyncState === "pending"
+          ? "正在同步本地存档，请稍候..."
+          : "游戏仍在启动，请稍候...";
       }
     }, 250);
   });

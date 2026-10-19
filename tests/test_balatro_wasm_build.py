@@ -387,6 +387,19 @@ def test_frontend_arbitration_and_autopilot():
     assert "executePlayAction" in js_content
     assert "executeDiscardAction" in js_content
 
+    # IDBFS initialization must observe love.js's single runtime sync rather
+    # than depending on unavailable Emscripten dependency hooks or racing it.
+    assert "FS._decidex_syncfs_wrapped" in js_content
+    assert "FS.syncfs timed out after ${timeoutMs}ms" in js_content
+    assert "window.Module.addRunDependency" not in js_content
+    assert "non-fatal" not in js_content
+    assert "if (isLoveRunning || initialSyncState !== \"ready\") return;" in js_content
+    assert "preRun: [setupFileSystem]" in js_content
+    assert "postRun: [onInitSuccess]" in js_content
+    assert 'const ASSET_VERSION = "v56";' in js_content
+    assert 'balatro.love.zip?v=56' in js_content
+    assert 'love.wasm.bin?v=56' in js_content
+
     index_html = WEB_DIR / "index.html"
     html_content = index_html.read_text(encoding="utf-8")
     assert "autopilot-toggle" in html_content
