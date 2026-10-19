@@ -1290,8 +1290,18 @@ end
             evalRes.junkCards = chosen.filter(c => !scoring.includes(c));
 
             // Hard veto in candidate generation: NEVER attach good cards as unscored junk!
-            const hasBaron = (state.jokers || []).some(j => j.name === "Baron");
-            const hasShootMoon = (state.jokers || []).some(j => j.name === "Shoot the Moon");
+            const activeJokerNames = new Set((state.jokers || []).filter(j => !j.debuff).map(j => j.name));
+            const hasEvenJoker = activeJokerNames.has("Even Steven");
+            const hasOddJoker = activeJokerNames.has("Odd Todd");
+            const hasFibJoker = activeJokerNames.has("Fibonacci");
+            const hasHackJoker = activeJokerNames.has("Hack");
+            const hasWalkie = activeJokerNames.has("Walkie Talkie");
+            const hasScholar = activeJokerNames.has("Scholar");
+            const hasFaceJoker = ["Scary Face", "Smiley Face", "Photograph", "Sock and Buskin", "Triboulet", "Business Card", "Pareidolia"].some(n => activeJokerNames.has(n));
+            const hasBaron = activeJokerNames.has("Baron");
+            const hasShootMoon = activeJokerNames.has("Shoot the Moon");
+            const remHand = hand.filter(c => !chosen.includes(c));
+            const remStraightRanks = new Set(remHand.filter(x => !["steel", "gold"].includes(x.enhancement)).map(x => RANK_NUM[x.rank] || 0));
             let hasBadJunk = false;
 
             for (const jc of evalRes.junkCards) {
@@ -1308,6 +1318,45 @@ end
               }
               // Veto enhancements, editions, seals
               if (jc.enhancement || jc.edition || jc.seal) {
+                hasBadJunk = true;
+                break;
+              }
+              // Veto cards that trigger active jokers
+              const triggersJoker = (
+                (hasEvenJoker && ["2", "4", "6", "8", "10"].includes(jc.rank)) ||
+                (hasOddJoker && ["A", "3", "5", "7", "9"].includes(jc.rank)) ||
+                (hasFibJoker && ["A", "2", "3", "5", "8"].includes(jc.rank)) ||
+                (hasHackJoker && ["2", "3", "4", "5"].includes(jc.rank)) ||
+                (hasWalkie && ["10", "4"].includes(jc.rank)) ||
+                (hasScholar && jc.rank === "A") ||
+                (hasFaceJoker && ["J", "Q", "K"].includes(jc.rank)) ||
+                ((activeJokerNames.has("Greedy Joker") || activeJokerNames.has("Rough Gem")) && jc.suit === "D") ||
+                ((activeJokerNames.has("Lusty Joker") || activeJokerNames.has("Bloodstone")) && jc.suit === "H") ||
+                ((activeJokerNames.has("Wrathful Joker") || activeJokerNames.has("Arrowhead") || activeJokerNames.has("Onyx Agate")) && jc.suit === "S") ||
+                ((activeJokerNames.has("Gluttonous Joker") || activeJokerNames.has("Rough Gem")) && jc.suit === "C")
+              );
+              if (triggersJoker) {
+                hasBadJunk = true;
+                break;
+              }
+              // Veto straight connectors
+              const cVal = RANK_NUM[jc.rank] || 0;
+              const inStraightConnector = cVal > 0 && (
+                (remStraightRanks.has(cVal - 1) && remStraightRanks.has(cVal + 1)) ||
+                (remStraightRanks.size >= 3 && (
+                  (remStraightRanks.has(cVal - 1) && remStraightRanks.has(cVal - 2)) ||
+                  (remStraightRanks.has(cVal + 1) && remStraightRanks.has(cVal + 2))
+                ))
+              );
+              if (inStraightConnector) {
+                hasBadJunk = true;
+                break;
+              }
+              if (hasBaron && jc.rank === "K") {
+                hasBadJunk = true;
+                break;
+              }
+              if (hasShootMoon && jc.rank === "Q") {
                 hasBadJunk = true;
                 break;
               }
@@ -1328,10 +1377,12 @@ end
             if (hasBadJunk) {
               // Heavily penalize so pure hand or clean plays win
               evalRes.totalScore = Math.floor(evalRes.totalScore * 0.001);
-              evalRes.violation = "附带废牌包含高价值人头牌/对子/同花组件";
+              evalRes.violation = "附带废牌包含高价值人头牌/小丑协同资产/顺子连张/对子/同花组件";
             } else if (!constraints.requires5Cards && !(constraints.hasSquareJoker && chosen.length === 4)) {
               // Even with clean low junk, prefer pure hand unless zero discards and cannot clear
-              if (Number(state.discards_left || 0) > 0 || evalRes.totalScore >= Number(state.blind?.chips || 300)) {
+              if (Number(state.discards_left || 0) > 0) {
+                evalRes.totalScore = Math.floor(evalRes.totalScore * Math.pow(0.15, junkCount));
+              } else if (evalRes.totalScore >= Number(state.blind?.chips || 300)) {
                 evalRes.totalScore = Math.floor(evalRes.totalScore * 0.95);
               }
             }
@@ -1567,6 +1618,18 @@ end
       remRankCounts[c.rank] = (remRankCounts[c.rank] || 0) + 1;
     }
 
+    const activeJokerNames = new Set((state.jokers || []).filter(j => !j.debuff).map(j => j.name));
+    const hasEvenJoker = activeJokerNames.has("Even Steven");
+    const hasOddJoker = activeJokerNames.has("Odd Todd");
+    const hasFibJoker = activeJokerNames.has("Fibonacci");
+    const hasHackJoker = activeJokerNames.has("Hack");
+    const hasWalkie = activeJokerNames.has("Walkie Talkie");
+    const hasScholar = activeJokerNames.has("Scholar");
+    const hasFaceJoker = ["Scary Face", "Smiley Face", "Photograph", "Sock and Buskin", "Triboulet", "Business Card", "Pareidolia"].some(n => activeJokerNames.has(n));
+    const hasBaron = activeJokerNames.has("Baron");
+    const hasShootMoon = activeJokerNames.has("Shoot the Moon");
+    const handRanksSet = new Set((state.hand || []).map(x => RANK_NUM[x.rank] || 0));
+
     // Score candidates by dump desirability
     function getDumpDesirability(c) {
       // 1. Hard veto: Enhancements (Glass, Steel, Gold, Lucky, Mult, Bonus, Stone)
@@ -1601,18 +1664,54 @@ end
         return isPsychic ? -500 : -9999;
       }
 
-      // 7. Protect Pairs/Trips in remaining hand!
+      // 7. Hard veto: Cards that trigger active scoring Jokers
+      const triggersJoker = (
+        (hasEvenJoker && ["2", "4", "6", "8", "10"].includes(c.rank)) ||
+        (hasOddJoker && ["A", "3", "5", "7", "9"].includes(c.rank)) ||
+        (hasFibJoker && ["A", "2", "3", "5", "8"].includes(c.rank)) ||
+        (hasHackJoker && ["2", "3", "4", "5"].includes(c.rank)) ||
+        (hasWalkie && ["10", "4"].includes(c.rank)) ||
+        (hasScholar && c.rank === "A") ||
+        (hasFaceJoker && ["J", "Q", "K"].includes(c.rank)) ||
+        ((activeJokerNames.has("Greedy Joker") || activeJokerNames.has("Rough Gem")) && c.suit === "D") ||
+        ((activeJokerNames.has("Lusty Joker") || activeJokerNames.has("Bloodstone")) && c.suit === "H") ||
+        ((activeJokerNames.has("Wrathful Joker") || activeJokerNames.has("Arrowhead") || activeJokerNames.has("Onyx Agate")) && c.suit === "S") ||
+        ((activeJokerNames.has("Gluttonous Joker") || activeJokerNames.has("Rough Gem")) && c.suit === "C")
+      );
+      if (triggersJoker) {
+        return isPsychic ? -600 : -9999;
+      }
+
+      // 8. Hard veto: Straight connectors
+      const remAvailable = available.filter(x => x !== c);
+      const remStraightRanks = new Set(remAvailable.filter(x => !["steel", "gold"].includes(x.enhancement)).map(x => RANK_NUM[x.rank] || 0));
+      const cVal = RANK_NUM[c.rank] || 0;
+      const inStraightConnector = cVal > 0 && (
+        (remStraightRanks.has(cVal - 1) && remStraightRanks.has(cVal + 1)) ||
+        (remStraightRanks.size >= 3 && (
+          (remStraightRanks.has(cVal - 1) && remStraightRanks.has(cVal - 2)) ||
+          (remStraightRanks.has(cVal + 1) && remStraightRanks.has(cVal + 2))
+        ))
+      );
+      if (inStraightConnector) {
+        return isPsychic ? -400 : -9999;
+      }
+
+      if (hasBaron && c.rank === "K") return -9999;
+      if (hasShootMoon && c.rank === "Q") return -9999;
+
+      // 9. Protect Pairs/Trips in remaining hand!
       if (remRankCounts[c.rank] >= 2) {
         return isPsychic ? -300 : -9999;
       }
 
-      // 8. Protect Flush outs: if total hand has 3+ cards of this suit, preserve them!
+      // 10. Protect Flush outs: if total hand has 3+ cards of this suit, preserve them!
       const fullHandSuitCount = (state.hand || []).filter(x => x.suit === c.suit).length;
       if (fullHandSuitCount >= 3) {
         return isPsychic ? -200 : -9999;
       }
 
-      // 9. Score isolated low-rank cards (2, 3, 4, 5, 6, 7, 8):
+      // 11. Score isolated low-rank cards (2, 3, 4, 5, 6, 7, 8):
       const rankVal = RANK_VALUES[c.rank] || 5;
       if (rankVal <= 6) {
         // Pure low-rank isolated white cards (2, 3, 4, 5, 6)

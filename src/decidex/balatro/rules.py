@@ -28,10 +28,11 @@ from .economy import calculate_economy_status, evaluate_purchase_budget
 from .joker_order import compute_optimal_joker_order, estimate_ordering_gain
 from .poker import enumerate_selections, get_scoring_cards
 from .scoring import simulate_play
-from .state import BalatroState, Card, Joker, RANK_ORDER
+from .state import BalatroState, Card, Joker, RANK_ORDER, RANKS
 from .synergy import analyze_synergy, score_joker_candidate, score_owned_joker
 
 MAX_SELECT = 5
+RANK_VALUES = {r: i + 2 for i, r in enumerate(RANKS)}
 
 def select_consumable_targets(
     cname: str,
@@ -714,19 +715,39 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
 
             if state.discards_left > 0 and not constraints.is_the_psychic and not getattr(constraints, "has_square_joker", False):
                 if not has_debuffed_junk:
-                    filtering_mod *= 0.85 ** len(junk)  # Prefer pure hand when discards are still available
+                    filtering_mod *= 0.15 ** len(junk)  # Strongly prefer pure hand when discards are still available
 
-            # Tally ranks and suits across full hand to protect pairs and flush outs
-            hand_rank_counts = {}
-            hand_suit_counts = {}
-            for hc in state.hand:
-                hrank = getattr(hc, "rank", "")
-                hsuit = getattr(hc, "suit", "")
-                hand_rank_counts[hrank] = hand_rank_counts.get(hrank, 0) + 1
-                hand_suit_counts[hsuit] = hand_suit_counts.get(hsuit, 0) + 1
+            # Tally cards remaining in hand after this play to avoid breaking remaining pairs, flushes, or straight draws
+            rem_cards = [hc for hc in state.hand if hc not in cards]
+            rem_rank_counts = {}
+            rem_suit_counts = {}
+            for rc in rem_cards:
+                rc_rank = getattr(rc, "rank", "")
+                rc_suit = getattr(rc, "suit", "")
+                rem_rank_counts[rc_rank] = rem_rank_counts.get(rc_rank, 0) + 1
+                rem_suit_counts[rc_suit] = rem_suit_counts.get(rc_suit, 0) + 1
+            rem_ranks = {RANK_VALUES.get(getattr(x, "rank", ""), 0) for x in rem_cards}
+            rem_straight_ranks = {
+                RANK_VALUES.get(getattr(x, "rank", ""), 0)
+                for x in rem_cards
+                if getattr(x, "enhancement", "") not in ("steel", "gold")
+            }
+
+            active_joker_names = {j.name for j in state.jokers if not getattr(j, "debuff", False)}
+            has_even_joker = "Even Steven" in active_joker_names
+            has_odd_joker = "Odd Todd" in active_joker_names
+            has_fib_joker = "Fibonacci" in active_joker_names
+            has_hack_joker = "Hack" in active_joker_names
+            has_walkie = "Walkie Talkie" in active_joker_names
+            has_scholar = "Scholar" in active_joker_names
+            has_face_joker = any(n in active_joker_names for n in ("Scary Face", "Smiley Face", "Photograph", "Sock and Buskin", "Triboulet", "Business Card", "Pareidolia"))
 
             has_baron = any(j.name == "Baron" for j in state.jokers)
             has_shoot_moon = any(j.name == "Shoot the Moon" for j in state.jokers)
+
+            if constraints.is_the_psychic:
+                filtering_mod += 0.25 * len(junk)  # Strongly encourage padding to 5 cards under The Psychic
+
             for c in junk:
                 enh = getattr(c, "enhancement", "") or ""
                 seal = getattr(c, "seal", "") or ""
@@ -744,26 +765,74 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
                     filtering_mod += 0.15
                     continue
 
-                # Hard Veto: Enhancements, Editions, Seals
-                if enh in ("steel", "gold", "glass", "lucky", "mult", "bonus", "stone") or ed or seal:
-                    filtering_mod *= 0.005
-                # Hard Veto: High ranks (A, K, Q, J) are prime assets, never unscored junk!
-                elif crank in ("A", "K", "Q", "J"):
-                    filtering_mod *= 0.005
-                # Hard Veto: Protect pairs / multiples in hand
-                elif hand_rank_counts.get(crank, 0) >= 2:
-                    filtering_mod *= 0.02
-                # Hard Veto: Protect flush outs (3+ of this suit)
-                elif hand_suit_counts.get(csuit, 0) >= 3:
-                    filtering_mod *= 0.05
-                elif has_baron and crank == "K":
-                    filtering_mod *= 0.001
-                elif has_shoot_moon and crank == "Q":
-                    filtering_mod *= 0.001
-                elif crank in ("2", "3", "4", "5", "6"):
-                    filtering_mod += 0.05  # Valid isolated low-rank junk
+                c_val = RANK_VALUES.get(crank, 0)
+
+                # Check if card triggers active scoring jokers
+                triggers_joker = (
+                    (has_even_joker and crank in ("2", "4", "6", "8", "10"))
+                    or (has_odd_joker and crank in ("A", "3", "5", "7", "9"))
+                    or (has_fib_joker and crank in ("A", "2", "3", "5", "8"))
+                    or (has_hack_joker and crank in ("2", "3", "4", "5"))
+                    or (has_walkie and crank in ("10", "4"))
+                    or (has_scholar and crank == "A")
+                    or (has_face_joker and crank in ("J", "Q", "K"))
+                    or (("Greedy Joker" in active_joker_names or "Rough Gem" in active_joker_names) and csuit == "D")
+                    or (("Lusty Joker" in active_joker_names or "Bloodstone" in active_joker_names) and csuit == "H")
+                    or (("Wrathful Joker" in active_joker_names or "Arrowhead" in active_joker_names or "Onyx Agate" in active_joker_names) and csuit == "S")
+                    or (("Gluttonous Joker" in active_joker_names or "Rough Gem" in active_joker_names) and csuit == "C")
+                )
+
+                # Check if dumping this card breaks a straight connector in the cards remaining in hand
+                in_straight_connector = (
+                    c_val > 0
+                    and (
+                        (c_val - 1 in rem_straight_ranks and c_val + 1 in rem_straight_ranks)
+                        or (len(rem_straight_ranks) >= 3 and (
+                            (c_val - 1 in rem_straight_ranks and c_val - 2 in rem_straight_ranks)
+                            or (c_val + 1 in rem_straight_ranks and c_val + 2 in rem_straight_ranks)
+                        ))
+                    )
+                )
+
+                if constraints.is_the_psychic:
+                    # Under The Psychic, 5 cards must be played, so padding is mandatory
+                    if enh in ("steel", "gold", "glass", "lucky", "mult", "bonus", "stone") or ed or seal:
+                        filtering_mod *= 0.5
+                    elif has_baron and crank == "K":
+                        filtering_mod *= 0.5
+                    elif crank in ("A", "K", "Q", "J"):
+                        filtering_mod *= 0.7
+                    elif triggers_joker:
+                        filtering_mod *= 0.7
+                    elif crank in ("2", "3", "4", "5", "6"):
+                        filtering_mod += 0.1
+                    else:
+                        filtering_mod += 0.05
                 else:
-                    filtering_mod *= 0.20  # 7-10 mid cards avoided unless necessary
+                    # Normal conditions: enforce hard vetoes to protect valuable cards
+                    if enh in ("steel", "gold", "glass", "lucky", "mult", "bonus", "stone") or ed or seal:
+                        filtering_mod *= 0.005
+                    elif crank in ("A", "K", "Q", "J"):
+                        filtering_mod *= 0.005
+                    elif triggers_joker:
+                        filtering_mod *= 0.005
+                    elif has_baron and crank == "K":
+                        filtering_mod *= 0.001
+                    elif has_shoot_moon and crank == "Q":
+                        filtering_mod *= 0.001
+                    # Protect pairs / multiples in remaining hand
+                    elif rem_rank_counts.get(crank, 0) >= 1:
+                        filtering_mod *= 0.02
+                    # Protect flush outs with remaining hand
+                    elif rem_suit_counts.get(csuit, 0) >= 2:
+                        filtering_mod *= 0.05
+                    # Protect straight connectors in remaining hand
+                    elif in_straight_connector:
+                        filtering_mod *= 0.05
+                    elif crank in ("2", "3", "4", "5", "6"):
+                        filtering_mod += 0.05  # Valid isolated low-rank junk
+                    else:
+                        filtering_mod *= 0.20  # 7-10 mid cards avoided unless necessary
 
         heuristic = base_h * safety.penalty_multiplier * safety.bonus_multiplier * filtering_mod
         if safety.is_fatal_violation:

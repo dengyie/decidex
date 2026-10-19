@@ -397,3 +397,138 @@ def test_pure_play_preferred_when_discards_left():
     assert pure_pair.heuristic_score > padded_pair.heuristic_score
 
 
+def test_hack_and_fibonacci_card_protection_from_junk_dumping():
+    """Cards that trigger Hack (2,3,4,5) or Fibonacci (A,2,3,5,8) must not be dumped as junk."""
+    hand = [
+        _card("9", "S"),
+        _card("9", "H"),
+        _card("3", "D"),  # Triggers Hack and Fibonacci
+        _card("6", "C"),  # Ordinary isolated low rank card
+    ]
+    # State with Hack joker and 0 discards left
+    st = BalatroState(
+        hand=hand,
+        blind=Blind(name="Small Blind", chips=600, scored=0),
+        jokers=[Joker(name="Hack")],
+        hands_left=2,
+        discards_left=0,
+    )
+    actions = enumerate_legal_actions(st)
+    plays = [a for a in actions if a.metadata.get("action_type") == "play"]
+
+    # Play dumping the 6C
+    dump_6_play = next(
+        p for p in plays
+        if "9♠" in p.metadata["cards"] and "9♥" in p.metadata["cards"] and "6♣" in p.metadata["cards"]
+        and "3♦" not in p.metadata["cards"]
+    )
+
+    # Play dumping the 3D (which is protected by Hack)
+    dump_3_play = next(
+        p for p in plays
+        if "9♠" in p.metadata["cards"] and "9♥" in p.metadata["cards"] and "3♦" in p.metadata["cards"]
+        and "6♣" not in p.metadata["cards"]
+    )
+
+    assert dump_6_play.heuristic_score > dump_3_play.heuristic_score * 3.0
+
+
+def test_even_steven_protection_from_junk_dumping():
+    """When Even Steven is active, even ranks (2,4,6,8,10) are protected from being dumped as junk."""
+    hand = [
+        _card("K", "S"),
+        _card("K", "H"),
+        _card("4", "D"),  # Even rank (triggers Even Steven)
+        _card("5", "C"),  # Odd rank (uncoordinated junk)
+    ]
+    st = BalatroState(
+        hand=hand,
+        blind=Blind(name="Big Blind", chips=800, scored=0),
+        jokers=[Joker(name="Even Steven")],
+        hands_left=2,
+        discards_left=0,
+    )
+    actions = enumerate_legal_actions(st)
+    plays = [a for a in actions if a.metadata.get("action_type") == "play"]
+
+    dump_odd_play = next(
+        p for p in plays
+        if "K♠" in p.metadata["cards"] and "K♥" in p.metadata["cards"] and "5♣" in p.metadata["cards"]
+        and "4♦" not in p.metadata["cards"]
+    )
+    dump_even_play = next(
+        p for p in plays
+        if "K♠" in p.metadata["cards"] and "K♥" in p.metadata["cards"] and "4♦" in p.metadata["cards"]
+        and "5♣" not in p.metadata["cards"]
+    )
+
+    assert dump_odd_play.heuristic_score > dump_even_play.heuristic_score * 3.0
+
+
+def test_suit_joker_protection_from_junk_dumping():
+    """When a suit Joker (e.g. Lusty Joker for Hearts) is active, that suit is protected from junk dumping."""
+    hand = [
+        _card("10", "S"),
+        _card("10", "D"),
+        _card("3", "H"),  # Hearts card (triggers Lusty Joker)
+        _card("3", "C"),  # Clubs card (unscored off-suit junk)
+    ]
+    st = BalatroState(
+        hand=hand,
+        blind=Blind(name="Big Blind", chips=800, scored=0),
+        jokers=[Joker(name="Lusty Joker")],
+        hands_left=2,
+        discards_left=0,
+    )
+    actions = enumerate_legal_actions(st)
+    plays = [a for a in actions if a.metadata.get("action_type") == "play"]
+
+    dump_club_play = next(
+        p for p in plays
+        if "10♠" in p.metadata["cards"] and "10♦" in p.metadata["cards"] and "3♣" in p.metadata["cards"]
+        and "3♥" not in p.metadata["cards"]
+    )
+    dump_heart_play = next(
+        p for p in plays
+        if "10♠" in p.metadata["cards"] and "10♦" in p.metadata["cards"] and "3♥" in p.metadata["cards"]
+        and "3♣" not in p.metadata["cards"]
+    )
+
+    assert dump_club_play.heuristic_score > dump_heart_play.heuristic_score * 2.0
+
+
+def test_straight_connector_protection_from_junk_dumping():
+    """Cards forming a straight connector in hand are protected from being discarded or dumped as junk."""
+    hand = [
+        _card("K", "S"),
+        _card("K", "H"),
+        _card("5", "S"),  # Connector part (5-6-7)
+        _card("6", "D"),  # Connector part (5-6-7)
+        _card("7", "C"),  # Connector part (5-6-7)
+        _card("2", "C"),  # Isolated low card
+    ]
+    st = BalatroState(
+        hand=hand,
+        blind=Blind(name="Big Blind", chips=800, scored=0),
+        jokers=[Joker(name="Joker", mult=4)],
+        hands_left=2,
+        discards_left=0,
+    )
+    actions = enumerate_legal_actions(st)
+    plays = [a for a in actions if a.metadata.get("action_type") == "play"]
+
+    dump_isolated_2 = next(
+        p for p in plays
+        if "K♠" in p.metadata["cards"] and "K♥" in p.metadata["cards"] and "2♣" in p.metadata["cards"]
+        and not any(c in p.metadata["cards"] for c in ("5♠", "6♦", "7♣"))
+    )
+    dump_connector_6 = next(
+        p for p in plays
+        if "K♠" in p.metadata["cards"] and "K♥" in p.metadata["cards"] and "6♦" in p.metadata["cards"]
+        and not any(c in p.metadata["cards"] for c in ("5♠", "7♣", "2♣"))
+    )
+
+    assert dump_isolated_2.heuristic_score > dump_connector_6.heuristic_score * 1.5
+
+
+
