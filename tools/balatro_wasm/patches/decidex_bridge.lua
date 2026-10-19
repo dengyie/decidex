@@ -364,7 +364,6 @@ local function find_select_blind_button()
   if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then return nil end
   if G.GAME and G.GAME.facing_blind then return nil end
   if not (G.blind_select and not G.blind_select.REMOVED) then return nil end
-  if not (G.blind_prompt_box and not G.blind_prompt_box.REMOVED) then return nil end
 
   local on_deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or "Small"
   local opt = G.blind_select_opts and G.blind_select_opts[string.lower(on_deck)]

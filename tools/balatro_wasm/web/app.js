@@ -400,15 +400,15 @@ end
   window.addEventListener("beforeunload", syncSaveFileSystem);
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
-  // Cache key: balatro-asset-cache-v62 / decidex-balatro-core-v62
-  const EXPECTED_LOVE_SIZE = 56338588;
+  // Cache key: balatro-asset-cache-v63 / decidex-balatro-core-v63
+  const EXPECTED_LOVE_SIZE = 56338581;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v62";
+  const ASSET_VERSION = "v63";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_" + ASSET_VERSION;
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=62";
-  const ASSET_WASM_URL = "love.wasm.bin?v=62";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=63";
+  const ASSET_WASM_URL = "love.wasm.bin?v=63";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3143,6 +3143,16 @@ end
       const current = this._actionInFlight;
       if (current && current !== action) return;
 
+      // When tab is hidden/backgrounded, Chrome pauses RAF/game loop; do not count this as an engine failure!
+      if (typeof document !== "undefined" && document.hidden) {
+        console.warn(`[AutoPilot] Dispatch timeout for ${action} while tab hidden in background; ignoring failure count`);
+        this._actionInFlight = null;
+        this._busyTimestamp = null;
+        this.pendingState = null;
+        this.busy = false;
+        return;
+      }
+
       this._actionFailureStreak = (this._actionFailureStreak || 0) + 1;
       this._actionInFlight = null;
       this._busyTimestamp = null;
@@ -3161,7 +3171,7 @@ end
     },
 
     onStateUpdated(state) {
-      if (!this.enabled || !state) return;
+      if (!state) return;
       const sname = state.state_name;
       const now = Date.now();
       const handsLeft = Number(state.hands_left);
@@ -3170,6 +3180,10 @@ end
       const money = Number(state.money);
 
       const stateChanged = Boolean(sname && sname !== this._lastSeenState);
+      if (stateChanged) {
+        this._actionFailureStreak = 0;
+      }
+      if (!this.enabled) return;
       const actionMadeProgress = (
         (this._lastHandsLeft !== undefined && handsLeft !== this._lastHandsLeft) ||
         (this._lastDiscardsLeft !== undefined && discardsLeft !== this._lastDiscardsLeft) ||
@@ -3670,6 +3684,15 @@ end
 
   window.AutoPilot = AutoPilot;
   window.arbitrateAction = arbitrateAction;
+
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && AutoPilot.enabled) {
+        AutoPilot._actionFailureStreak = 0;
+        AutoPilot.scheduleNextAction(150);
+      }
+    });
+  }
 
   // Kickoff asset preload
   window.addEventListener("DOMContentLoaded", loadBalatroPackage);
