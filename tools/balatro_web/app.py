@@ -109,9 +109,9 @@ GAME_DISPLAY = os.environ.get("BALATRO_GAME_DISPLAY", ":66")
 # is also the click-coordinate space the page maps onto.
 GAME_W = int(os.environ.get("BALATRO_GAME_W", "960"))
 GAME_H = int(os.environ.get("BALATRO_GAME_H", "600"))
-# Login credentials for the operator page. Default to the documented pair if not in env.
-WEB_USER = os.environ.get("BALATRO_WEB_USER", "mango")
-WEB_PASSWORD = os.environ.get("BALATRO_WEB_PASSWORD", "12345678")
+# Operator credentials are injected by the deployment environment.
+WEB_USER = os.environ.get("BALATRO_WEB_USER", "")
+WEB_PASSWORD = os.environ.get("BALATRO_WEB_PASSWORD", "")
 _ADVISORS: Dict[str, BalatroAdvisor] = {}
 _CACHE: Dict[str, Any] = {}
 _META_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}

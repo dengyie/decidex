@@ -37,6 +37,7 @@ patch_conf = build_mod.patch_conf
 PATCHES_DIR = build_mod.PATCHES_DIR
 DEFAULT_OUTPUT = build_mod.DEFAULT_OUTPUT
 check_assets = serve_mod.check_assets
+verify_release_assets = serve_mod.verify_release_assets
 WEB_DIR = serve_mod.WEB_DIR
 
 
@@ -164,6 +165,36 @@ def test_web_asset_check_excludes_proprietary_binaries(tmp_path):
     for name in ("index.html", "style.css", "app.js", "viz.js", "viz.css", "love.js"):
         (tmp_path / name).write_bytes(b"x" * 200000)
     assert check_assets(tmp_path) is True
+
+
+def test_release_asset_check_requires_manifest_and_external_assets(tmp_path):
+    manifest = tmp_path / "release-assets.json"
+    manifest.write_text("{}", encoding="utf-8")
+    assert verify_release_assets(tmp_path, manifest) is False
+
+
+def test_release_asset_check_validates_hash_and_source(tmp_path):
+    import hashlib
+    import json
+
+    love = tmp_path / "balatro.love"
+    wasm = tmp_path / "love.wasm"
+    love.write_bytes(b"love-release")
+    wasm.write_bytes(b"wasm-release")
+    manifest = tmp_path / "release-assets.json"
+    manifest.write_text(json.dumps({
+        "version": "test-1",
+        "source": "controlled artifact store",
+        "assets": [
+            {"filename": "balatro.love", "source": "artifact://love", "min_size": 1,
+             "sha256": hashlib.sha256(love.read_bytes()).hexdigest()},
+            {"filename": "love.wasm", "source": "artifact://wasm", "min_size": 1,
+             "sha256": hashlib.sha256(wasm.read_bytes()).hexdigest()},
+        ],
+    }), encoding="utf-8")
+    assert verify_release_assets(tmp_path, manifest) is True
+    wasm.write_bytes(b"tampered")
+    assert verify_release_assets(tmp_path, manifest) is False
 
 
 def test_server_refuses_to_start_when_controlled_assets_are_missing(monkeypatch):
@@ -317,6 +348,7 @@ def test_lua_bridge_enhanced_state_signature_and_guards():
     assert 'local seal = tostring(c.seal or "")' in content
     assert 'sig_parts[#sig_parts + 1] = "J"' in content
     assert 'sig_parts[#sig_parts + 1] = "C"' in content
+    assert 'shop_items_sig' in content
 
     # State guards in decidex_execute
     assert 'if G.STATES and G.STATE ~= G.STATES.SHOP then' in content
@@ -337,6 +369,11 @@ def test_dynamic_blind_selection_and_readiness_flags():
     assert '"can_toggle_shop":' in content
     assert '"can_select_blind":' in content
     assert '"won":' in content
+    assert 'played_hands' in content
+    assert 'most_played_hand' in content
+    assert 'DECIDEX_SEQ' in content
+    assert 'write_action_ack' in content
+    assert 'played_this_round' in content
 
 
 def test_frontend_arbitration_and_autopilot():

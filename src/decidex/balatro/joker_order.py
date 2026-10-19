@@ -99,7 +99,7 @@ def compute_optimal_joker_order(
     brainstorm_idx = next((i for i, j in enumerate(jokers) if j.name == "Brainstorm"), None)
     econ_indices = [
         i for i, j in enumerate(jokers)
-        if j.name in ("Golden Joker", "Mail-In Rebate", "Trading Card", "Rocket", "To the Moon")
+        if j.name in ("Golden Joker", "Mail-In Rebate", "Trading Card", "Rocket", "To the Moon", "Cloud 9")
     ]
     xmult_indices = [
         i for i, j in enumerate(jokers)
@@ -108,33 +108,62 @@ def compute_optimal_joker_order(
         or str(getattr(j, "edition", None) or "").lower() == "polychrome"
     ]
 
-    # In shop/cash_out phase, prioritize duplicating economy jokers
-    if phase in ("shop", "cash_out") and econ_indices and (blueprint_idx is not None or brainstorm_idx is not None):
-        target_econ = econ_indices[0]
-        # For Brainstorm: target must be at index 0
-        # For Blueprint: Blueprint must be immediately left of target
-        arranged = []
+    # In shop/cash_out, build an actual permutation around the copy constraints.
+    # Brainstorm copies position 0; Blueprint copies the joker immediately right
+    # of it. With both copies and only one useful target, both constraints cannot
+    # target the same joker, so preserve Brainstorm's economy target and make the
+    # Blueprint target explicit in the explanation.
+    if phase in ("shop", "cash_out"):
+        tiers = [_classify_joker_position_tier(j) for j in jokers]
+        # To the Moon raises the interest cap, so it wins ties; otherwise keep
+        # the player's existing economy-joker order instead of inventing one.
+        target_econ = max(
+            econ_indices,
+            key=lambda i: (jokers[i].name == "To the Moon", -i),
+            default=None,
+        )
+        baseline = sorted(range(n), key=lambda i: (tiers[i], i))
+        arranged: List[int] = []
         used = set()
 
-        if brainstorm_idx is not None and target_econ not in used:
-            arranged.append(target_econ)
-            used.add(target_econ)
+        def add(index: Optional[int]) -> None:
+            if index is not None and index not in used:
+                arranged.append(index)
+                used.add(index)
 
-        if blueprint_idx is not None and blueprint_idx not in used:
-            arranged.append(blueprint_idx)
-            used.add(blueprint_idx)
-            if target_econ not in used:
-                arranged.append(target_econ)
-                used.add(target_econ)
+        if brainstorm_idx is not None and target_econ is not None:
+            add(target_econ)
+            add(brainstorm_idx)
 
-        for i in range(n):
-            if i not in used:
-                arranged.append(i)
-                used.add(i)
+        if blueprint_idx is not None:
+            if brainstorm_idx is None and target_econ is not None:
+                blueprint_target = target_econ
+            else:
+                blueprint_target = next((i for i in econ_indices if i not in used), None)
+                if blueprint_target is None:
+                    blueprint_target = next(
+                        (i for i in reversed(baseline) if i not in used and i != blueprint_idx),
+                        None,
+                    )
+            add(blueprint_idx)
+            add(blueprint_target)
 
-        current = list(range(n))
-        needs_change = (arranged != current)
-        return arranged, needs_change, "经济阶段：将复制小丑移至经济小丑旁吃双倍金币收益"
+        for index in baseline:
+            add(index)
+
+        # The construction above is deliberately defensive: every source index
+        # must occur exactly once even when a lineup contains only copy jokers.
+        for index in range(n):
+            add(index)
+
+        needs_change = arranged != list(range(n))
+        if blueprint_idx is not None and brainstorm_idx is not None and target_econ is not None:
+            reason = "经济阶段：Brainstorm 复制最左经济小丑；Blueprint 复制其右侧可用目标（两者无法同时复制同一个目标时保留可解释排列）"
+        elif blueprint_idx is not None or brainstorm_idx is not None:
+            reason = "经济阶段：按复制方向排列经济小丑，并保持完整索引排列"
+        else:
+            reason = "经济阶段：按收益阶段排列，并保持完整索引排列"
+        return arranged, needs_change, reason
 
     # Standard "play" phase ordering:
     # 1. Base items sorted by tier (Chips -> Flat Mult -> Utility)

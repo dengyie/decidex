@@ -1,0 +1,18 @@
+{
+  "version": "1.0.0",
+  "source": "controlled artifact store",
+  "assets": [
+    {
+      "filename": "balatro.love",
+      "source": "artifact://balatro-v1.0.0.love",
+      "min_size": 50000000,
+      "sha256": "cd21a2a07698ab571e71233d4d38bcd3e654e945d60c92f65860c42a61920499"
+    },
+    {
+      "filename": "love.wasm",
+      "source": "artifact://love-wasm-11.5",
+      "min_size": 4000000,
+      "sha256": "304f195f36d163f3bb2127e7c232fd1fd0791ee2ab61ba003d47096003b53bf1"
+    }
+  ]
+}

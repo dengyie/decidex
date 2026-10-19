@@ -776,6 +776,8 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
 
         if safety.is_fatal_violation:
             desc += f" (⚠️ {safety.reason})"
+        elif safety.reason and safety.reason != "动作完全符合所有安全与小丑成长准则":
+            desc += f" ({safety.reason})"
         elif clears:
             desc += "(足够过关)"
         else:

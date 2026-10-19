@@ -9,6 +9,7 @@ from decidex.balatro import (
     BalatroAdvisor,
     Blind,
     BalatroState,
+    Card,
     enumerate_legal_actions,
     choose_safe_default,
     load_state,
@@ -29,8 +30,40 @@ def test_load_state_from_bridge_fixture():
     assert st.blind.chips == 600
     assert [j.name for j in st.jokers] == ["Joker", "Greedy Joker"]
     assert st.actual is None
+    st.played_hands = ["Pair", "Flush"]
+    st.most_played_hand = "Pair"
     d = st.to_dict()
-    assert BalatroState.from_dict(d).hand[0].label == st.hand[0].label
+    restored = BalatroState.from_dict(d)
+    assert restored.hand[0].label == st.hand[0].label
+    assert restored.played_hands == ["Pair", "Flush"]
+    assert restored.most_played_hand == "Pair"
+
+
+@pytest.mark.parametrize(
+    ("blind_name", "history", "most_played", "expected_reason"),
+    [
+        ("The Eye", ["Pair"], None, "本回合已打过"),
+        ("The Mouth", ["Two Pair"], None, "限制本回合只能打出"),
+        ("The Ox", [], "Pair", "将导致 $25 全部清零"),
+    ],
+)
+def test_snapshot_history_reaches_action_safety(blind_name, history, most_played, expected_reason):
+    st = BalatroState(
+        hand=[Card(rank="K", suit="H"), Card(rank="K", suit="S")],
+        blind=Blind(name=blind_name, chips=1000),
+        played_hands=history,
+        most_played_hand=most_played,
+        money=25,
+    )
+    actions = enumerate_legal_actions(st)
+    play = next(a for a in actions if a.metadata.get("action_type") == "play" and a.metadata.get("hand_type") == "Pair")
+    if blind_name == "The Ox":
+        assert expected_reason in play.description
+        assert "全部清零" in play.metadata["safety_reason"]
+        assert play.heuristic_score < 1.0
+    else:
+        assert play.metadata["fatal_violation"] is True
+        assert expected_reason in play.metadata["safety_reason"]
 
 
 def test_enumeration_shape():

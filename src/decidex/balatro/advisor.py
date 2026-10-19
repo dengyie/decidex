@@ -49,7 +49,10 @@ def build_evidence(state: BalatroState, n_candidates: int) -> Dict[str, Any]:
         most_played_hand=most_played,
         money=money,
     )
-    order_phase = "shop" if getattr(state, "shop", None) else ("cash_out" if getattr(state, "state_name", None) == "ROUND_EVAL" else "play")
+    state_name = str(getattr(state, "state_name", "") or "").upper()
+    order_phase = "shop" if state_name == "SHOP" else (
+        "cash_out" if state_name == "ROUND_EVAL" else "play"
+    )
     opt_order, needs_reorder, order_reason = compute_optimal_joker_order(state.jokers, phase=order_phase)
     order_gain = estimate_ordering_gain(state.jokers)
     deck_profile = compute_remaining_deck(

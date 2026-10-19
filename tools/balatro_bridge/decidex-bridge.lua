@@ -268,6 +268,29 @@ local function state_json(actual)
   parts[#parts + 1] = '"ante":' .. jstr(tonumber(G.GAME and G.GAME.round_resets and G.GAME.round_resets.ante or 1))
   parts[#parts + 1] = '"round":' .. jstr(tonumber((G.GAME and G.GAME.round) or cr.round or 1))
 
+  local played_hands, most_played_hand, most_played_count = {}, nil, 0
+  local hand_stats = G.GAME and G.GAME.hands or {}
+  for name, entry in pairs(hand_stats) do
+    if type(entry) == "table" then
+      local round_count = tonumber(entry.played_this_round) or 0
+      for _ = 1, round_count do played_hands[#played_hands + 1] = tostring(name) end
+      local total_count = tonumber(entry.played) or 0
+      if total_count > most_played_count then
+        most_played_hand, most_played_count = tostring(name), total_count
+      end
+    end
+  end
+  table.sort(played_hands)
+  local unique_played, seen_played = {}, {}
+  for _, name in ipairs(played_hands) do
+    if not seen_played[name] then
+      seen_played[name] = true
+      unique_played[#unique_played + 1] = name
+    end
+  end
+  parts[#parts + 1] = '"played_hands":' .. jtable(map(unique_played, jstr))
+  parts[#parts + 1] = '"most_played_hand":' .. jstr(most_played_hand)
+
   local shop_cards = (G.shop_jokers and G.shop_jokers.cards) or {}
   local reroll_cost = (G.GAME and G.GAME.current_round and G.GAME.current_round.reroll_cost) or 5
   parts[#parts + 1] = '"shop":{"cards":' .. jtable(map(shop_cards, shop_card_json)) .. ',"reroll_cost":' .. jstr(reroll_cost) .. '}'

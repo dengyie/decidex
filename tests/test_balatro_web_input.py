@@ -329,17 +329,15 @@ def test_login_missing_user_is_401(server_pw):
     assert code == 401
 
 
-def test_default_credentials_are_mango_12345678(monkeypatch):
-    """The shipped defaults must be the documented pair (no env override)."""
+def test_credentials_are_empty_without_environment(monkeypatch):
+    """The module must not ship a usable default login."""
     monkeypatch.delenv("BALATRO_WEB_USER", raising=False)
     monkeypatch.delenv("BALATRO_WEB_PASSWORD", raising=False)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    assert mod.WEB_USER == "mango"
-    assert mod.WEB_PASSWORD == "12345678"
-    assert mod._check_credentials("mango", "12345678")
-    assert not mod._check_credentials("mango", "nope")
-    assert not mod._check_credentials("root", "12345678")
+    assert mod.WEB_USER == ""
+    assert mod.WEB_PASSWORD == ""
+    assert not mod._check_credentials("mango", "12345678")
 
 
 def test_login_requires_csrf_header(server_pw):

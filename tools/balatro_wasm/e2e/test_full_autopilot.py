@@ -52,7 +52,10 @@ async def run():
                     cashed_out = True
 
         print(f"\n[Test Result] Seen states: {seen_states}", flush=True)
-        print(f"[Test Result] Successfully played hand: {played_hand or ('SELECTING_HAND' in seen_states and any(x > 0 for x in [st.get('chips', 0)]))}", flush=True)
+        success = played_hand or "ROUND_EVAL" in seen_states or "SHOP" in seen_states
+        print(f"[Test Result] Successfully progressed gameplay: {success}", flush=True)
+        if not success:
+            raise AssertionError(f"autopilot smoke test did not progress gameplay; states={sorted(seen_states)}")
         await browser.close()
 
 if __name__ == "__main__":

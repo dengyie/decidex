@@ -89,6 +89,39 @@ def test_blueprint_and_brainstorm_copy_alignment():
     assert reordered_names[-2] == "Blueprint"
 
 
+@pytest.mark.parametrize("phase", ["shop", "cash_out"])
+def test_economy_copy_order_is_a_permutation_with_valid_blueprint_direction(phase):
+    jokers = [
+        Joker(name="Blueprint"),
+        Joker(name="Golden Joker"),
+        Joker(name="Brainstorm"),
+        Joker(name="Cloud 9"),
+        Joker(name="Cavendish", xmult=3.0),
+    ]
+
+    order, needs_reorder, _ = compute_optimal_joker_order(jokers, phase)
+
+    assert needs_reorder
+    assert sorted(order) == list(range(len(jokers)))
+    names = [jokers[index].name for index in order]
+    # Brainstorm copies the leftmost joker; Blueprint copies the next slot.
+    assert names[0] in {"Golden Joker", "Cloud 9"}
+    blueprint_position = names.index("Blueprint")
+    assert blueprint_position + 1 < len(names)
+    assert names[blueprint_position + 1] != "Blueprint"
+
+
+def test_blueprint_alone_is_immediately_left_of_economy_target():
+    jokers = [Joker(name="Golden Joker"), Joker(name="Blueprint"), Joker(name="Cavendish", xmult=3.0)]
+
+    order, _, _ = compute_optimal_joker_order(jokers, "shop")
+
+    names = [jokers[index].name for index in order]
+    blueprint_position = names.index("Blueprint")
+    assert names[blueprint_position + 1] == "Golden Joker"
+    assert sorted(order) == list(range(len(jokers)))
+
+
 def test_reorder_action_candidate_generated():
     # Test that reorder_jokers candidate is emitted in enumerate_legal_actions
     st = BalatroState(

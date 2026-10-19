@@ -448,7 +448,135 @@ local function get_blind_tag_info()
   return nil
 end
 
+local _HAND_HISTORY = {}
+local _HAND_HISTORY_ORDER = {}
+local _HAND_HISTORY_KEY = nil
+
+local function hand_history_key()
+  local game = G and G.GAME or {}
+  local round = game.round or (game.current_round and game.current_round.round) or 0
+  local ante = game.round_resets and game.round_resets.ante or 0
+  local blind = game.blind and ((game.blind.name) or (game.blind.config and game.blind.config.blind and game.blind.config.blind.name)) or ""
+  local deck = game.blind_on_deck or (game.round_resets and game.round_resets.blind_on_deck) or ""
+  return table.concat({tostring(ante), tostring(round), tostring(deck), tostring(blind)}, ":")
+end
+
+local function reset_hand_history_if_needed()
+  local key = hand_history_key()
+  if key ~= _HAND_HISTORY_KEY then
+    _HAND_HISTORY_KEY = key
+    _HAND_HISTORY = {}
+    _HAND_HISTORY_ORDER = {}
+  end
+end
+
+local function record_hand_type(hand_type)
+  if not hand_type or hand_type == "" then return end
+  reset_hand_history_if_needed()
+  if not _HAND_HISTORY[hand_type] then
+    _HAND_HISTORY[hand_type] = 0
+    _HAND_HISTORY_ORDER[#_HAND_HISTORY_ORDER + 1] = hand_type
+  end
+  _HAND_HISTORY[hand_type] = _HAND_HISTORY[hand_type] + 1
+end
+
+local function game_hand_stats()
+  local hands = G and G.GAME and G.GAME.hands
+  if type(hands) ~= "table" then return nil end
+  local has_round_counts = false
+  for _, entry in pairs(hands) do
+    if type(entry) == "table" and entry.played_this_round ~= nil then
+      has_round_counts = true
+      break
+    end
+  end
+  return hands, has_round_counts
+end
+
+local function current_round_hand_history()
+  reset_hand_history_if_needed()
+  local hands, has_round_counts = game_hand_stats()
+  local played = {}
+  if hands and has_round_counts then
+    -- The engine's per-hand counter is authoritative: it also covers hands
+    -- played manually, not just those dispatched through this bridge.
+    for name, entry in pairs(hands) do
+      local count = tonumber(entry.played_this_round) or 0
+      for _ = 1, count do played[#played + 1] = tostring(name) end
+    end
+    table.sort(played)
+  else
+    for _, name in ipairs(_HAND_HISTORY_ORDER) do
+      local count = _HAND_HISTORY[name] or 0
+      for _ = 1, count do played[#played + 1] = name end
+    end
+  end
+  local most, count = nil, 0
+  local tally = {}
+  for _, name in ipairs(played) do tally[name] = (tally[name] or 0) + 1 end
+  for name, value in pairs(tally) do
+    if value > count then most, count = name, value end
+  end
+  return played, most
+end
+
+local function run_most_played_hand()
+  local hands = game_hand_stats()
+  local most, count = nil, 0
+  if hands then
+    for name, entry in pairs(hands) do
+      local value = tonumber(entry.played) or 0
+      if value > count then most, count = tostring(name), value end
+    end
+  end
+  if most then return most end
+  local _, round_most = current_round_hand_history()
+  return round_most
+end
+
+local function classify_selected_hand(cards)
+  local n = #(cards or {})
+  if n == 0 then return nil end
+  local counts, suits = {}, {}
+  for _, c in ipairs(cards) do
+    local rank = tostring(c.base and c.base.value or "")
+    counts[rank] = (counts[rank] or 0) + 1
+    local suit = tostring(c.base and c.base.suit or "")
+    suits[suit] = (suits[suit] or 0) + 1
+  end
+  local groups = {}
+  for _, count in pairs(counts) do groups[#groups + 1] = count end
+  table.sort(groups, function(a, b) return a > b end)
+  local flush = false
+  for _, count in pairs(suits) do if count == n and n >= 5 then flush = true break end end
+  local values, seen = {}, {}
+  local rank_values = { ["2"] = 2, ["3"] = 3, ["4"] = 4, ["5"] = 5, ["6"] = 6, ["7"] = 7, ["8"] = 8, ["9"] = 9, ["10"] = 10, J = 11, Q = 12, K = 13, A = 14 }
+  for rank in pairs(counts) do
+    local value = rank_values[rank] or tonumber(rank)
+    if value and not seen[value] then seen[value] = true; values[#values + 1] = value end
+  end
+  table.sort(values)
+  local straight = false
+  if #values >= 5 then
+    for i = 1, #values - 4 do
+      if values[i + 4] - values[i] == 4 then straight = true; break end
+    end
+    if not straight and seen[14] and seen[2] and seen[3] and seen[4] and seen[5] then straight = true end
+  end
+  if straight and flush then return "Straight Flush" end
+  if groups[1] == 5 then return "Five of a Kind" end
+  if groups[1] == 4 then return "Four of a Kind" end
+  if groups[1] == 3 and groups[2] == 2 then return "Full House" end
+  if flush then return "Flush" end
+  if straight then return "Straight" end
+  if groups[1] == 3 then return "Three of a Kind" end
+  if groups[1] == 2 and groups[2] == 2 then return "Two Pair" end
+  if groups[1] == 2 then return "Pair" end
+  return "High Card"
+end
+
 local function build_state_json(actual)
+  reset_hand_history_if_needed()
   local hand = area_cards(G.hand)
   local jokers = area_cards(G.jokers)
   local cons = area_cards(G.consumeables)
@@ -466,6 +594,14 @@ local function build_state_json(actual)
   parts[#parts + 1] = '"money":' .. jstr(tonumber(G.GAME and G.GAME.dollars or 0))
   parts[#parts + 1] = '"ante":' .. jstr(tonumber(G.GAME and G.GAME.round_resets and G.GAME.round_resets.ante or 1))
   parts[#parts + 1] = '"round":' .. jstr(tonumber((G.GAME and G.GAME.round) or cr.round or 1))
+
+  local played_hands = current_round_hand_history()
+  local unique_played, seen_played = {}, {}
+  for _, name in ipairs(played_hands) do
+    if not seen_played[name] then seen_played[name] = true; unique_played[#unique_played + 1] = name end
+  end
+  parts[#parts + 1] = '"played_hands":' .. jtable(map(unique_played, jstr))
+  parts[#parts + 1] = '"most_played_hand":' .. jstr(run_most_played_hand())
 
   local deck_count = (G.deck and G.deck.cards and #G.deck.cards) or 0
   local discard_count = (G.discard and G.discard.cards and #G.discard.cards) or 0
@@ -595,6 +731,10 @@ local function check_and_emit_state()
     sig_parts[#sig_parts + 1] = "D" .. tostring(cr.discards_left or 0)
     sig_parts[#sig_parts + 1] = "S" .. tostring(G.GAME and G.GAME.chips or 0)
     sig_parts[#sig_parts + 1] = "M" .. tostring(G.GAME and G.GAME.dollars or 0)
+    local history = current_round_hand_history()
+    table.sort(history)
+    sig_parts[#sig_parts + 1] = "P" .. table.concat(history, ",")
+    sig_parts[#sig_parts + 1] = "R" .. tostring(run_most_played_hand() or "")
 
     local cur_sig = table.concat(sig_parts, "|")
     if cur_sig ~= LAST_HAND_SIG or state_changed then
@@ -616,7 +756,21 @@ local function check_and_emit_state()
     local reroll = (G.GAME and G.GAME.current_round and G.GAME.current_round.reroll_cost) or 5
     local locked = (G.CONTROLLER and G.CONTROLLER.locks and G.CONTROLLER.locks.toggle_shop) and "1" or "0"
     local can_toggle = (find_next_round_button() ~= nil) and "1" or "0"
-    local cur_shop_sig = tostring(dollars) .. ":" .. tostring(reroll) .. ":" .. tostring(#shop_cards) .. ":" .. tostring(#booster_cards) .. ":" .. tostring(#voucher_cards) .. ":" .. tostring(#jokers) .. ":" .. can_toggle .. ":" .. locked
+    local shop_items_sig = {}
+    for _, group in ipairs({shop_cards, booster_cards, voucher_cards}) do
+      for _, card in ipairs(group) do
+        local key = card.config and card.config.center and card.config.center.key or ""
+        local name = card.ability and card.ability.name or ""
+        local set = card.ability and card.ability.set or ""
+        local cost = tonumber(card.cost or 0) or 0
+        local extra = serialize_extra(card.ability and card.ability.extra)
+        local edition = card.edition and table.concat(map({"foil", "holo", "polychrome"}, function(k)
+          return card.edition[k] and k or ""
+        end), ",") or ""
+        shop_items_sig[#shop_items_sig + 1] = table.concat({key, name, set, tostring(cost), tostring(extra), edition}, ":")
+      end
+    end
+    local cur_shop_sig = tostring(dollars) .. ":" .. tostring(reroll) .. ":" .. table.concat(shop_items_sig, "|") .. ":" .. tostring(#jokers) .. ":" .. can_toggle .. ":" .. locked
     if cur_shop_sig ~= LAST_SHOP_SIG or state_changed then
       LAST_SHOP_SIG = cur_shop_sig
       local ok, json = pcall(build_state_json, nil)
@@ -760,9 +914,12 @@ local function decidex_execute_inner(action, args)
         return false, "no hands left"
       end
       if G.FUNCS and G.FUNCS.play_cards_from_highlighted then
+        local selected = {}
+        for _, card in ipairs(G.hand.highlighted or {}) do selected[#selected + 1] = card end
         _G._last_hand_action_time = now
         local ok, err = pcall(G.FUNCS.play_cards_from_highlighted, {})
         if ok then
+          record_hand_type(classify_selected_hand(selected))
           return true, "played"
         else
           return false, "play error: " .. tostring(err)
@@ -1131,8 +1288,27 @@ end
 
 local function decidex_execute(action, args)
   local ok, info = decidex_execute_inner(action, args)
+  _G._decidex_last_action_ok = not not ok
+  _G._decidex_last_action_info = tostring(info or "")
   print(string.format("[DECIDEX_ACTION_RESULT] action=%s ok=%s info=%s", tostring(action), tostring(ok), tostring(info)))
   return ok, info
+end
+
+local function write_action_ack(sequence, ok, info)
+  if not sequence then return end
+  local safe_info = tostring(info or ""):gsub("[\r\n|]", " ")
+  local f = io.open("/tmp/balatro_eval_ack.txt.tmp", "w")
+  if not f then
+    print("[DecideX Ack Error]: unable to open acknowledgement file")
+    return
+  end
+  f:write(tostring(sequence), "|", ok and "ok" or "error", "|", safe_info)
+  f:close()
+  local renamed, rename_err = os.rename("/tmp/balatro_eval_ack.txt.tmp", "/tmp/balatro_eval_ack.txt")
+  if not renamed then
+    os.remove("/tmp/balatro_eval_ack.txt.tmp")
+    print("[DecideX Ack Error]: " .. tostring(rename_err))
+  end
 end
 
 _G.DECIDEX_EXECUTE = decidex_execute
@@ -1229,17 +1405,31 @@ local function decidex_step(dt)
     local code = f:read("*a")
     f:close()
     os.remove("/tmp/balatro_eval.lua")
-    if code and code ~= "" then
-      local chunk, err = loadstring(code)
-      if chunk then
+    local sequence, body = code and code:match("^%-%- DECIDEX_SEQ:(%d+)%s*\n?(.*)$")
+    if not sequence then
+      write_action_ack(nil, false, "missing sequence header")
+    elseif body == "" then
+      write_action_ack(sequence, false, "empty command")
+    else
+      local chunk, err = loadstring(body)
+      if not chunk then
+        print("[DecideX Bridge Parse Error]: " .. tostring(err))
+        write_action_ack(sequence, false, "parse error: " .. tostring(err))
+      else
+        _G._decidex_last_action_ok = nil
+        _G._decidex_last_action_info = nil
         local ok, run_err = pcall(chunk)
         if not ok then
           print("[DecideX Bridge Error]: " .. tostring(run_err))
+          write_action_ack(sequence, false, "runtime error: " .. tostring(run_err))
+        elseif _G._decidex_last_action_ok == false then
+          write_action_ack(sequence, false, _G._decidex_last_action_info)
+        elseif _G._decidex_last_action_ok == nil then
+          write_action_ack(sequence, false, "command did not report an action result")
         else
-          print("[DecideX Executed]: " .. tostring(code:sub(1, 80)))
+          print("[DecideX Executed]: " .. tostring(body:sub(1, 80)))
+          write_action_ack(sequence, true, _G._decidex_last_action_info or "ok")
         end
-      else
-        print("[DecideX Bridge Parse Error]: " .. tostring(err))
       end
     end
   end

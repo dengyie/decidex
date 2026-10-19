@@ -37,6 +37,7 @@ async def main():
         await page.evaluate('() => window.AutoPilot.toggle(true)')
 
         start_time = time.time()
+        reached_eval_or_shop = False
         for i in range(25):
             await asyncio.sleep(1)
             st = await page.evaluate('() => window._lastDecidexState')
@@ -49,12 +50,14 @@ async def main():
             print(f"[{i+1}s] State: {sname} | Hand: {hand_len} cards | HandsLeft: {hands_left} | Scored: {chips} | Need: {need} | Status: {status}", flush=True)
             
             # If we played cards or finished a round, success!
-            if sname in ("ROUND_EVAL", "SHOP") or chips > 0:
+            if sname in ("ROUND_EVAL", "SHOP"):
+                reached_eval_or_shop = True
                 print(f"[E2E SUCCESS] Successfully progressed gameplay via AutoPilot! Current chips: {chips}", flush=True)
-                if sname in ("ROUND_EVAL", "SHOP"):
-                    print("[E2E SUCCESS] Round completed and evaluated!", flush=True)
-                    break
+                print("[E2E SUCCESS] Round completed and evaluated!", flush=True)
+                break
 
+        if not reached_eval_or_shop:
+            raise AssertionError("pilot did not reach ROUND_EVAL or SHOP")
         await browser.close()
         print("[E2E] Finished test.", flush=True)
 

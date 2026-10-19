@@ -50,6 +50,8 @@ async def run():
                     break
 
         print(f"\n[Final] Reached Shop: {reached_shop}, Reached Next Blind/Round: {reached_round_2}", flush=True)
+        if not reached_shop or not reached_round_2:
+            raise AssertionError("full round smoke test did not reach SHOP and the next blind/round")
         await browser.close()
 
 if __name__ == "__main__":

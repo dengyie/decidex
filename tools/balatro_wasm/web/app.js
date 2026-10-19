@@ -80,9 +80,19 @@
     hudToggleBtn.textContent = decidexHud.classList.contains("minimized") ? "◀" : "▼";
   });
 
+  let initialSyncState = "pending";
+  let initialSyncStarted = false;
+  let initialSyncDependencyAdded = false;
   function onInitSuccess() {
-    if (isLoveRunning) return;
+    if (isLoveRunning || initialSyncState === "failed") return;
+    if (initialSyncState !== "ready") {
+      statusText.textContent = initialSyncState === "failed"
+        ? "存档同步失败，请点击重试"
+        : "正在同步本地存档，请稍候...";
+      return;
+    }
     isLoveRunning = true;
+    initialSyncState = "ready";
     splashOverlay.classList.add("hidden");
     console.log("[DecideX] Balatro initialized successfully in love.js WASM.");
     syncSaveFileSystem();
@@ -95,9 +105,6 @@
     args: ["balatro.love"],
     INITIAL_MEMORY: 268435456, // 256MB
     print: function (text) {
-      if (!isLoveRunning && splashOverlay && !splashOverlay.classList.contains("hidden")) {
-        onInitSuccess();
-      }
       if (text.startsWith("[DECIDEX_STATE] ")) {
         const jsonStr = text.substring("[DECIDEX_STATE] ".length);
         console.log("[DECIDEX_STATE]", jsonStr);
@@ -307,14 +314,44 @@ end
             if (callback) callback(new Error("FS.syncfs timed out after 1000ms"));
           }
         }, 1000);
-        originalSyncfs.call(FS, populate, function (err) {
+        try {
+          originalSyncfs.call(FS, populate, function (err) {
+            clearTimeout(timer);
+            if (!done) {
+              done = true;
+              if (callback) callback(err);
+            }
+          });
+        } catch (err) {
           clearTimeout(timer);
           if (!done) {
             done = true;
             if (callback) callback(err);
           }
-        });
+        }
       };
+    }
+
+    if (!initialSyncStarted && FS && FS.syncfs && window.Module.addRunDependency) {
+      initialSyncStarted = true;
+      initialSyncState = "pending";
+      window.Module.addRunDependency("decidex-idbfs-sync");
+      initialSyncDependencyAdded = true;
+      FS.syncfs(true, (err) => {
+        if (err) {
+          initialSyncState = "failed";
+          initialSyncStarted = false;
+          btnLaunch.style.display = "block";
+          statusText.textContent = "存档同步失败，请点击重试";
+          console.error("[DecideX] Initial IDBFS sync failed:", err);
+          return;
+        }
+        initialSyncState = "ready";
+        if (initialSyncDependencyAdded) {
+          initialSyncDependencyAdded = false;
+          window.Module.removeRunDependency("decidex-idbfs-sync");
+        }
+      });
     }
   }
 
@@ -326,6 +363,44 @@ end
       });
     }
   }
+
+  function syncInitialFileSystem() {
+    const FS = window.Module && window.Module.FS;
+    if (!FS || !FS.syncfs) {
+      initialSyncState = "failed";
+      throw new Error("IDBFS sync is unavailable");
+    }
+    initialSyncState = "pending";
+    initialSyncStarted = true;
+    statusText.textContent = "正在同步本地存档，请稍候...";
+    FS.syncfs(true, function (err) {
+      if (err) {
+        initialSyncState = "failed";
+        initialSyncStarted = false;
+        btnLaunch.style.display = "block";
+        statusText.textContent = "存档同步失败，请点击重试";
+        console.error("[DecideX] Initial IDBFS sync failed:", err);
+        return;
+      }
+      initialSyncState = "ready";
+      if (initialSyncDependencyAdded) {
+        initialSyncDependencyAdded = false;
+        window.Module.removeRunDependency("decidex-idbfs-sync");
+      }
+      onInitSuccess();
+    });
+  }
+
+  window.retryInitialFileSystemSync = function () {
+    try {
+      syncInitialFileSystem();
+    } catch (err) {
+      initialSyncState = "failed";
+      initialSyncStarted = false;
+      statusText.textContent = "存档同步不可用，请重试";
+      console.error("[DecideX] Initial IDBFS sync retry failed:", err);
+    }
+  };
 
   // Auto-sync save data periodically
   setInterval(syncSaveFileSystem, 15000);
@@ -602,6 +677,10 @@ end
 
   // Launch LÖVE runtime
   btnLaunch.addEventListener("click", () => {
+    if (initialSyncState === "failed") {
+      window.retryInitialFileSystemSync();
+      return;
+    }
     btnLaunch.style.display = "none";
     statusText.textContent = "正在启动 WebAssembly 虚拟机与渲染画布...";
 
@@ -2569,7 +2648,7 @@ end
   let luaActionSequence = 0;
   function dispatchLuaAction(luaCode, label = "action") {
     const sequence = ++luaActionSequence;
-    luaActionQueue = luaActionQueue.then(() => new Promise((resolve, reject) => {
+    const actionPromise = luaActionQueue.catch(() => {}).then(() => new Promise((resolve, reject) => {
       const FS = window.Module && window.Module.FS;
       if (!FS) return reject(new Error("游戏引擎尚未就绪"));
       const ackPath = "/tmp/balatro_eval_ack.txt";
@@ -2578,13 +2657,19 @@ end
       const deadline = Date.now() + 5000;
       const poll = () => {
         try {
-          if (FS.readFile(ackPath, { encoding: "utf8" }).trim() === String(sequence)) return resolve(sequence);
+          const ack = FS.readFile(ackPath, { encoding: "utf8" }).trim();
+          const parts = ack.split("|");
+          if (parts[0] === String(sequence)) {
+            if (parts[1] === "ok") return resolve(sequence);
+            return reject(new Error(`Lua ${label} failed: ${parts.slice(2).join("|") || "unknown error"}`));
+          }
         } catch (_) {}
         if (Date.now() >= deadline) return reject(new Error(`Lua ${label} acknowledgement timed out`));
         setTimeout(poll, 50);
       };
       poll();
     }));
+    luaActionQueue = actionPromise;
     luaActionQueue.catch(error => console.error("[DecideX] Lua action failed:", error));
     return luaActionQueue;
   }

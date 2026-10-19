@@ -12,7 +12,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.server
+import json
 import mimetypes
 import os
 import socketserver
@@ -20,6 +22,48 @@ import sys
 from pathlib import Path
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+ASSET_MANIFEST = Path(__file__).resolve().parent / "release-assets.json"
+
+
+def verify_release_assets(web_dir: Path = WEB_DIR, manifest_path: Path = ASSET_MANIFEST) -> bool:
+    """Verify externally supplied proprietary assets before a release/deploy."""
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not manifest.get("version") or not manifest.get("source"):
+            raise ValueError("manifest must declare version and source")
+        assets = manifest["assets"]
+        if not isinstance(assets, list):
+            raise ValueError("assets must be a list")
+        declared = {entry.get("filename") for entry in assets if isinstance(entry, dict)}
+        if not {"balatro.love", "love.wasm"}.issubset(declared):
+            raise ValueError("manifest must declare balatro.love and love.wasm")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        print(f"[-] Invalid release asset manifest: {exc}", file=sys.stderr)
+        return False
+
+    valid = True
+    for entry in assets:
+        try:
+            filename = str(entry["filename"])
+            minimum_size = int(entry["min_size"])
+            expected_sha256 = str(entry["sha256"]).lower()
+            source = str(entry["source"])
+            if not source:
+                raise ValueError("empty source")
+            path = web_dir / filename
+            if not path.is_file():
+                raise FileNotFoundError(filename)
+            size = path.stat().st_size
+            if size < minimum_size:
+                raise ValueError(f"{filename} is {size} bytes, below {minimum_size}")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if digest != expected_sha256:
+                raise ValueError(f"{filename} SHA-256 mismatch")
+            print(f"  [+] Release asset verified: {filename} ({source})")
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            print(f"  [-] Release asset invalid: {exc}", file=sys.stderr)
+            valid = False
+    return valid
 
 
 class WasmHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
@@ -172,9 +216,13 @@ def main():
     parser = argparse.ArgumentParser(description="Serve Balatro WebAssembly build")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8092, help="Bind port (default: 8092)")
-    parser.add_argument("--check", action="store_true", help="Only check asset integrity and exit")
+    parser.add_argument("--check", action="store_true", help="Only check repository-controlled web assets and exit")
+    parser.add_argument("--release-check", action="store_true", help="Verify the externally supplied release asset manifest and exit")
     args = parser.parse_args()
 
+    if args.release_check:
+        ok = verify_release_assets()
+        sys.exit(0 if ok else 1)
     if args.check:
         ok = check_assets()
         sys.exit(0 if ok else 1)
