@@ -12,7 +12,7 @@ import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
-from .state import SUITS, RANKS, RANK_ORDER, Card
+from .state import SUITS, RANKS, Card
 
 SUIT_NORM: Dict[str, str] = {
     "S": "S", "Spades": "S", "spades": "S", "♠": "S",
@@ -134,51 +134,43 @@ def calculate_straight_draw_odds(
     deck: DeckProfile,
     cards_drawn: int,
 ) -> float:
-    """
-    Estimate probability of completing a 5-card straight from a 4-card open-ended
-    or inside straight draw.
-    """
-    if len(current_ranks) >= 5:
+    """Exact chance of drawing every missing rank for any legal five-rank run."""
+    present = set(current_ranks) & set(RANKS)
+    rank_values = list(RANKS)
+    windows = [set(rank_values[i:i + 5]) for i in range(len(rank_values) - 4)]
+    windows.append({"A", "2", "3", "4", "5"})
+    missing_sets = [window - present for window in windows if len(window - present) <= cards_drawn]
+    if not missing_sets:
+        return 0.0
+    if any(not missing and len(present) >= 5 for missing in missing_sets):
         return 1.0
 
-    sorted_indices = sorted(RANK_ORDER.get(r, 0) for r in current_ranks if r in RANK_ORDER)
-    if len(sorted_indices) < 4:
+    n, total = cards_drawn, deck.total_remaining
+    if n <= 0 or n > total:
+        return 0.0
+    denominator = _comb(total, n)
+    if not denominator:
         return 0.0
 
-    span = sorted_indices[-1] - sorted_indices[0]
-    outs = 0
-    N = deck.total_remaining
-    n = cards_drawn
+    # Inclusion-exclusion over successful straight windows. A window succeeds
+    # iff every rank in its missing set appears at least once in the draw.
+    favorable = 0
+    for mask in range(1, 1 << len(missing_sets)):
+        required = set()
+        bits = 0
+        for i, missing in enumerate(missing_sets):
+            if mask & (1 << i):
+                bits += 1
+                required.update(missing)
+        ways = 0
+        ranks = list(required)
+        for submask in range(1 << len(ranks)):
+            excluded = [ranks[i] for i in range(len(ranks)) if submask & (1 << i)]
+            excluded_count = sum(max(0, deck.rank_counts.get(rank, 0)) for rank in excluded)
+            ways += (-1 if len(excluded) % 2 else 1) * _comb(total - excluded_count, n)
+        favorable += (-1 if bits % 2 == 0 else 1) * ways
 
-    if span == 3:
-        # Open-ended 4-card straight (e.g. 5,6,7,8 needs 4 or 9)
-        low_idx = sorted_indices[0] - 1
-        high_idx = sorted_indices[-1] + 1
-        if low_idx >= 0:
-            low_r = RANKS[low_idx]
-            outs += deck.rank_counts.get(low_r, 0)
-        if high_idx < len(RANKS):
-            high_r = RANKS[high_idx]
-            outs += deck.rank_counts.get(high_r, 0)
-    elif span == 4:
-        # Inside (gutshot) straight (e.g. 5,6,8,9 needs 7)
-        present = set(sorted_indices)
-        for i in range(sorted_indices[0], sorted_indices[-1] + 1):
-            if i not in present:
-                missing_r = RANKS[i]
-                outs += deck.rank_counts.get(missing_r, 0)
-                break
-
-    if outs <= 0 or N < n or n <= 0:
-        return 0.0
-
-    # P(at least 1 hit) = 1 - (N - outs)Cn / NCn
-    no_hit_ways = _comb(N - outs, n)
-    total_ways = _comb(N, n)
-    if total_ways == 0:
-        return 0.0
-
-    return round(max(0.0, min(1.0, 1.0 - (no_hit_ways / total_ways))), 4)
+    return round(max(0.0, min(1.0, favorable / denominator)), 4)
 
 
 def analyze_hand_draw_potential(

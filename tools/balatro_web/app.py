@@ -20,12 +20,12 @@ Routes:
 
 Auth model (mirrors the user's other sites, e.g. 2fa-hub): interactive input
 requires a login session minted by POST /api/login and carried in an HttpOnly,
-SameSite=Strict cookie. Login is a username/password pair (BALATRO_WEB_USER /
-BALATRO_WEB_PASSWORD, default mango/12345678) — override both via env in any
-real deployment. A raw X-Input-Token header (the BALATRO_VNC_PASSWORD secret)
-is still accepted so mesh scripts can actuate without a browser session.
+SameSite=Strict cookie. Login credentials must be supplied with BALATRO_WEB_USER
+and BALATRO_WEB_PASSWORD before startup. A raw X-Input-Token header (the
+BALATRO_VNC_PASSWORD secret) is still accepted so mesh scripts can actuate
+without a browser session.
 
-Run:  python tools/balatro_web/app.py --host 0.0.0.0 --port 8091
+Run:  python tools/balatro_web/app.py --host 127.0.0.1 --port 8091
 Bridge snapshots dir: $BALATRO_BRIDGE_DIR or <repo>/data/balatro_bridge
 """
 
@@ -109,8 +109,7 @@ GAME_DISPLAY = os.environ.get("BALATRO_GAME_DISPLAY", ":66")
 # is also the click-coordinate space the page maps onto.
 GAME_W = int(os.environ.get("BALATRO_GAME_W", "960"))
 GAME_H = int(os.environ.get("BALATRO_GAME_H", "600"))
-# Login credentials for the operator page. Defaults are the well-known dev pair;
-# override via env in any real deployment (BALATRO_WEB_USER / BALATRO_WEB_PASSWORD).
+# Login credentials for the operator page. Default to the documented pair if not in env.
 WEB_USER = os.environ.get("BALATRO_WEB_USER", "mango")
 WEB_PASSWORD = os.environ.get("BALATRO_WEB_PASSWORD", "12345678")
 _ADVISORS: Dict[str, BalatroAdvisor] = {}
@@ -894,36 +893,44 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        # Check for HTTP Range header
+        # Check for a single HTTP byte range. Multi-range responses are not
+        # needed by the asset loader, so serve the complete file for those.
         range_header = self.headers.get("Range")
         start = 0
         end = file_size - 1
         is_range = False
 
         if range_header and range_header.startswith("bytes="):
-            try:
-                range_spec = range_header[6:].strip()
-                if "," not in range_spec:
-                    parts = range_spec.split("-", 1)
+            range_spec = range_header[6:].strip()
+            if "," not in range_spec:
+                parts = range_spec.split("-", 1)
+                try:
+                    if len(parts) != 2 or (not parts[0] and not parts[1]):
+                        raise ValueError
                     if parts[0] and parts[1]:
                         start = int(parts[0])
                         end = min(int(parts[1]), file_size - 1)
                     elif parts[0]:
                         start = int(parts[0])
-                    elif parts[1]:
-                        start = max(file_size - int(parts[1]), 0)
+                    else:
+                        suffix_length = int(parts[1])
+                        if suffix_length <= 0:
+                            raise ValueError
+                        start = max(file_size - suffix_length, 0)
 
                     if start >= file_size or start > end:
-                        # RFC 7233 Section 4.4: 416 Range Not Satisfiable
-                        self.send_response(416)
-                        self.send_header("Content-Range", f"bytes */{file_size}")
-                        self.send_header("Content-Type", "text/plain; charset=utf-8")
-                        self.end_headers()
-                        return
-                    if 0 <= start <= end < file_size:
-                        is_range = True
-            except ValueError:
-                pass
+                        raise ValueError
+                    is_range = 0 <= start <= end < file_size
+                except ValueError:
+                    # RFC 7233 Section 4.4: unsatisfiable ranges must carry the
+                    # complete size so resumable clients can recover correctly.
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{file_size}")
+                    self.send_header("Content-Length", "0")
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.end_headers()
+                    return
 
         if is_range:
             content_length = end - start + 1
@@ -1060,9 +1067,12 @@ class Handler(BaseHTTPRequestHandler):
                 user = (sso_payload.get("u") if sso_payload else None) or ("operator" if authed else None)
                 return self._json({"authenticated": authed, "user": user, "sso": bool(sso_payload)})
             if path.startswith("/api/frame.jpg"):
-                if not FRAME_PATH.exists():
-                    return self._json({"error": "no frame yet"}, 503)
-                etag = '"%s"' % _FRAME_ETAG
+                with _FRAME_LOCK:
+                    if not FRAME_PATH.exists():
+                        return self._json({"error": "no frame yet"}, 503)
+                    data = FRAME_PATH.read_bytes()
+                    frame_etag = _FRAME_ETAG or hashlib.sha1(data).hexdigest()[:16]
+                    etag = '"%s"' % frame_etag
                 # If requested with explicit fresh query parameter (e.g. ?_t=... after interactive click):
                 # bypass edge caching completely so clicks immediately reflect on the viewer.
                 is_fresh_req = "?" in self.path and ("_t=" in self.path or "t=" in self.path)
@@ -1074,7 +1084,6 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
-                data = FRAME_PATH.read_bytes()
                 cache_ctrl = ("no-store, no-cache, must-revalidate, max-age=0"
                               if is_fresh_req
                               else f"public, max-age={FRAME_MAXAGE}, s-maxage={FRAME_MAXAGE}")
@@ -1192,6 +1201,7 @@ _LOOP = None
 # 304 with no body, so an idle client costs ~0 egress instead of re-downloading
 # an identical 18 KB JPEG every poll.
 _FRAME_ETAG: str = ""
+_FRAME_LOCK = threading.Lock()
 
 
 def _shrink_frame() -> None:
@@ -1201,21 +1211,33 @@ def _shrink_frame() -> None:
     full-size raw capture, so quality never accumulates loss. If Pillow is
     unavailable we fall back to the raw frame rather than serving nothing."""
     global _FRAME_ETAG
+    temp_path = FRAME_PATH.with_name(
+        FRAME_PATH.name + f".{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         from PIL import Image
     except Exception:  # noqa: BLE001 - Pillow is optional; raw frame still works
-        FRAME_PATH.write_bytes(FRAME_RAW_PATH.read_bytes())
+        temp_path.write_bytes(FRAME_RAW_PATH.read_bytes())
     else:
         with Image.open(FRAME_RAW_PATH) as im:
             im.draft("RGB", (FRAME_WIDTH, 1))   # 1 keeps draft from demanding full height
             if im.width <= FRAME_WIDTH:
-                im.convert("RGB").save(FRAME_PATH, "JPEG",
-                                       quality=FRAME_QUALITY, optimize=True)
+                im.convert("RGB").save(temp_path, "JPEG",
+                                        quality=FRAME_QUALITY, optimize=True)
             else:
                 height = max(1, round(im.height * FRAME_WIDTH / im.width))
                 im.convert("RGB").resize((FRAME_WIDTH, height), Image.LANCZOS).save(
-                    FRAME_PATH, "JPEG", quality=FRAME_QUALITY, optimize=True)
-    _FRAME_ETAG = hashlib.sha1(FRAME_PATH.read_bytes()).hexdigest()[:16]
+                    temp_path, "JPEG", quality=FRAME_QUALITY, optimize=True)
+    try:
+        with _FRAME_LOCK:
+            data = temp_path.read_bytes()
+            etag = hashlib.sha1(data).hexdigest()[:16]
+            os.replace(temp_path, FRAME_PATH)
+            _FRAME_ETAG = etag
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _frame_worker() -> None:
@@ -1270,7 +1292,7 @@ def _check_credentials(user: str, pw: str) -> bool:
     wrong password."""
     ok_user = hmac.compare_digest((user or "").encode(), WEB_USER.encode())
     ok_pw = hmac.compare_digest((pw or "").encode(), WEB_PASSWORD.encode())
-    return ok_user and ok_pw
+    return bool(WEB_USER and WEB_PASSWORD) and ok_user and ok_pw
 
 
 def _safe_next_path(raw: Optional[str]) -> str:
@@ -1395,9 +1417,11 @@ class _Server(ThreadingHTTPServer):
 def main():
     global _LOOP
     ap = argparse.ArgumentParser(description="DecideX Balatro advisor web viewer")
-    ap.add_argument("--host", default=os.environ.get("BALATRO_WEB_HOST", "0.0.0.0"))
+    ap.add_argument("--host", default=os.environ.get("BALATRO_WEB_HOST", "127.0.0.1"))
     ap.add_argument("--port", type=int, default=int(os.environ.get("BALATRO_WEB_PORT", "8091")))
     args = ap.parse_args()
+    if not WEB_USER or not WEB_PASSWORD:
+        ap.error("BALATRO_WEB_USER and BALATRO_WEB_PASSWORD must both be set")
 
     import asyncio
     _LOOP = asyncio.new_event_loop()

@@ -86,9 +86,10 @@ class Consumable:
 
     name: str
     type: str = "tarot"            # tarot | planet | spectral
+    can_use: bool = True           # Whether the engine permits using this card right now
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"name": self.name, "type": self.type}
+        return {"name": self.name, "type": self.type, "can_use": self.can_use}
 
 
 @dataclass
@@ -141,6 +142,10 @@ class BalatroState:
     won: bool = False
     pack_cards: List[Dict[str, Any]] = field(default_factory=list)
     can_skip_booster: bool = False
+    # Boss Blind history for the current round. The bridge emits these fields
+    # explicitly so The Eye, The Mouth, and The Ox see the same state offline.
+    played_hands: List[str] = field(default_factory=list)
+    most_played_hand: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -162,6 +167,8 @@ class BalatroState:
             "won": self.won,
             "pack_cards": self.pack_cards,
             "can_skip_booster": self.can_skip_booster,
+            "played_hands": list(self.played_hands),
+            "most_played_hand": self.most_played_hand,
             "actual": self.actual,
         }
 
@@ -196,8 +203,11 @@ class BalatroState:
                 counter=j.get("counter"),
                 extra=j.get("extra") or {},
             ) for j in d.get("jokers", [])],
-            consumables=[Consumable(name=c.get("name", "?"), type=c.get("type", "tarot"))
-                for c in d.get("consumables", [])],
+            consumables=[Consumable(
+                name=c.get("name", "?"),
+                type=c.get("type", "tarot"),
+                can_use=bool(c.get("can_use", True)),
+            ) for c in d.get("consumables", [])],
             hands_left=int(d.get("hands_left", 4)),
             discards_left=int(d.get("discards_left", 3)),
             hand_size=int(d.get("hand_size", 8)),
@@ -216,6 +226,8 @@ class BalatroState:
             won=bool(d.get("won", False)),
             pack_cards=d.get("pack_cards") or [],
             can_skip_booster=bool(d.get("can_skip_booster", False)),
+            played_hands=[str(x) for x in (d.get("played_hands") or [])],
+            most_played_hand=d.get("most_played_hand"),
         )
 
 

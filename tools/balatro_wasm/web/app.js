@@ -303,8 +303,8 @@ end
         const timer = setTimeout(() => {
           if (!done) {
             done = true;
-            console.warn("[DecideX] FS.syncfs timed out after 1000ms, continuing boot.");
-            if (callback) callback(null);
+            console.error("[DecideX] FS.syncfs timed out after 1000ms.");
+            if (callback) callback(new Error("FS.syncfs timed out after 1000ms"));
           }
         }, 1000);
         originalSyncfs.call(FS, populate, function (err) {
@@ -2203,6 +2203,7 @@ end
 
     for (let i = 0; i < cons.length; i++) {
       const c = cons[i];
+      if (c.can_use === false) continue;
       const name = c.name || "";
       const idx = c.index !== undefined ? c.index : (i + 1);
 
@@ -2564,7 +2565,31 @@ end
     }
   };
 
-  // Programmatic execution via Emscripten virtual FS
+  let luaActionQueue = Promise.resolve();
+  let luaActionSequence = 0;
+  function dispatchLuaAction(luaCode, label = "action") {
+    const sequence = ++luaActionSequence;
+    luaActionQueue = luaActionQueue.then(() => new Promise((resolve, reject) => {
+      const FS = window.Module && window.Module.FS;
+      if (!FS) return reject(new Error("游戏引擎尚未就绪"));
+      const ackPath = "/tmp/balatro_eval_ack.txt";
+      try { FS.unlink(ackPath); } catch (_) {}
+      FS.writeFile("/tmp/balatro_eval.lua", `-- DECIDEX_SEQ:${sequence}\n${luaCode}`);
+      const deadline = Date.now() + 5000;
+      const poll = () => {
+        try {
+          if (FS.readFile(ackPath, { encoding: "utf8" }).trim() === String(sequence)) return resolve(sequence);
+        } catch (_) {}
+        if (Date.now() >= deadline) return reject(new Error(`Lua ${label} acknowledgement timed out`));
+        setTimeout(poll, 50);
+      };
+      poll();
+    }));
+    luaActionQueue.catch(error => console.error("[DecideX] Lua action failed:", error));
+    return luaActionQueue;
+  }
+
+  // Programmatic execution via serialized Emscripten virtual FS mailbox
   window.executePlayAction = function (cards) {
     if (!window.Module || !window.Module.FS) {
       console.warn("游戏引擎尚未就绪");
@@ -2572,8 +2597,8 @@ end
     }
     const indices = (cards || []).map(c => c.index).filter(x => x !== undefined);
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("play", {indices = {${indices.join(",")}}}) end`;
-    window.Module.FS.writeFile("/tmp/balatro_eval.lua", luaCode);
-    console.log("[DecideX] Dispatched play action:", luaCode);
+    dispatchLuaAction(luaCode, "play");
+    console.log("[DecideX] Queued play action:", luaCode);
   };
 
   window.executeDiscardAction = function (cards) {
@@ -2583,7 +2608,7 @@ end
     }
     const indices = (cards || []).map(c => c.index).filter(x => x !== undefined);
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("discard", {indices = {${indices.join(",")}}}) end`;
-    window.Module.FS.writeFile("/tmp/balatro_eval.lua", luaCode);
+    dispatchLuaAction(luaCode);
     console.log("[DecideX] Dispatched discard action:", luaCode);
   };
 
@@ -2593,7 +2618,7 @@ end
       return;
     }
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("buy_card", {index = ${index}, area = "${area || 'shop_jokers'}"}) end`;
-    window.Module.FS.writeFile("/tmp/balatro_eval.lua", luaCode);
+    dispatchLuaAction(luaCode);
     console.log("[DecideX] Dispatched buy action:", luaCode);
   };
 
@@ -2603,7 +2628,7 @@ end
       return;
     }
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("sell_card", {index = ${index}, area = "${area || 'jokers'}"}) end`;
-    window.Module.FS.writeFile("/tmp/balatro_eval.lua", luaCode);
+    dispatchLuaAction(luaCode);
     console.log("[DecideX] Dispatched sell_card action:", luaCode);
   };
 
@@ -2613,7 +2638,7 @@ end
       return;
     }
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("reroll_shop") end`;
-    window.Module.FS.writeFile("/tmp/balatro_eval.lua", luaCode);
+    dispatchLuaAction(luaCode);
     console.log("[DecideX] Dispatched reroll_shop action");
   };
 
@@ -2623,7 +2648,7 @@ end
       return;
     }
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("toggle_shop") end`;
-    window.Module.FS.writeFile("/tmp/balatro_eval.lua", luaCode);
+    dispatchLuaAction(luaCode);
     console.log("[DecideX] Dispatched toggle_shop action");
   };
 
@@ -2634,7 +2659,7 @@ end
     }
     const orderStr = (order || []).join(", ");
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("reorder_jokers", {order = {${orderStr}}}) end`;
-    window.Module.FS.writeFile("/tmp/balatro_eval.lua", luaCode);
+    dispatchLuaAction(luaCode);
     console.log("[DecideX] Dispatched reorder_jokers action:", orderStr);
   };
 
@@ -2645,7 +2670,7 @@ end
     }
     const tIndices = (targetIndices && targetIndices.length > 0) ? `{${targetIndices.join(",")}}` : "nil";
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("use_card", {index = ${index}, area = "${area || 'consumeables'}", target_indices = ${tIndices}}) end`;
-    window.Module.FS.writeFile("/tmp/balatro_eval.lua", luaCode);
+    dispatchLuaAction(luaCode);
     console.log("[DecideX] Dispatched use_card action:", luaCode);
   };
 
@@ -2655,7 +2680,7 @@ end
       return;
     }
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("skip_booster") end`;
-    window.Module.FS.writeFile("/tmp/balatro_eval.lua", luaCode);
+    dispatchLuaAction(luaCode);
     console.log("[DecideX] Dispatched skip_booster action");
   };
 
@@ -2665,53 +2690,53 @@ end
       return;
     }
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("select_pack_card", {index = ${index}}) end`;
-    window.Module.FS.writeFile("/tmp/balatro_eval.lua", luaCode);
+    dispatchLuaAction(luaCode);
     console.log("[DecideX] Dispatched select_pack_card action:", index);
   };
 
   // Utilities
   window.decidexSelectBlind = function () {
     if (window.Module && window.Module.FS) {
-      window.Module.FS.writeFile("/tmp/balatro_eval.lua", 'local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("select_blind") end');
+      dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("select_blind") end');
       console.log("[DecideX] Dispatched select_blind action");
     }
   };
 
   window.decidexSkipBlind = function () {
     if (window.Module && window.Module.FS) {
-      window.Module.FS.writeFile("/tmp/balatro_eval.lua", 'local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("skip_blind") end');
+      dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("skip_blind") end');
       console.log("[DecideX] Dispatched skip_blind action");
     }
   };
 
   window.decidexCashOut = function () {
     if (window.Module && window.Module.FS) {
-      window.Module.FS.writeFile("/tmp/balatro_eval.lua", 'local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("cash_out") end');
+      dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("cash_out") end');
       console.log("[DecideX] Dispatched cash_out action");
     }
   };
 
   window.decidexSortRank = function () {
     if (window.Module && window.Module.FS) {
-      window.Module.FS.writeFile("/tmp/balatro_eval.lua", 'local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("sort_rank") end');
+      dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("sort_rank") end');
     }
   };
 
   window.decidexSortSuit = function () {
     if (window.Module && window.Module.FS) {
-      window.Module.FS.writeFile("/tmp/balatro_eval.lua", 'local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("sort_suit") end');
+      dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("sort_suit") end');
     }
   };
 
   window.decidexReEvaluate = function () {
     if (window.Module && window.Module.FS) {
-      window.Module.FS.writeFile("/tmp/balatro_eval.lua", 'local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("force_state_dump") end');
+      dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("force_state_dump") end');
     }
   };
 
   window.decidexStartRun = function () {
     if (window.Module && window.Module.FS) {
-      window.Module.FS.writeFile("/tmp/balatro_eval.lua", 'local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("start_run") end');
+      dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("start_run") end');
       console.log("[DecideX] Dispatched start_run action");
     }
   };

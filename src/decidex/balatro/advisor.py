@@ -40,14 +40,17 @@ def build_evidence(state: BalatroState, n_candidates: int) -> Dict[str, Any]:
 
     # Domain strategies
     synergy = analyze_synergy(state.jokers, ante)
-    econ = calculate_economy_status(money, ante)
+    has_to_the_moon = any(j.name == "To the Moon" for j in state.jokers)
+    econ = calculate_economy_status(money, ante, has_to_the_moon=has_to_the_moon)
     constraints = detect_active_constraints(
         state.jokers,
         blind_name=blind_name,
+        played_hands=set(getattr(state, "played_hands", []) or []),
         most_played_hand=most_played,
         money=money,
     )
-    opt_order, needs_reorder, order_reason = compute_optimal_joker_order(state.jokers)
+    order_phase = "shop" if getattr(state, "shop", None) else ("cash_out" if getattr(state, "state_name", None) == "ROUND_EVAL" else "play")
+    opt_order, needs_reorder, order_reason = compute_optimal_joker_order(state.jokers, phase=order_phase)
     order_gain = estimate_ordering_gain(state.jokers)
     deck_profile = compute_remaining_deck(
         state.hand,

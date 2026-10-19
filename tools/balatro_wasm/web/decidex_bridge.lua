@@ -191,10 +191,16 @@ end
 local function consumable_json(c, idx)
   local name = c.ability and c.ability.name or ""
   local set = c.ability and c.ability.set or ""
+  local can_use = true
+  if c.can_use_consumeable then
+    local ok, res = pcall(function() return c:can_use_consumeable() end)
+    can_use = not (ok and res == false)
+  end
   local parts = {
     '"name":' .. jstr(name),
     '"type":' .. jstr(set:lower()),
-    '"index":' .. jstr(idx)
+    '"index":' .. jstr(idx),
+    '"can_use":' .. (can_use and "true" or "false")
   }
   return "{" .. table.concat(parts, ",") .. "}"
 end
@@ -442,7 +448,135 @@ local function get_blind_tag_info()
   return nil
 end
 
+local _HAND_HISTORY = {}
+local _HAND_HISTORY_ORDER = {}
+local _HAND_HISTORY_KEY = nil
+
+local function hand_history_key()
+  local game = G and G.GAME or {}
+  local round = game.round or (game.current_round and game.current_round.round) or 0
+  local ante = game.round_resets and game.round_resets.ante or 0
+  local blind = game.blind and ((game.blind.name) or (game.blind.config and game.blind.config.blind and game.blind.config.blind.name)) or ""
+  local deck = game.blind_on_deck or (game.round_resets and game.round_resets.blind_on_deck) or ""
+  return table.concat({tostring(ante), tostring(round), tostring(deck), tostring(blind)}, ":")
+end
+
+local function reset_hand_history_if_needed()
+  local key = hand_history_key()
+  if key ~= _HAND_HISTORY_KEY then
+    _HAND_HISTORY_KEY = key
+    _HAND_HISTORY = {}
+    _HAND_HISTORY_ORDER = {}
+  end
+end
+
+local function record_hand_type(hand_type)
+  if not hand_type or hand_type == "" then return end
+  reset_hand_history_if_needed()
+  if not _HAND_HISTORY[hand_type] then
+    _HAND_HISTORY[hand_type] = 0
+    _HAND_HISTORY_ORDER[#_HAND_HISTORY_ORDER + 1] = hand_type
+  end
+  _HAND_HISTORY[hand_type] = _HAND_HISTORY[hand_type] + 1
+end
+
+local function game_hand_stats()
+  local hands = G and G.GAME and G.GAME.hands
+  if type(hands) ~= "table" then return nil end
+  local has_round_counts = false
+  for _, entry in pairs(hands) do
+    if type(entry) == "table" and entry.played_this_round ~= nil then
+      has_round_counts = true
+      break
+    end
+  end
+  return hands, has_round_counts
+end
+
+local function current_round_hand_history()
+  reset_hand_history_if_needed()
+  local hands, has_round_counts = game_hand_stats()
+  local played = {}
+  if hands and has_round_counts then
+    -- The engine's per-hand counter is authoritative: it also covers hands
+    -- played manually, not just those dispatched through this bridge.
+    for name, entry in pairs(hands) do
+      local count = tonumber(entry.played_this_round) or 0
+      for _ = 1, count do played[#played + 1] = tostring(name) end
+    end
+    table.sort(played)
+  else
+    for _, name in ipairs(_HAND_HISTORY_ORDER) do
+      local count = _HAND_HISTORY[name] or 0
+      for _ = 1, count do played[#played + 1] = name end
+    end
+  end
+  local most, count = nil, 0
+  local tally = {}
+  for _, name in ipairs(played) do tally[name] = (tally[name] or 0) + 1 end
+  for name, value in pairs(tally) do
+    if value > count then most, count = name, value end
+  end
+  return played, most
+end
+
+local function run_most_played_hand()
+  local hands = game_hand_stats()
+  local most, count = nil, 0
+  if hands then
+    for name, entry in pairs(hands) do
+      local value = tonumber(entry.played) or 0
+      if value > count then most, count = tostring(name), value end
+    end
+  end
+  if most then return most end
+  local _, round_most = current_round_hand_history()
+  return round_most
+end
+
+local function classify_selected_hand(cards)
+  local n = #(cards or {})
+  if n == 0 then return nil end
+  local counts, suits = {}, {}
+  for _, c in ipairs(cards) do
+    local rank = tostring(c.base and c.base.value or "")
+    counts[rank] = (counts[rank] or 0) + 1
+    local suit = tostring(c.base and c.base.suit or "")
+    suits[suit] = (suits[suit] or 0) + 1
+  end
+  local groups = {}
+  for _, count in pairs(counts) do groups[#groups + 1] = count end
+  table.sort(groups, function(a, b) return a > b end)
+  local flush = false
+  for _, count in pairs(suits) do if count == n and n >= 5 then flush = true break end end
+  local values, seen = {}, {}
+  local rank_values = { ["2"] = 2, ["3"] = 3, ["4"] = 4, ["5"] = 5, ["6"] = 6, ["7"] = 7, ["8"] = 8, ["9"] = 9, ["10"] = 10, J = 11, Q = 12, K = 13, A = 14 }
+  for rank in pairs(counts) do
+    local value = rank_values[rank] or tonumber(rank)
+    if value and not seen[value] then seen[value] = true; values[#values + 1] = value end
+  end
+  table.sort(values)
+  local straight = false
+  if #values >= 5 then
+    for i = 1, #values - 4 do
+      if values[i + 4] - values[i] == 4 then straight = true; break end
+    end
+    if not straight and seen[14] and seen[2] and seen[3] and seen[4] and seen[5] then straight = true end
+  end
+  if straight and flush then return "Straight Flush" end
+  if groups[1] == 5 then return "Five of a Kind" end
+  if groups[1] == 4 then return "Four of a Kind" end
+  if groups[1] == 3 and groups[2] == 2 then return "Full House" end
+  if flush then return "Flush" end
+  if straight then return "Straight" end
+  if groups[1] == 3 then return "Three of a Kind" end
+  if groups[1] == 2 and groups[2] == 2 then return "Two Pair" end
+  if groups[1] == 2 then return "Pair" end
+  return "High Card"
+end
+
 local function build_state_json(actual)
+  reset_hand_history_if_needed()
   local hand = area_cards(G.hand)
   local jokers = area_cards(G.jokers)
   local cons = area_cards(G.consumeables)
@@ -460,6 +594,10 @@ local function build_state_json(actual)
   parts[#parts + 1] = '"money":' .. jstr(tonumber(G.GAME and G.GAME.dollars or 0))
   parts[#parts + 1] = '"ante":' .. jstr(tonumber(G.GAME and G.GAME.round_resets and G.GAME.round_resets.ante or 1))
   parts[#parts + 1] = '"round":' .. jstr(tonumber((G.GAME and G.GAME.round) or cr.round or 1))
+
+  local played_hands, most_played_hand = current_round_hand_history()
+  parts[#parts + 1] = '"played_hands":' .. jtable(map(played_hands, jstr))
+  parts[#parts + 1] = '"most_played_hand":' .. jstr(most_played_hand)
 
   local deck_count = (G.deck and G.deck.cards and #G.deck.cards) or 0
   local discard_count = (G.discard and G.discard.cards and #G.discard.cards) or 0
@@ -1011,11 +1149,43 @@ local function decidex_execute_inner(action, args)
     if action == "use_card" and G.FUNCS and G.FUNCS.use_card then
       if args.target_indices and G.hand and G.hand.cards then
         if G.hand.unhighlight_all then G.hand:unhighlight_all() end
+        local is_zero_based = false
+        for _, idx in ipairs(args.target_indices) do
+          if idx == 0 then is_zero_based = true break end
+        end
+        local selected_cards = {}
         for _, t_idx in ipairs(args.target_indices) do
-          local tc = G.hand.cards[t_idx]
+          local lua_idx = is_zero_based and (t_idx + 1) or t_idx
+          local tc = G.hand.cards[lua_idx]
           if tc then
-            if G.hand.add_to_highlighted then G.hand:add_to_highlighted(tc, true) else tc.highlighted = true end
+            table.insert(selected_cards, tc)
           end
+        end
+
+        -- Guarantee for Death (Tarot: converts LEFT card into RIGHT card)
+        -- args.target_indices[1] is victim (to be overwritten), args.target_indices[2] is donor (to be cloned)
+        local card_name = (c.ability and c.ability.name) or c.name or ""
+        if (card_name == "Death" or (c.label and string.find(c.label, "Death"))) and #selected_cards == 2 then
+          local victim = selected_cards[1]
+          local donor = selected_cards[2]
+          local v_idx, d_idx
+          for k, card in ipairs(G.hand.cards) do
+            if card == victim then v_idx = k end
+            if card == donor then d_idx = k end
+          end
+          if v_idx and d_idx and v_idx > d_idx then
+            -- Swap them in G.hand.cards so victim is to the left of donor!
+            G.hand.cards[v_idx], G.hand.cards[d_idx] = G.hand.cards[d_idx], G.hand.cards[v_idx]
+            if G.hand.set_ranks then pcall(function() G.hand:set_ranks() end) end
+            if G.hand.align_cards then pcall(function() G.hand:align_cards() end) end
+            if victim.T and donor.T and victim.T.x >= donor.T.x then
+              victim.T.x, donor.T.x = donor.T.x - 0.1, donor.T.x
+            end
+          end
+        end
+
+        for _, tc in ipairs(selected_cards) do
+          if G.hand.add_to_highlighted then G.hand:add_to_highlighted(tc, true) else tc.highlighted = true end
         end
       end
       local ok, err = pcall(G.FUNCS.use_card, {config = {ref_table = c}})

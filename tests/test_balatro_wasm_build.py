@@ -6,8 +6,13 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import threading
+import urllib.error
+import urllib.request
 import zipfile
+from http.server import ThreadingHTTPServer
 from pathlib import Path
+
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -153,6 +158,116 @@ def test_packaged_balatro_love_structure():
 
 def test_web_assets_integrity():
     assert check_assets(WEB_DIR) is True
+
+
+def test_web_asset_check_excludes_proprietary_binaries(tmp_path):
+    for name in ("index.html", "style.css", "app.js", "viz.js", "viz.css", "love.js"):
+        (tmp_path / name).write_bytes(b"x" * 200000)
+    assert check_assets(tmp_path) is True
+
+
+def test_server_refuses_to_start_when_controlled_assets_are_missing(monkeypatch):
+    monkeypatch.setattr(serve_mod, "check_assets", lambda: False)
+    monkeypatch.setattr(serve_mod.socketserver, "TCPServer",
+                        lambda *args, **kwargs: pytest.fail("server must not start"))
+    assert serve_mod.run_server() == 1
+
+
+def test_static_asset_range_responses(tmp_path, monkeypatch):
+    from tools.balatro_web.app import Handler
+
+    target = tmp_path / "bundle.love"
+    target.write_bytes(b"0123456789")
+    monkeypatch.setattr("tools.balatro_web.app.WASM_WEB_DIR", tmp_path)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        request = urllib.request.Request(base + "/bundle.love", headers={"Range": "bytes=3-6"})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 206
+            assert response.headers["Content-Range"] == "bytes 3-6/10"
+            assert response.read() == b"3456"
+
+        request = urllib.request.Request(base + "/bundle.love", headers={"Range": "bytes=20-"})
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request, timeout=5)
+        assert error.value.code == 416
+        assert error.value.headers["Content-Range"] == "bytes */10"
+        assert error.value.headers["Content-Length"] == "0"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_wasm_server_serves_byte_ranges(tmp_path, monkeypatch):
+    (tmp_path / "game.love").write_bytes(b"0123456789")
+    monkeypatch.setattr(serve_mod, "WEB_DIR", tmp_path)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), serve_mod.WasmHTTPRequestHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        request = urllib.request.Request(base + "/game.love", headers={"Range": "bytes=4-7"})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 206
+            assert response.headers["Content-Range"] == "bytes 4-7/10"
+            assert response.read() == b"4567"
+
+        request = urllib.request.Request(base + "/game.love", headers={"Range": "bytes=-3"})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 206
+            assert response.read() == b"789"
+
+        request = urllib.request.Request(base + "/game.love", headers={"Range": "bytes=99-"})
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request, timeout=5)
+        assert error.value.code == 416
+        assert error.value.headers["Content-Range"] == "bytes */10"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_frame_response_body_matches_etag(tmp_path, monkeypatch):
+    from tools.balatro_web import app as web_app
+
+    frame_path = tmp_path / "frame.jpg"
+    frame_data = b"frame-bytes"
+    frame_path.write_bytes(frame_data)
+    monkeypatch.setattr(web_app, "FRAME_PATH", frame_path)
+    monkeypatch.setattr(web_app, "_FRAME_ETAG", "")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), web_app.Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        with urllib.request.urlopen(base + "/api/frame.jpg", timeout=5) as response:
+            body = response.read()
+            assert body == frame_data
+            assert response.headers["ETag"] == f'"{__import__("hashlib").sha1(body).hexdigest()[:16]}"'
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_web_credentials_are_unset_without_environment(monkeypatch):
+    monkeypatch.delenv("BALATRO_WEB_USER", raising=False)
+    monkeypatch.delenv("BALATRO_WEB_PASSWORD", raising=False)
+    app_path = ROOT / "tools" / "balatro_web" / "app.py"
+    spec = importlib.util.spec_from_file_location("balatro_web_app_credentials", app_path)
+    web_app = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(web_app)
+    assert web_app.WEB_USER == ""
+    assert web_app.WEB_PASSWORD == ""
+    assert not web_app._check_credentials("", "")
 
 
 def test_cdn_cache_aliases_and_mimetypes():

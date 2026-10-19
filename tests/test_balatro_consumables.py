@@ -494,3 +494,25 @@ def test_standard_pack_card_enhancement_and_seal_evaluation():
     assert safe.candidate_id == "select_pack_card:1"
 
 
+def test_the_fool_usability_gate():
+    # When The Fool has can_use=False (e.g. no prior tarot/planet was used this run),
+    # it must receive a heavily discounted heuristic score and never be chosen as safe default
+    state_disabled = _make_sample_state(
+        consumables=[Consumable(name="The Fool", type="tarot", can_use=False)],
+    )
+    actions_disabled = enumerate_legal_actions(state_disabled)
+    fool_disabled = [a for a in actions_disabled if a.metadata.get("name") == "The Fool"][0]
+    assert fool_disabled.heuristic_score <= 1.0
+    safe_disabled = choose_safe_default(actions_disabled, state_disabled)
+    assert safe_disabled.metadata.get("name") != "The Fool"
+
+    # When The Fool is usable (can_use=True), it retains high heuristic priority
+    state_enabled = _make_sample_state(
+        consumables=[Consumable(name="The Fool", type="tarot", can_use=True)],
+    )
+    actions_enabled = enumerate_legal_actions(state_enabled)
+    fool_enabled = [a for a in actions_enabled if a.metadata.get("name") == "The Fool"][0]
+    assert fool_enabled.heuristic_score >= 5.0
+
+
+

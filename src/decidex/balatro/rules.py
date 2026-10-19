@@ -277,11 +277,17 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
     constraints = detect_active_constraints(
         state.jokers,
         blind_name=blind_name,
+        played_hands=set(getattr(state, "played_hands", []) or []),
         most_played_hand=most_played,
         money=money,
     )
     synergy = analyze_synergy(state.jokers, getattr(state, "ante", 1))
-    econ = calculate_economy_status(getattr(state, "money", 0), getattr(state, "ante", 1))
+    has_to_the_moon = any(j.name == "To the Moon" for j in state.jokers)
+    econ = calculate_economy_status(
+        getattr(state, "money", 0),
+        getattr(state, "ante", 1),
+        has_to_the_moon=has_to_the_moon,
+    )
 
     # --- BLIND SELECT PHASE ACTIONS ---
     if state_name == "BLIND_SELECT" or (state_name not in ("SHOP", "SELECTING_HAND", "ROUND_EVAL", "GAME_OVER") and getattr(state, "can_select_blind", False)):
@@ -896,7 +902,12 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
             targets = []
             target_labels = []
 
-        if cname in PLANET_CARD_MAP or ctype == "planet":
+        # Check whether the engine allows using this card right now
+        card_can_use = getattr(cons, "can_use", True)
+        if card_can_use is False:
+            h_score = 0.5
+            desc = f"使用消耗牌 [{cname}] (引擎限制当前不可用)"
+        elif cname in PLANET_CARD_MAP or ctype == "planet":
             h_score = 5.8
             hand_type = PLANET_CARD_MAP.get(cname, "指定手牌")
             desc = f"使用星球牌 [{cname}] 永久升级 [{hand_type}] 等级"
@@ -1100,7 +1111,8 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
         ))
 
     # Pass 5: Joker Reorder Optimization (from left to right mathematical law)
-    opt_order, needs_reorder, reorder_reason = compute_optimal_joker_order(state.jokers)
+    order_phase = "shop" if state_name == "SHOP" else ("cash_out" if state_name == "ROUND_EVAL" else "play")
+    opt_order, needs_reorder, reorder_reason = compute_optimal_joker_order(state.jokers, phase=order_phase)
     if needs_reorder:
         gain = estimate_ordering_gain(state.jokers)
         reorder_heuristic = 5.5 + gain * 1.5

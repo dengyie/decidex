@@ -119,7 +119,7 @@ def simulate_play(
     hand_type = detect_hand_type(played)
     blind_name = getattr(getattr(state, "blind", None), "name", "")
 
-    # Boss: The Psychic requires exactly 5 cards; fewer than 5 cards score 0!
+    # The Psychic checks the selected hand size, not its scoring subset.
     if blind_name == "The Psychic" and len(played) < 5:
         return ScoreResult(
             hand_type,
@@ -128,10 +128,6 @@ def simulate_play(
             0.0,
             [f"The Psychic: 必须打满 5 张牌 (当前打出 {len(played)} 张，判定为 0 分)"],
         )
-
-    # Boss: The Psychic requires exact 5 cards played, otherwise 0 score
-    if blind_name == "The Psychic" and len(played) < 5:
-        return ScoreResult(hand_type, 0, 0.0, 0, ["The Psychic: 强制要求出满5张牌，当前出牌不足5张判0分"])
 
     base_chips, base_mult = base_values(hand_type)
 
@@ -168,8 +164,8 @@ def simulate_play(
     joker_static = [(j.chips, j.mult, j.xmult) for j, hooks in zip(state.jokers, known)
                     if not hooks]
 
-    # Scoring cards identification (junk/filtering cards in played do not score chips or mult)
-    scoring_cards = get_scoring_cards(played, hand_type)
+    scoring_ids = {id(c) for c in get_scoring_cards(played, hand_type)}
+    scoring_cards = [c for c in played if id(c) in scoring_ids]
 
     # Boss Debuffs
     debuffed_suit = DEBUFFED_SUIT_BOSSES.get(blind_name)
@@ -211,10 +207,10 @@ def simulate_play(
                             mult *= pc.get("xmult", 1.0)
                             log.append(f"{joker.name} → {c.label}")
 
-    # 1) played cards left-to-right (joker per-card hooks interleave).
-    _run(played, held_mode=False)
+    # 1) scoring cards left-to-right (joker per-card hooks interleave).
+    _run(scoring_cards, held_mode=False)
     # 2) held-in-hand steel + held hooks.
-    _run([c for i, c in enumerate(state.hand) if c not in played], held_mode=True)
+    _run(held_cards, held_mode=True)
 
     # 3) jokers: static values (uncatalogued only), then on_hand hooks.
     for (jc, jm, jx) in joker_static:

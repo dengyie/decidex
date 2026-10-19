@@ -11,8 +11,8 @@
 | **被动破戒发生率 (越低越好)** | 37.5% | **0.0%** | **0.0%** | **-100.0% (完全杜绝)** |
 | **利息与安全预算守则合规率** | 75.0% | **87.5%** | **87.5%** | **+12.5%** |
 | **小丑位置数学排序最优率** | 87.5% | **100.0%** | **100.0%** | **+12.5%** |
-| **平均决策单步期望得分** | 217.2 | **202.1** | **202.1** | **+-6.9%** |
-| **平均决策延迟 (毫秒)** | 1.56 ms | 13.24 ms | 15.38 ms | 标准生命周期耗时 |
+| **平均决策单步期望得分** | 217.2 | **175.1** | **175.1** | **+-19.4%** |
+| **平均决策延迟 (毫秒)** | 1.35 ms | 178.92 ms | 184.50 ms | 标准生命周期耗时 |
 
 ## 三、 场景逐项实测详情
 
@@ -22,7 +22,7 @@
 | `scen_02_interest_line_defense` | **$25 黄金利息线守护与预算评级** | economy | buy_joker: 购买小丑 [Joker] ($6) - 暂不推荐: | **buy_joker**: 购买小丑 [Blue Joker] ($4) -  | ✅ 完美避险/增益 |
 | `scen_03_joker_ordering_gain` | **小丑从左到右数学排序优化** | joker_order | play: 打出 Pair 32×26 = 832(距 156 | **reorder_jokers**: 调整小丑排布顺序 [1-0] - 严重排位缺陷：乘 | ✅ 完美避险/增益 |
 | `scen_04_four_pillars_synergy` | **四角大厦木桶短板修补 (筹码缺失加权)** | synergy | buy_joker: 购买小丑 [Abstract Joker] ($5 | **buy_joker**: 购买小丑 [Ice Cream] ($5) - 强 | ✅ 完美避险/增益 |
-| `scen_05_green_joker_discard_avoidance` | **Green Joker 弃牌惩罚规避与出牌仲裁** | constraints | play: 打出 High Card 15×26 = 390( | **play**: 打出 High Card 20×26 = 520  | ✅ 完美避险/增益 |
-| `scen_06_the_psychic_filtering_play` | **The Psychic 5张出牌限制与杂牌过滤** | constraints | play: 打出 High Card 0×0 = 0 (⚠️  | **play**: 打出 Pair 41×6 = 246 (附带弃牌: | ✅ 完美避险/增益 |
+| `scen_05_green_joker_discard_avoidance` | **Green Joker 弃牌惩罚规避与出牌仲裁** | constraints | play: 打出 High Card 15×26 = 390( | **play**: 打出 High Card 15×26 = 390  | ✅ 完美避险/增益 |
+| `scen_06_the_psychic_filtering_play` | **The Psychic 5张出牌限制与杂牌过滤** | constraints | play: 打出 High Card 0×0 = 0 (⚠️  | **play**: 打出 Pair 32×6 = 192 (附带弃牌: | ✅ 完美避险/增益 |
 | `scen_07_ante1_blind_skip_suicide_trap` | **Ante 1 零小丑跳过大盲注暴毙门禁** | blind_clear | skip_blind: 跳过盲注 [Big Blind] 领取 Tag [ | **select_blind**: 进入盲注 [Big Blind] (目标 450  | ✅ 完美避险/增益 |
-| `scen_08_pseudo_discard_held_card_protection` | **出牌附带杂牌之留手卡牌保护 (钢铁/黄金防误弃)** | constraints | play: 打出 Pair 32×8 = 256(距 344) | **play**: 打出 Pair 36×8 = 288 (附带弃牌: | ✅ 完美避险/增益 |
+| `scen_08_pseudo_discard_held_card_protection` | **出牌附带杂牌之留手卡牌保护 (钢铁/黄金防误弃)** | constraints | play: 打出 Pair 32×8 = 256(距 344) | **play**: 打出 Pair 32×8 = 256 (附带弃牌: | ✅ 完美避险/增益 |

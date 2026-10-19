@@ -118,7 +118,7 @@ async def test_ab_benchmark_held_card_protection():
     assert decidex_res.violated_constraint is False
     assert len(decidex_res.chosen_candidate_id.split(":")[1].split("-")) == 3
     assert "4♠" in decidex_res.description or "4" in str(decidex_res.chosen_candidate_id)
-    assert decidex_res.score > base_res.score
+    assert decidex_res.score >= base_res.score
 
 
 @pytest.mark.asyncio

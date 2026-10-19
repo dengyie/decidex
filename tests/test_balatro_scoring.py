@@ -16,7 +16,46 @@ def plain(specs):
     return [Card(rank=r, suit=s) for r, s in specs]
 
 
-def test_high_card_ace_bare():
+def test_pair_filtering_scores_only_pair_cards_and_card_hooks():
+    hand = [
+        Card(rank="A", suit="S"),
+        Card(rank="A", suit="H", enhancement="mult", seal="red"),
+        Card(rank="K", suit="D", enhancement="bonus", seal="red"),
+    ]
+    r = simulate_play(hand, state(hand, [Joker(name="Scary Face")]))
+    # Pair scores its two aces. The king kicker's bonus, retrigger and hook do not score.
+    assert r.chips == 10 + 11 + 22
+    assert r.mult == 2 + 8
+    assert not any("K♦" in trigger for trigger in r.triggered)
+
+
+def test_two_pair_filtering_ignores_kicker_enhancements_and_retriggers():
+    hand = [
+        Card(rank="K", suit="S"), Card(rank="K", suit="H"),
+        Card(rank="8", suit="D"), Card(rank="8", suit="C"),
+        Card(rank="A", suit="S", enhancement="bonus", seal="red"),
+    ]
+    r = simulate_play(hand, state(hand))
+    assert r.chips == 20 + 10 + 10 + 8 + 8
+    assert r.mult == 2
+
+
+def test_psychic_counts_selected_cards_even_when_only_pair_scores():
+    hand = [
+        Card(rank="A", suit="S"), Card(rank="A", suit="H"),
+        Card(rank="2", suit="C"), Card(rank="4", suit="D"), Card(rank="7", suit="S"),
+    ]
+    result = simulate_play(hand, state(hand, blind_chips=1000))
+    assert result.hand_type == "Pair"
+    assert result.score > 0
+
+    psychic_state = state(hand, blind_chips=1000)
+    psychic_state.blind.name = "The Psychic"
+    psychic_result = simulate_play(hand[:4], psychic_state)
+    assert psychic_result.score == 0
+    assert "The Psychic" in psychic_result.triggered[0]
+
+
     hand = plain([("A", "S"), ("5", "H")])
     r = simulate_play([hand[0]], state(hand))
     # High card 5 base + 11 chips = 16 x 1.
@@ -36,16 +75,16 @@ def test_greedy_joker_per_diamond():
     hand = plain([("5", "D"), ("J", "D"), ("9", "C")])
     jokers = [Joker(name="Greedy Joker")]
     r = simulate_play([hand[0], hand[1], hand[2]], state(hand, jokers))
-    # High card 5 + (5+10+9) = 29 chips; mult 1 + 3 + 3 (two diamonds) = 7.
-    assert (r.hand_type, r.chips, r.mult) == ("High Card", 29, 7.0)
-    assert r.score == 29 * 7
+    # High Card scores only the highest card (J): 5 base + 10 chips, plus Greedy's +3 mult.
+    assert (r.hand_type, r.chips, r.mult) == ("High Card", 15, 4.0)
+    assert r.score == 60
 
 
 def test_bonus_foil_enhancements():
     hand = [Card(rank="5", suit="D", enhancement="bonus", edition="foil"), Card(rank="9", suit="C")]
     r = simulate_play([hand[0], hand[1]], state(hand))
-    # 5 base + (5+30+50) + 9 = 99 chips; High Card mult 1.
-    assert (r.hand_type, r.chips) == ("High Card", 99)
+    # High card scores only the highest 9: base 5 + 9 chips.
+    assert (r.hand_type, r.chips) == ("High Card", 14)
 
 
 def test_glass_and_holo_xmult():
@@ -56,17 +95,22 @@ def test_glass_and_holo_xmult():
 
 
 def test_red_seal_retriggers():
-    hand = [Card(rank="K", suit="H"), Card(rank="3", suit="S", enhancement="mult", seal="red")]
-    r = simulate_play([hand[0], hand[1]], state(hand))
-    # High card: chips 5 + (10) + (3)*2 retriggers = 21; mult 1 + 4 + 4 = 9.
-    assert (r.hand_type, r.chips, r.mult) == ("High Card", 21, 9.0)
+    hand = [
+        Card(rank="3", suit="H", enhancement="mult", seal="red"),
+        Card(rank="3", suit="S"),
+        Card(rank="K", suit="D"),
+    ]
+    r = simulate_play(hand, state(hand))
+    # Both pair cards score (3+3 for red seal, 3 for 3S = 9 card chips + 10 base = 19); the red-sealed Mult card retriggers its enhancement.
+    # The King kicker does not score chips.
+    assert (r.hand_type, r.chips, r.mult) == ("Pair", 19, 10.0)
 
 
 def test_steel_held_in_hand():
     hand = [Card(rank="2", suit="H"), Card(rank="9", suit="C"), Card(rank="K", suit="H", enhancement="steel")]
     r = simulate_play([hand[0], hand[1]], state(hand))
-    # High card 5+2+9=16 chips; mult (1 x2 held steel) = 2 -> 32.
-    assert (r.chips, r.mult, r.score) == (16, 2.0, 32)
+    # High Card scores only the highest 9; the held Steel card doubles mult.
+    assert (r.chips, r.mult, r.score) == (14, 2.0, 28)
 
 
 def test_baron_held_king_xmult():
