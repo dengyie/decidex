@@ -153,3 +153,247 @@ def test_ride_the_bus_with_non_scoring_face_card():
     scoring_k = get_scoring_cards(hand_k, "High Card")
     safety_k = evaluate_play_safety(hand_k, "High Card", constraints, scoring_cards=scoring_k)
     assert safety_k.is_fatal_violation is True
+
+
+def test_held_in_hand_steel_and_gold_card_protection():
+    """Verify that Steel, Gold, and Blue Seal cards are protected from junk dumping."""
+    hand = [
+        _card("A", "S"),
+        _card("A", "H"),
+        _card("2", "D", enhancement="steel"),
+        _card("3", "C", enhancement="gold"),
+        _card("4", "S"),
+    ]
+    state = BalatroState(
+        hand=hand,
+        blind=Blind(name="Small Blind", chips=600, scored=0),
+        jokers=[Joker(name="Joker", mult=4)],
+        hands_left=3,
+        discards_left=0,
+    )
+
+    actions = enumerate_legal_actions(state)
+    plays = [a for a in actions if a.metadata.get("action_type") == "play"]
+
+    # Play dumping unenhanced 4S
+    clean_play = next(
+        p for p in plays
+        if "A♠" in p.metadata["cards"] and "A♥" in p.metadata["cards"] and "4♠" in p.metadata["cards"]
+        and "2♦" not in p.metadata["cards"] and "3♣" not in p.metadata["cards"]
+    )
+
+    # Play dumping the Steel 2D
+    steel_dump_play = next(
+        p for p in plays
+        if "A♠" in p.metadata["cards"] and "A♥" in p.metadata["cards"] and "2♦" in p.metadata["cards"]
+        and "4♠" not in p.metadata["cards"] and "3♣" not in p.metadata["cards"]
+    )
+
+    # Clean play must score significantly higher than the play that burns a Steel card!
+    assert clean_play.heuristic_score > steel_dump_play.heuristic_score * 1.5
+
+
+def test_baron_king_protection_from_junk_dumping():
+    """When Baron is present, Kings held in hand provide x1.5 mult each and must not be dumped."""
+    hand = [
+        _card("A", "S"),
+        _card("A", "H"),
+        _card("K", "D"),  # Baron King
+        _card("5", "C"),  # Ordinary junk
+    ]
+    state = BalatroState(
+        hand=hand,
+        blind=Blind(name="Big Blind", chips=600, scored=0),
+        jokers=[Joker(name="Baron")],
+        hands_left=2,
+        discards_left=0,
+    )
+
+    actions = enumerate_legal_actions(state)
+    plays = [a for a in actions if a.metadata.get("action_type") == "play"]
+
+    junk_play = next(
+        p for p in plays
+        if "A♠" in p.metadata["cards"] and "A♥" in p.metadata["cards"] and "5♣" in p.metadata["cards"]
+        and "K♦" not in p.metadata["cards"]
+    )
+
+    king_dump_play = next(
+        p for p in plays
+        if "A♠" in p.metadata["cards"] and "A♥" in p.metadata["cards"] and "K♦" in p.metadata["cards"]
+        and "5♣" not in p.metadata["cards"]
+    )
+
+    assert junk_play.heuristic_score > king_dump_play.heuristic_score * 1.8
+
+
+def test_the_psychic_5_card_filtering_bonus():
+    """Under The Psychic, plays must contain 5 cards. Padding a Pair with 3 junk cards is rewarded."""
+    hand = [
+        _card("A", "S"),
+        _card("A", "H"),
+        _card("2", "D"),
+        _card("3", "C"),
+        _card("4", "S"),
+    ]
+    state = BalatroState(
+        hand=hand,
+        blind=Blind(name="The Psychic", chips=1000, scored=0),
+        jokers=[Joker(name="Joker", mult=4)],
+        hands_left=2,
+        discards_left=0,
+    )
+
+    actions = enumerate_legal_actions(state)
+    plays = [a for a in actions if a.metadata.get("action_type") == "play"]
+
+    # 5-card padded play
+    padded_play = next(
+        p for p in plays
+        if len(p.metadata["cards"]) == 5 and "A♠" in p.metadata["cards"] and "A♥" in p.metadata["cards"]
+    )
+
+    # 2-card bare play
+    bare_play = next(
+        p for p in plays
+        if len(p.metadata["cards"]) == 2 and "A♠" in p.metadata["cards"] and "A♥" in p.metadata["cards"]
+    )
+
+    # Under The Psychic, 2-card play is fatal/disallowed or severely penalized, while 5-card play succeeds
+    assert padded_play.heuristic_score > bare_play.heuristic_score * 3.0
+
+
+def test_discard_held_card_protection_steel_and_gold():
+    """Verify that discarding protected held-in-hand cards (Steel, Gold) is heavily penalized."""
+    hand = [
+        _card("A", "S"),
+        _card("K", "S"),
+        _card("2", "D", enhancement="steel"),  # Should not discard
+        _card("3", "C", enhancement="gold"),   # Should not discard
+        _card("4", "H"),                      # Safe to discard
+    ]
+    state = BalatroState(
+        hand=hand,
+        blind=Blind(name="Small Blind", chips=600, scored=0),
+        jokers=[Joker(name="Joker", mult=4)],
+        hands_left=3,
+        discards_left=2,
+    )
+
+    actions = enumerate_legal_actions(state)
+    discards = [a for a in actions if a.metadata.get("action_type") == "discard"]
+
+    # Discarding safe 4H (index 4)
+    safe_discard = next(d for d in discards if d.metadata["indices"] == [4])
+
+    # Discarding Steel 2D (index 2)
+    steel_discard = next(d for d in discards if d.metadata["indices"] == [2])
+
+    assert safe_discard.heuristic_score > steel_discard.heuristic_score * 2.0
+
+
+def test_discard_draw_odds_flush_hunting():
+    """Verify that discarding off-suit cards to hunt a 4-card flush receives odds-weighted boost."""
+    hand = [
+        _card("A", "S"),
+        _card("K", "S"),
+        _card("9", "S"),
+        _card("6", "S"),
+        _card("2", "H"),  # Off-suit
+        _card("3", "D"),  # Off-suit
+    ]
+    state = BalatroState(
+        hand=hand,
+        blind=Blind(name="Small Blind", chips=600, scored=0),
+        jokers=[],
+        hands_left=3,
+        discards_left=2,
+    )
+
+    actions = enumerate_legal_actions(state)
+    discards = [a for a in actions if a.metadata.get("action_type") == "discard"]
+
+    # Discarding the two off-suit cards (indices 4, 5) keeping 4 Spades
+    flush_chase_discard = next(d for d in discards if set(d.metadata["indices"]) == {4, 5})
+    assert "追同花" in flush_chase_discard.description
+    assert flush_chase_discard.metadata.get("draw_bonus", 0.0) > 0.0
+
+    # Discarding 2 Spades (indices 0, 1) destroying the flush draw
+    spade_dump_discard = next(d for d in discards if set(d.metadata["indices"]) == {0, 1})
+
+    # Flush-chasing discard must score higher than ruining the 4-card flush
+    assert flush_chase_discard.heuristic_score > spade_dump_discard.heuristic_score
+
+
+def test_glass_lucky_and_high_card_protection_from_junk_dumping():
+    """Verify that Glass, Lucky, Mult, Edition, and High face cards (A, K, Q, J) are protected from being dumped as junk."""
+    hand = [
+        _card("8", "S"),
+        _card("8", "H"),
+        _card("A", "D"),                         # High Card (Ace) - should not be dumped as junk
+        _card("K", "C", enhancement="glass"),    # Glass King - critical scoring asset!
+        _card("2", "C"),                         # Low rank white card - ideal junk
+    ]
+    state = BalatroState(
+        hand=hand,
+        blind=Blind(name="Small Blind", chips=600, scored=0),
+        jokers=[Joker(name="Joker", mult=4)],
+        hands_left=2,
+        discards_left=0,
+    )
+
+    actions = enumerate_legal_actions(state)
+    plays = [a for a in actions if a.metadata.get("action_type") == "play"]
+
+    # Play Pair 8s dumping low 2C
+    low_junk_play = next(
+        p for p in plays
+        if "8♠" in p.metadata["cards"] and "8♥" in p.metadata["cards"] and "2♣" in p.metadata["cards"]
+        and "A♦" not in p.metadata["cards"] and "K♣" not in p.metadata["cards"]
+    )
+
+    # Play Pair 8s dumping Ace as junk
+    ace_dump_play = next(
+        p for p in plays
+        if "8♠" in p.metadata["cards"] and "8♥" in p.metadata["cards"] and "A♦" in p.metadata["cards"]
+        and "2♣" not in p.metadata["cards"] and "K♣" not in p.metadata["cards"]
+    )
+
+    # Play Pair 8s dumping Glass King as junk
+    glass_dump_play = next(
+        p for p in plays
+        if "8♠" in p.metadata["cards"] and "8♥" in p.metadata["cards"] and "K♣" in p.metadata["cards"]
+        and "2♣" not in p.metadata["cards"] and "A♦" not in p.metadata["cards"]
+    )
+
+    # Dumping isolated low 2C must score significantly higher than burning Ace or Glass card!
+    assert low_junk_play.heuristic_score > ace_dump_play.heuristic_score * 1.5
+    assert low_junk_play.heuristic_score > glass_dump_play.heuristic_score * 2.5
+
+
+def test_pure_play_preferred_when_discards_left():
+    """When discards_left > 0, pure hand plays without unnecessary junk dumping are preferred."""
+    hand = [
+        _card("9", "S"),
+        _card("9", "H"),
+        _card("3", "D"),
+        _card("4", "C"),
+    ]
+    # State with 2 discards available
+    st = BalatroState(
+        hand=hand,
+        blind=Blind(name="Big Blind", chips=600, scored=0),
+        jokers=[Joker(name="Joker", mult=4)],
+        hands_left=3,
+        discards_left=2,
+    )
+    actions = enumerate_legal_actions(st)
+    plays = [a for a in actions if a.metadata.get("action_type") == "play"]
+
+    pure_pair = next(p for p in plays if len(p.metadata["cards"]) == 2 and set(p.metadata["cards"]) == {"9♠", "9♥"})
+    padded_pair = next(p for p in plays if len(p.metadata["cards"]) == 3 and "9♠" in p.metadata["cards"] and "9♥" in p.metadata["cards"])
+
+    # When discards remain, keeping the hand pure avoids burning cards unnecessarily
+    assert pure_pair.heuristic_score > padded_pair.heuristic_score
+
+

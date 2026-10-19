@@ -12,6 +12,29 @@
     console.warn("[Alert Suppressed]:", msg);
   };
 
+  // Globally block browser full-screen requests to ensure DecideX HUD is always visible
+  // and canvas coordinates remain strictly 1:1 aligned with the page layout
+  try {
+    const rejectFs = function() { return Promise.reject(new Error("Fullscreen disabled")); };
+    if (typeof HTMLCanvasElement !== "undefined") {
+      HTMLCanvasElement.prototype.requestFullscreen = rejectFs;
+      HTMLCanvasElement.prototype.webkitRequestFullscreen = function() {};
+      HTMLCanvasElement.prototype.mozRequestFullScreen = function() {};
+      HTMLCanvasElement.prototype.msRequestFullscreen = function() {};
+    }
+    if (typeof Element !== "undefined") {
+      Element.prototype.requestFullscreen = rejectFs;
+      Element.prototype.webkitRequestFullscreen = function() {};
+      Element.prototype.mozRequestFullScreen = function() {};
+      Element.prototype.msRequestFullscreen = function() {};
+    }
+    if (document.fullscreenElement && document.exitFullscreen) {
+      document.exitFullscreen().catch(() => {});
+    }
+  } catch (e) {
+    console.warn("[DecideX] Could not patch fullscreen prototype:", e);
+  }
+
   // State globals
   let currentGameState = null;
   let currentRecommendation = null;
@@ -85,6 +108,12 @@
           window.onBalatroStateUpdate(state);
         } catch (e) {
           console.error("[DecideX] Failed to parse state JSON:", e);
+        }
+      } else if (text.startsWith("[DECIDEX_ACTION_RESULT] ")) {
+        const resStr = text.substring("[DECIDEX_ACTION_RESULT] ".length);
+        console.log("[DECIDEX_ACTION_RESULT]", resStr);
+        if (window.AutoPilot && typeof window.AutoPilot.onActionResult === "function") {
+          window.AutoPilot.onActionResult(resStr);
         }
       } else {
         console.log("[LÖVE stdout]", text);
@@ -302,9 +331,64 @@ end
   setInterval(syncSaveFileSystem, 15000);
   window.addEventListener("beforeunload", syncSaveFileSystem);
 
-  const CACHE_NAME = "balatro-asset-cache-v24";
-  const ASSET_URL = "balatro.love.zip?v=24";
-  const WASM_URL = "love.wasm.bin?v=24";
+  // Core persistent cache identifiers (versioned to ensure patch alignment)
+  // Cache key: balatro-asset-cache-v54 / decidex-balatro-core-v54
+  const ASSET_VERSION = "v54";
+  const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
+  const IDB_DB_NAME = "decidex_balatro_store_" + ASSET_VERSION;
+  const IDB_STORE_NAME = "game_assets";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=54";
+  const ASSET_WASM_URL = "love.wasm.bin?v=54";
+
+  // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
+  function openAssetDB() {
+    return new Promise((resolve, reject) => {
+      if (!window.indexedDB) {
+        return reject(new Error("IndexedDB is not supported"));
+      }
+      const req = indexedDB.open(IDB_DB_NAME, 1);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(IDB_STORE_NAME)) {
+          db.createObjectStore(IDB_STORE_NAME);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function getFromIDB(key) {
+    try {
+      const db = await openAssetDB();
+      return new Promise((resolve) => {
+        const tx = db.transaction(IDB_STORE_NAME, "readonly");
+        const store = tx.objectStore(IDB_STORE_NAME);
+        const req = store.get(key);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      });
+    } catch (e) {
+      console.warn("[DecideX IDB] Read error for " + key, e);
+      return null;
+    }
+  }
+
+  async function putToIDB(key, buffer) {
+    try {
+      const db = await openAssetDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE_NAME, "readwrite");
+        const store = tx.objectStore(IDB_STORE_NAME);
+        const req = store.put(buffer, key);
+        req.onsuccess = () => resolve(true);
+        req.onerror = () => reject(req.error);
+      });
+    } catch (e) {
+      console.warn("[DecideX IDB] Write error for " + key, e);
+      return false;
+    }
+  }
 
   // Cache reset and reload utility
   window.decidexClearCacheAndReload = async function () {
@@ -318,108 +402,188 @@ end
         console.warn("Failed clearing caches", e);
       }
     }
+    if (window.indexedDB) {
+      try {
+        indexedDB.deleteDatabase(IDB_DB_NAME);
+      } catch (e) {
+        console.warn("Failed deleting IndexedDB", e);
+      }
+    }
     window.location.reload();
   };
   window.onInitSuccess = onInitSuccess;
 
-  // Asset downloader with progress tracking and CacheStorage persistence
-  async function loadBalatroPackage() {
-    statusText.textContent = "正在检查本地缓存...";
-    progressBar.style.width = "5%";
-
+  // Search across version-matched CacheStorage
+  async function findInCacheStorage(urlPattern) {
+    if (!window.caches) return null;
     try {
-      // 1. Check CacheStorage first for both game assets and WASM binary
-      if (window.caches) {
-        try {
-          const cache = await caches.open(CACHE_NAME);
-          const [cachedLove, cachedWasm] = await Promise.all([
-            cache.match(ASSET_URL),
-            cache.match(WASM_URL)
-          ]);
-          if (cachedLove && cachedWasm) {
-            console.log("[DecideX] Found balatro.love and love.wasm in CacheStorage, loading instantly...");
-            statusText.textContent = "已从本地离线缓存加载资源，就绪！";
-            progressBar.style.width = "100%";
-            lovePackageBuffer = await cachedLove.arrayBuffer();
-            const wasmBuf = await cachedWasm.arrayBuffer();
-            window.Module.cache = window.Module.cache || {};
-            window.Module.cache["11.5/love.wasm"] = wasmBuf;
-            btnLaunch.style.display = "block";
-            progressBar.parentElement.style.display = "none";
-            return;
-          }
-        } catch (cacheErr) {
-          console.warn("[DecideX] CacheStorage read error:", cacheErr);
+      const cache = await caches.open(CORE_CACHE_NAME);
+      let res = await cache.match(urlPattern);
+      if (res) return await res.arrayBuffer();
+      const requests = await cache.keys();
+      for (const req of requests) {
+        if (req.url.includes(urlPattern)) {
+          res = await cache.match(req);
+          if (res) return await res.arrayBuffer();
         }
       }
+    } catch (e) {
+      console.warn("[DecideX CacheStorage] Search error:", e);
+    }
+    return null;
+  }
 
-      // 2. Not in cache: stream download balatro.love.zip (0% -> 85%)
+  // Dual-Engine Asset Loader (IndexedDB + CacheStorage + Streaming Fallback)
+  async function loadBalatroPackage() {
+    statusText.textContent = "正在检查本地离线持久缓存 (免重复下载)...";
+    progressBar.style.width = "10%";
+
+    try {
+      let loveBuf = null;
+      let wasmBuf = null;
+
+      // Tier 1: Check native IndexedDB first (Fastest, zero network, immune to URL queries)
+      loveBuf = await getFromIDB("balatro.love");
+      wasmBuf = await getFromIDB("love.wasm");
+
+      // Tier 2: Check CacheStorage (including legacy caches) if IDB missed
+      if (!loveBuf) {
+        loveBuf = await findInCacheStorage("balatro.love");
+        if (loveBuf) putToIDB("balatro.love", loveBuf); // auto-migrate to IDB
+      }
+      if (!wasmBuf) {
+        wasmBuf = await findInCacheStorage("love.wasm");
+        if (wasmBuf) putToIDB("love.wasm", wasmBuf); // auto-migrate to IDB
+      }
+
+      // If both assets hit local persistent cache: instant load, 0 network transfer!
+      if (loveBuf && wasmBuf && loveBuf.byteLength > 10 * 1024 * 1024) {
+        console.log(`[DecideX Cache] Instant hit! Loaded balatro.love (${(loveBuf.byteLength / 1048576).toFixed(1)}MB) and love.wasm (${(wasmBuf.byteLength / 1048576).toFixed(1)}MB) from local offline store.`);
+        statusText.textContent = "已从本地离线持久缓存秒开就绪！";
+        progressBar.style.width = "100%";
+        lovePackageBuffer = loveBuf;
+        window.Module.cache = window.Module.cache || {};
+        window.Module.cache["11.5/love.wasm"] = wasmBuf;
+        btnLaunch.style.display = "block";
+        progressBar.parentElement.style.display = "none";
+        return;
+      }
+
+      // Tier 3: Cache miss (first visit): stream download balatro.love (0% -> 85%) with Range resume
       statusText.textContent = "首次下载游戏资源包 (balatro.love 53.7MB)...";
-      const response = await fetch(ASSET_URL);
-      if (!response.ok) throw new Error("HTTP " + response.status + " fetching " + ASSET_URL);
 
-      const contentLength = response.headers.get("content-length");
-      const total = contentLength ? parseInt(contentLength, 10) : 56 * 1024 * 1024;
-      let loaded = 0;
+      async function fetchWithResume(url, initialTotal, onProgress) {
+        let loaded = 0;
+        const chunks = [];
+        let total = initialTotal;
+        let attempts = 0;
 
-      const reader = response.body.getReader();
-      const chunks = [];
+        while (loaded < total && attempts < 20) {
+          attempts++;
+          try {
+            const headers = loaded > 0 ? { "Range": `bytes=${loaded}-` } : {};
+            const res = await fetch(url, { headers });
+            if (loaded > 0) {
+              if (res.status === 200) {
+                console.warn(`[DecideX Download] Server returned 200 instead of 206 for Range request, resetting stream from 0`);
+                chunks.length = 0;
+                loaded = 0;
+              } else if (res.status !== 206) {
+                throw new Error(`HTTP ${res.status} when requesting range bytes=${loaded}-`);
+              }
+            } else if (!res.ok) {
+              throw new Error(`HTTP ${res.status} fetching ${url}`);
+            }
+            if (loaded === 0) {
+              const cl = res.headers.get("content-length");
+              const cr = res.headers.get("content-range");
+              if (cr) {
+                const m = cr.match(/\/(\d+)/);
+                if (m) total = parseInt(m[1], 10);
+              } else if (cl) {
+                total = parseInt(cl, 10);
+              }
+            }
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        loaded += value.length;
+            const reader = res.body.getReader();
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              chunks.push(value);
+              loaded += value.length;
+              onProgress(loaded, total);
+            }
+          } catch (e) {
+            console.warn(`[DecideX Download] Stream blip at ${(loaded / 1048576).toFixed(1)}MB / ${(total / 1048576).toFixed(1)}MB, resuming in 1s...`, e);
+            if (loaded >= total) break;
+            await new Promise(r => setTimeout(r, 1000));
+          }
+        }
+
+        if (loaded < total) {
+          throw new Error(`Download incomplete: ${loaded}/${total} bytes after ${attempts} attempts`);
+        }
+
+        const fullBuffer = new Uint8Array(loaded);
+        let offset = 0;
+        for (const chunk of chunks) {
+          fullBuffer.set(chunk, offset);
+          offset += chunk.length;
+        }
+        return fullBuffer.buffer;
+      }
+
+      lovePackageBuffer = await fetchWithResume(ASSET_LOVE_URL, 56336069, (loaded, total) => {
         const pct = Math.min(85, Math.round((loaded / total) * 85));
         progressBar.style.width = pct + "%";
         statusText.textContent = `下载游戏包 (1/2): ${(loaded / (1024 * 1024)).toFixed(1)} MB / ${(total / (1024 * 1024)).toFixed(1)} MB (${pct}%)`;
-      }
+      });
 
-      const fullBuffer = new Uint8Array(loaded);
-      let offset = 0;
-      for (const chunk of chunks) {
-        fullBuffer.set(chunk, offset);
-        offset += chunk.length;
-      }
-      lovePackageBuffer = fullBuffer.buffer;
-
-      // 3. Pre-fetch love.wasm.bin (85% -> 98%) so launch never has network latency
+      // Tier 4: Download love.wasm (85% -> 98%) with Range resume
       statusText.textContent = "正在下载 WebAssembly 运行核心 (love.wasm 4.7MB)...";
       progressBar.style.width = "88%";
-      const wasmRes = await fetch(WASM_URL);
-      if (!wasmRes.ok) throw new Error("HTTP " + wasmRes.status + " fetching " + WASM_URL);
-
-      const wasmBuf = await wasmRes.arrayBuffer();
+      wasmBuf = await fetchWithResume(ASSET_WASM_URL, 4720510, (loaded, total) => {
+        const pct = 85 + Math.min(13, Math.round((loaded / total) * 13));
+        progressBar.style.width = pct + "%";
+        statusText.textContent = `下载运行核心 (2/2): ${(loaded / (1024 * 1024)).toFixed(1)} MB / ${(total / (1024 * 1024)).toFixed(1)} MB (${pct}%)`;
+      });
       window.Module.cache = window.Module.cache || {};
       window.Module.cache["11.5/love.wasm"] = wasmBuf;
 
-      // 4. Atomically persist both completed memory buffers into CacheStorage
+      // Tier 5: Persist both to IndexedDB AND CacheStorage in parallel
+      statusText.textContent = "正在写入本地持久存储 (下次刷新/重启免下载)...";
+      progressBar.style.width = "99%";
+
+      const persistPromises = [
+        putToIDB("balatro.love", lovePackageBuffer),
+        putToIDB("love.wasm", wasmBuf)
+      ];
+
       if (window.caches) {
-        statusText.textContent = "正在写入本地持久离线缓存 (下次启动免下载)...";
-        progressBar.style.width = "99%";
-        try {
-          const cache = await caches.open(CACHE_NAME);
-          await Promise.all([
-            cache.put(ASSET_URL, new Response(lovePackageBuffer.slice(0), {
-              headers: {
-                "Content-Type": "application/octet-stream",
-                "Content-Length": String(lovePackageBuffer.byteLength),
-                "Cache-Control": "public, max-age=31536000"
-              }
-            })),
-            cache.put(WASM_URL, new Response(wasmBuf.slice(0), {
-              headers: {
-                "Content-Type": "application/wasm",
-                "Content-Length": String(wasmBuf.byteLength),
-                "Cache-Control": "public, max-age=31536000"
-              }
-            }))
-          ]);
-          console.log("[DecideX] Successfully persisted both assets to CacheStorage!");
-        } catch (cacheWriteErr) {
-          console.warn("[DecideX] CacheStorage write error:", cacheWriteErr);
-        }
+        persistPromises.push(
+          caches.open(CORE_CACHE_NAME).then(cache => {
+            return Promise.all([
+              cache.put(ASSET_LOVE_URL, new Response(lovePackageBuffer.slice(0), {
+                headers: {
+                  "Content-Type": "application/octet-stream",
+                  "Content-Length": String(lovePackageBuffer.byteLength),
+                  "Cache-Control": "public, max-age=31536000, immutable"
+                }
+              })),
+              cache.put(ASSET_WASM_URL, new Response(wasmBuf.slice(0), {
+                headers: {
+                  "Content-Type": "application/wasm",
+                  "Content-Length": String(wasmBuf.byteLength),
+                  "Cache-Control": "public, max-age=31536000, immutable"
+                }
+              }))
+            ]);
+          }).catch(e => console.warn("[DecideX] CacheStorage put error:", e))
+        );
       }
+
+      await Promise.allSettled(persistPromises);
+      console.log("[DecideX] Successfully persisted assets into IndexedDB and CacheStorage!");
 
       progressBar.style.width = "100%";
       statusText.textContent = "所有核心资源校验与持久化缓存完成，就绪！";
@@ -583,34 +747,100 @@ end
 
   function computeOptimalJokerOrder(jokers) {
     if (!jokers || jokers.length <= 1) return { needsReorder: false, reason: "", optimalIndices: [] };
-    const tierMap = { chips: 1, flat_mult: 2, economy: 3, utility: 3, x_mult: 4 };
-    const indexed = jokers.map((j, idx) => {
-      const p = JOKER_PILLAR_MAP[j.name] || (j.xmult > 1 ? "x_mult" : (j.mult > 0 ? "flat_mult" : "chips"));
-      return { idx: idx + 1, originalIdx: idx, name: j.name, pillar: p, priority: tierMap[p] || 2 };
-    });
+    const n = jokers.length;
 
-    let needsReorder = false;
-    let seenXMult = false;
-    for (let i = 0; i < indexed.length; i++) {
-      if (indexed[i].pillar === "x_mult") {
-        seenXMult = true;
-      } else if (seenXMult && indexed[i].pillar === "flat_mult") {
-        needsReorder = true;
-        break;
+    // Edition-aware and copy-aware position tier
+    function getJokerTier(j) {
+      if (j.name === "Blueprint") return 4.9;
+      if (j.name === "Brainstorm") return 0.1;
+
+      const p = JOKER_PILLAR_MAP[j.name] || (j.xmult > 1 ? "x_mult" : (j.mult > 0 ? "flat_mult" : "chips"));
+      let tier = 2;
+      if (p === "chips") tier = 1;
+      else if (p === "flat_mult") tier = 2;
+      else if (p === "x_mult") tier = 5;
+      else if (p === "economy") tier = 0;
+      else if (p === "utility") tier = 3;
+
+      const ed = String(j.edition || "").toLowerCase();
+      if (ed === "polychrome") {
+        if (tier === 2) tier = 2.8; // Flat mult with poly triggers flat mult then x1.5
+        else if (tier < 5) tier = 5.0; // Chips/economy with poly acts purely as xmult
+      } else if (ed === "holo" || ed === "holographic") {
+        if (tier < 2) tier = 2.0;
+      }
+      return tier;
+    }
+
+    const tiers = jokers.map(getJokerTier);
+
+    // Detect inverted X-Mult: X-Mult (tier >= 4.8) sitting to the left of Flat Mult (2.0 <= tier < 4.0)
+    let hasInvertedXMult = false;
+    let maxFlatPos = -1;
+    let minXMultPos = 999;
+    for (let i = 0; i < n; i++) {
+      if (tiers[i] >= 2.0 && tiers[i] < 4.0 && i > maxFlatPos) maxFlatPos = i;
+      if (tiers[i] >= 4.8 && i < minXMultPos) minXMultPos = i;
+    }
+    if (minXMultPos < maxFlatPos) hasInvertedXMult = true;
+
+    const indexed = jokers.map((_, i) => i);
+    indexed.sort((a, b) => tiers[a] - tiers[b]);
+
+    // Copy jokers dynamic mapping
+    const blueprintIdx = jokers.findIndex(j => j.name === "Blueprint");
+    const brainstormIdx = jokers.findIndex(j => j.name === "Brainstorm");
+    const xmultIndices = jokers.map((j, i) => i).filter(i => tiers[i] >= 4.8 || (jokers[i].xmult || 1) > 1);
+
+    if (brainstormIdx !== -1) {
+      const candidates = jokers.map((_, i) => i).filter(i => !["Brainstorm", "Blueprint"].includes(jokers[i].name));
+      if (candidates.length > 0) {
+        const flatOrChips = candidates.filter(i => tiers[i] < 4.0);
+        let bestTarget;
+        if (flatOrChips.length > 0) {
+          bestTarget = flatOrChips.sort((a, b) => (tiers[b] - tiers[a]) || (jokers[b].mult || 0) - (jokers[a].mult || 0))[0];
+        } else {
+          bestTarget = candidates.sort((a, b) => (jokers[b].xmult || 1) - (jokers[a].xmult || 1))[0];
+        }
+        const curPos = indexed.indexOf(bestTarget);
+        if (curPos !== -1) {
+          indexed.splice(curPos, 1);
+          indexed.unshift(bestTarget);
+        }
       }
     }
+
+    if (blueprintIdx !== -1 && xmultIndices.length > 0) {
+      const validX = xmultIndices.filter(i => indexed.indexOf(i) > 0);
+      if (validX.length > 0) {
+        const bestX = validX.sort((a, b) => (jokers[b].xmult || 1) - (jokers[a].xmult || 1))[0];
+        const bpPos = indexed.indexOf(blueprintIdx);
+        if (bpPos !== -1) indexed.splice(bpPos, 1);
+        const xPos = indexed.indexOf(bestX);
+        indexed.splice(xPos, 0, blueprintIdx);
+      }
+    }
+
+    const currentOrder = jokers.map((_, i) => i);
+    const needsReorder = indexed.some((idx, i) => idx !== currentOrder[i]);
 
     if (!needsReorder) {
       return { needsReorder: false, reason: "小丑排序符合最佳数学法则 (基础 -> 乘倍)", optimalIndices: [] };
     }
 
-    // Sort stably: lower priority number on the left
-    const sorted = [...indexed].sort((a, b) => a.priority - b.priority);
-    const optimalIndices = sorted.map(item => item.idx);
+    // Balatro Lua indexes jokers 1-based
+    const optimal1Based = indexed.map(i => i + 1);
+    let reason = "调整小丑排布顺序，严格遵守 [筹码 -> 基础倍率 -> 乘法倍率] 递增放大链";
+    if (hasInvertedXMult) {
+      reason = "严重排位缺陷：乘法倍率 (X-Mult) 位于加法倍率左侧！重排后倍率收益大幅提升";
+    } else if (blueprintIdx !== -1 || brainstormIdx !== -1) {
+      reason = "优化复制小丑 (Blueprint/Brainstorm) 锚定位置以实现指数级输出";
+    }
+
     return {
       needsReorder: true,
-      reason: "加法倍率排在乘倍小丑右侧，调整小丑顺序可先加后乘大幅放大总分！",
-      optimalIndices: optimalIndices
+      reason: reason,
+      optimalIndices: optimal1Based
     };
   }
 
@@ -618,6 +848,7 @@ end
     const bname = (blind && blind.name) || "";
     const hasRideTheBus = (jokers || []).some(j => j.name === "Ride the Bus" && !j.debuff);
     const hasGreenJoker = (jokers || []).some(j => j.name === "Green Joker" && !j.debuff);
+    const hasSquareJoker = (jokers || []).some(j => j.name === "Square Joker" && !j.debuff);
     const isNeedle = (bname === "The Needle");
     const isWater = (bname === "The Water");
     const isEye = (bname === "The Eye");
@@ -637,6 +868,7 @@ end
     return {
       noFaceCards: hasRideTheBus,
       avoidDiscard: hasGreenJoker || isWater,
+      hasSquareJoker: hasSquareJoker,
       oneHandOnly: isNeedle,
       noRepeatedHands: isEye,
       requires5Cards: isPsychic,
@@ -646,7 +878,8 @@ end
       costsMoneyPerCard: isTooth,
       wipesMoneyOnMostPlayed: isOx,
       debuffedSuit: debuffedSuit,
-      bossName: bname
+      bossName: bname,
+      upcomingBoss: (blind && blind.upcoming_boss) || null
     };
   }
 
@@ -731,6 +964,7 @@ end
   function evaluateHandScore(selectedCards, jokers, blind, stateContext) {
     if (!selectedCards || selectedCards.length === 0) return null;
 
+    const constraints = detectConstraints(jokers, blind);
     const rankCounts = {};
     const suitCounts = {};
     for (const c of selectedCards) {
@@ -765,6 +999,13 @@ end
     let cardXMult = 1.0;
 
     for (const c of scoringCards) {
+      const isCardDebuffed = Boolean(c.debuff) ||
+        Boolean(constraints.debuffedSuit && c.suit === constraints.debuffedSuit) ||
+        Boolean(constraints.debuffFaceCards && ["J", "Q", "K"].includes(c.rank));
+      if (isCardDebuffed) {
+        continue;
+      }
+
       let cChips = (c.enhancement === "stone" ? 50 : (RANK_VALUES[c.rank] || 0));
       let cMult = 0;
       let cXMult = 1.0;
@@ -793,7 +1034,9 @@ end
       const selectedIndices = new Set(selectedCards.map(c => c.index).filter(x => x !== undefined));
       const unplayedCards = stateContext.hand.filter(c => !selectedIndices.has(c.index));
       for (const uc of unplayedCards) {
-        if (uc.enhancement === "steel") {
+        const isUcDebuffed = Boolean(uc.debuff) ||
+          Boolean(constraints.debuffedSuit && uc.suit === constraints.debuffedSuit);
+        if (!isUcDebuffed && uc.enhancement === "steel") {
           const repeats = (uc.seal === "red") ? 2 : 1;
           cardXMult *= Math.pow(1.5, repeats);
         }
@@ -958,9 +1201,52 @@ end
           if (junkCount > 0) {
             evalRes.isFilteringPlay = true;
             evalRes.junkCards = chosen.filter(c => !scoring.includes(c));
-            // Bonus ranking for hand recycling when 0 discards / The Water / Green Joker
-            if (constraints.avoidDiscard || Number(state.discards_left || 0) <= 0) {
-              evalRes.totalScore += junkCount * 5;
+
+            // Hard veto in candidate generation: NEVER attach good cards as unscored junk!
+            const hasBaron = (state.jokers || []).some(j => j.name === "Baron");
+            const hasShootMoon = (state.jokers || []).some(j => j.name === "Shoot the Moon");
+            let hasBadJunk = false;
+
+            for (const jc of evalRes.junkCards) {
+              const isDebuffed = jc.debuff ||
+                (constraints.debuffedSuit && jc.suit === constraints.debuffedSuit) ||
+                (constraints.debuffFaceCards && ["J", "Q", "K"].includes(jc.rank));
+              if (isDebuffed) {
+                continue; // Debuffed cards are safe to dump
+              }
+              // Veto Face cards & Aces (A, K, Q, J)
+              if (["A", "K", "Q", "J"].includes(jc.rank)) {
+                hasBadJunk = true;
+                break;
+              }
+              // Veto enhancements, editions, seals
+              if (jc.enhancement || jc.edition || jc.seal) {
+                hasBadJunk = true;
+                break;
+              }
+              // Veto if this rank appears multiple times in hand (breaks pairs)
+              const rankCountInHand = hand.filter(c => c.rank === jc.rank).length;
+              if (rankCountInHand >= 2) {
+                hasBadJunk = true;
+                break;
+              }
+              // Veto if this suit has 3+ cards in hand (breaks flush outs)
+              const suitCountInHand = hand.filter(c => c.suit === jc.suit).length;
+              if (suitCountInHand >= 3) {
+                hasBadJunk = true;
+                break;
+              }
+            }
+
+            if (hasBadJunk) {
+              // Heavily penalize so pure hand or clean plays win
+              evalRes.totalScore = Math.floor(evalRes.totalScore * 0.001);
+              evalRes.violation = "附带废牌包含高价值人头牌/对子/同花组件";
+            } else if (!constraints.requires5Cards && !(constraints.hasSquareJoker && chosen.length === 4)) {
+              // Even with clean low junk, prefer pure hand unless zero discards and cannot clear
+              if (Number(state.discards_left || 0) > 0 || evalRes.totalScore >= Number(state.blind?.chips || 300)) {
+                evalRes.totalScore = Math.floor(evalRes.totalScore * 0.95);
+              }
             }
           }
 
@@ -990,7 +1276,19 @@ end
     return unique;
   }
 
-  // Strategic Discard Analyzer
+  // Strategic Discard Analyzer & In-hand Card Protection
+  function isProtectedHeldCard(c, jokers) {
+    if (!c) return false;
+    if (c.enhancement === "steel") return true; // Provides x1.5 Mult held in hand
+    if (c.enhancement === "gold") return true;  // Provides $3 held in hand
+    if (c.seal === "blue") return true;         // Generates Planet card held in hand
+    const hasBaron = (jokers || []).some(j => j.name === "Baron");
+    if (hasBaron && c.rank === "K") return true; // Baron King x1.5 Mult held in hand
+    const hasShootMoon = (jokers || []).some(j => j.name === "Shoot the Moon");
+    if (hasShootMoon && c.rank === "Q") return true; // +13 Mult held in hand
+    return false;
+  }
+
   function findBestDiscards(state, bestPlay) {
     const hand = state.hand || [];
     const discardsLeft = Number(state.discards_left) || 0;
@@ -999,6 +1297,23 @@ end
     const blindGoal = Number(state.blind?.chips || 300);
     const scored = Number(state.blind?.scored || 0);
     const need = Math.max(0, blindGoal - scored);
+    const constraints = detectConstraints(state.jokers, state.blind);
+
+    // 0. Top Priority: Discard Boss-debuffed cards (The Window/The Club/The Goad/The Head/etc.)
+    const debuffedCards = hand.filter(c =>
+      c.debuff ||
+      (constraints.debuffedSuit && c.suit === constraints.debuffedSuit) ||
+      (constraints.debuffFaceCards && ["J", "Q", "K"].includes(c.rank))
+    );
+    if (debuffedCards.length > 0 && discardsLeft >= 1 && (!bestPlay || bestPlay.totalScore < need)) {
+      const toDiscard = debuffedCards.slice(0, 5);
+      return {
+        target: `弃除被 ${constraints.bossName || 'Boss'} 禁用的无效卡牌`,
+        reason: `当前持有 ${debuffedCards.length} 张被禁用的卡牌 (提供 0 筹码/0 倍率)，优先弃除换取有效手牌！`,
+        cards: toDiscard,
+        intent: "debuffed_discard"
+      };
+    }
 
     // Tally suits and ranks
     const suitMap = {};
@@ -1008,11 +1323,19 @@ end
       rankMap[c.rank] = (rankMap[c.rank] || []).concat(c);
     }
 
-    // 1. Check for 4-flush (draw 1 to make flush)
+    const multiCards = [];
+    const singleCards = [];
+    for (const [rank, cards] of Object.entries(rankMap)) {
+      if (cards.length >= 2) multiCards.push(...cards);
+      else singleCards.push(...cards);
+    }
+
+    // 1. Check for 4-flush (draw 1 to make flush, skip debuffed suits)
     for (const [suit, cards] of Object.entries(suitMap)) {
+      if (constraints.debuffedSuit && suit === constraints.debuffedSuit) continue;
       if (cards.length >= 4 && cards.length < 5) {
         const keepSet = new Set(cards);
-        const junk = hand.filter(c => !keepSet.has(c));
+        const junk = hand.filter(c => !keepSet.has(c) && !isProtectedHeldCard(c, state.jokers));
         const toDiscard = junk.sort((a, b) => (RANK_VALUES[a.rank] || 0) - (RANK_VALUES[b.rank] || 0)).slice(0, 5);
         if (toDiscard.length > 0) {
           const suitName = { "S": "黑桃", "H": "红桃", "D": "方片", "C": "梅花" }[suit] || suit;
@@ -1026,50 +1349,57 @@ end
       }
     }
 
-    // 2. Check for 4-straight (open-ended or gutshot)
+    // 2. Check for open-ended 4-straight (span === 3, 8 outs). Gutshot (span === 4, only 4 outs) is negative EV unless 0 pairs and >= 3 discards
     const uniqueRankNums = [...new Set(hand.map(c => RANK_NUM[c.rank] || 0))].sort((a, b) => a - b);
     if (uniqueRankNums.length >= 4) {
       for (let i = 0; i <= uniqueRankNums.length - 4; i++) {
         const sub = uniqueRankNums.slice(i, i + 4);
         const span = sub[3] - sub[0];
-        if (span === 3 || span === 4) {
+        const isOpenEnded = (span === 3);
+        const isGutshot = (span === 4 && discardsLeft >= 3 && multiCards.length === 0);
+        if (isOpenEnded || isGutshot) {
           const straightRanks = new Set(sub);
-          const keepCards = hand.filter(c => straightRanks.has(RANK_NUM[c.rank]));
-          const junk = hand.filter(c => !keepCards.includes(c));
+          const keepCards = [];
+          const seenRanks = new Set();
+          for (const c of hand) {
+            const rnum = RANK_NUM[c.rank];
+            if (straightRanks.has(rnum) && !seenRanks.has(rnum)) {
+              seenRanks.add(rnum);
+              keepCards.push(c);
+            }
+          }
+          const junk = hand.filter(c => !keepCards.includes(c) && !isProtectedHeldCard(c, state.jokers));
           const toDiscard = junk.slice(0, 5);
           if (toDiscard.length > 0) {
             return {
-              target: "顺子听牌 (4缺1)",
-              reason: `保留连点 (${sub.join("-")})，弃掉 ${toDiscard.length} 张边缘散牌以双向抽顺子`,
+              target: isOpenEnded ? "两头顺子听牌 (4缺1)" : "顺子卡张听牌 (4缺1)",
+              reason: `保留连点 (${sub.join("-")})，弃掉 ${toDiscard.length} 张散牌博顺子成型`,
               cards: toDiscard,
-              intent: "straight_draw"
+              intent: isOpenEnded ? "straight_draw" : "gutshot_draw"
             };
           }
         }
       }
     }
 
-    // 3. Keep pairs/trips, discard uncoordinated low singletons
-    const multiCards = [];
-    const singleCards = [];
-    for (const [rank, cards] of Object.entries(rankMap)) {
-      if (cards.length >= 2) multiCards.push(...cards);
-      else singleCards.push(...cards);
-    }
-
+    // 3. Keep pairs/trips, discard uncoordinated low singletons (strictly protecting held cards)
     if (multiCards.length > 0 && singleCards.length > 0) {
-      // Discard lowest singletons
-      const toDiscard = singleCards.sort((a, b) => (RANK_VALUES[a.rank] || 0) - (RANK_VALUES[b.rank] || 0)).slice(0, Math.min(5, singleCards.length));
-      return {
-        target: "对子/三条升级 (博葫芦/四条)",
-        reason: `保留成对的核心高分牌，弃掉 ${toDiscard.length} 张低点散牌寻找同点配对`,
-        cards: toDiscard,
-        intent: "pair_upgrade"
-      };
+      const safeSingletons = singleCards.filter(c => !isProtectedHeldCard(c, state.jokers));
+      if (safeSingletons.length > 0) {
+        const toDiscard = safeSingletons.sort((a, b) => (RANK_VALUES[a.rank] || 0) - (RANK_VALUES[b.rank] || 0)).slice(0, Math.min(5, safeSingletons.length));
+        return {
+          target: "对子/三条升级 (博葫芦/四条)",
+          reason: `保留成对的核心高分牌与高价值留手牌，弃掉 ${toDiscard.length} 张低点散牌寻找同点配对`,
+          cards: toDiscard,
+          intent: "pair_upgrade"
+        };
+      }
     }
 
-    // 4. Default: Discard lowest 3 uncoordinated cards
-    const sortedHand = [...hand].sort((a, b) => (RANK_VALUES[a.rank] || 0) - (RANK_VALUES[b.rank] || 0));
+    // 4. Default: Discard lowest 3 uncoordinated cards (filtering out protected cards)
+    const discardable = hand.filter(c => !isProtectedHeldCard(c, state.jokers));
+    const pool = discardable.length > 0 ? discardable : hand;
+    const sortedHand = [...pool].sort((a, b) => (RANK_VALUES[a.rank] || 0) - (RANK_VALUES[b.rank] || 0));
     const toDiscard = sortedHand.slice(0, Math.min(4, sortedHand.length));
     return {
       target: "清理低点底牌",
@@ -1079,9 +1409,188 @@ end
     };
   }
 
+  const POKER_HAND_TIERS = {
+    "High Card": 1,
+    "Pair": 2,
+    "Two Pair": 3,
+    "Three of a Kind": 4,
+    "Straight": 5,
+    "Flush": 6,
+    "Full House": 7,
+    "Four of a Kind": 8,
+    "Straight Flush": 9,
+    "Five of a Kind": 10,
+    "Flush House": 11,
+    "Flush Five": 12
+  };
+
+  // Hand Filtering Optimizer: Piggyback unwanted cards onto a sub-5-card play
+  function optimizePlayWithJunkFilter(basePlay, state) {
+    if (!basePlay || !basePlay.cards || basePlay.cards.length === 0) return basePlay;
+    if (basePlay.cards.length >= 5) return basePlay;
+
+    const constraints = detectConstraints(state.jokers, state.blind);
+
+    // 1. The Tooth charges $1 per card played! Under The Tooth, strictly minimize cards played.
+    if (constraints.costsMoneyPerCard) {
+      return basePlay;
+    }
+
+    // 2. Square Joker triggers +4 permanent chips ONLY on EXACTLY 4 cards played.
+    if (constraints.hasSquareJoker && basePlay.cards.length === 4) {
+      return basePlay;
+    }
+
+    const blindGoal = Number(state.blind?.chips || 300);
+    const scored = Number(state.blind?.scored || 0);
+    const need = Math.max(0, blindGoal - scored);
+    const discardsLeft = Number(state.discards_left) || 0;
+    const handsLeft = Number(state.hands_left) || 1;
+
+    // Strict Gating for Filtering Plays:
+    // Only consider filtering plays under 3 explicit conditions:
+    // 1) The Psychic: MUST play 5 cards, otherwise scores 0!
+    // 2) Square Joker: target exactly 4 cards if currently < 4 to gain permanent +4 chips
+    // 3) Zero discards left AND hand does not beat blind: cycle truly useless isolated junk
+    // In all other cases (normal plays with discards left or already winning): keep hand pure!
+    const isPsychic = !!constraints.requires5Cards;
+    const isSquareJoker = !!constraints.hasSquareJoker && basePlay.cards.length < 4;
+    const isZeroDiscards = (discardsLeft === 0 && basePlay.totalScore < need);
+
+    if (!isPsychic && !isSquareJoker && !isZeroDiscards) {
+      return basePlay;
+    }
+
+    let targetCount = isPsychic ? 5 : (isSquareJoker ? 4 : 5);
+
+    // If play already beats the blind AND not The Psychic AND not Square Joker:
+    // Never dump extra cards.
+    if (basePlay.totalScore >= need && !isPsychic && !isSquareJoker) {
+      return basePlay;
+    }
+
+    // Find candidate junk cards in hand not currently in the play
+    const currentCardSet = new Set(basePlay.cards);
+    const available = (state.hand || []).filter(c => !currentCardSet.has(c));
+    if (available.length === 0) return basePlay;
+
+    // Tally ranks in the remaining hand to avoid breaking other pairs
+    const remRankCounts = {};
+    for (const c of available) {
+      remRankCounts[c.rank] = (remRankCounts[c.rank] || 0) + 1;
+    }
+
+    // Score candidates by dump desirability
+    function getDumpDesirability(c) {
+      // 1. Hard veto: Enhancements (Glass, Steel, Gold, Lucky, Mult, Bonus, Stone)
+      if (c.enhancement) {
+        return -9999;
+      }
+      // 2. Hard veto: Editions (Foil, Holo, Polychrome)
+      if (c.edition) {
+        return -9999;
+      }
+      // 3. Hard veto: Seals (Red, Purple, Blue, Gold)
+      if (c.seal) {
+        return -9999;
+      }
+      // 4. Ride the Bus veto: face cards reset Ride the Bus to 0!
+      if (constraints.noFaceCards && ["J", "Q", "K"].includes(c.rank)) {
+        return -9999;
+      }
+
+      // 5. Debuffed cards: HIGHEST priority to dump because they are disabled under this boss!
+      const isDebuffed = c.debuff ||
+        (constraints.debuffedSuit && c.suit === constraints.debuffedSuit) ||
+        (constraints.debuffFaceCards && ["J", "Q", "K"].includes(c.rank));
+      if (isDebuffed) {
+        return 1000;
+      }
+
+      // 6. Hard veto: High ranks (A, K, Q, J) unless debuffed!
+      // High cards have large base chips (10-11) and build powerful hands (Straights, Flushes, Pairs).
+      // They should NEVER be thrown away as unscored junk!
+      if (["A", "K", "Q", "J"].includes(c.rank)) {
+        return isPsychic ? -500 : -9999;
+      }
+
+      // 7. Protect Pairs/Trips in remaining hand!
+      if (remRankCounts[c.rank] >= 2) {
+        return isPsychic ? -300 : -9999;
+      }
+
+      // 8. Protect Flush outs: if total hand has 3+ cards of this suit, preserve them!
+      const fullHandSuitCount = (state.hand || []).filter(x => x.suit === c.suit).length;
+      if (fullHandSuitCount >= 3) {
+        return isPsychic ? -200 : -9999;
+      }
+
+      // 9. Score isolated low-rank cards (2, 3, 4, 5, 6, 7, 8):
+      const rankVal = RANK_VALUES[c.rank] || 5;
+      if (rankVal <= 6) {
+        // Pure low-rank isolated white cards (2, 3, 4, 5, 6)
+        return (14 - rankVal) * 10; // 2 -> 120, 3 -> 110, 4 -> 100, 5 -> 90, 6 -> 80
+      } else if (rankVal <= 8) {
+        return (14 - rankVal) * 5;  // 7 -> 35, 8 -> 30
+      } else {
+        // Rank 9, 10
+        return isPsychic ? (14 - rankVal) : -9999;
+      }
+    }
+
+    const sortedJunk = [...available]
+      .map(c => ({ card: c, score: getDumpDesirability(c) }))
+      .filter(item => isPsychic ? item.score > -1000 : item.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .map(item => item.card);
+
+    let augmentedCards = [...basePlay.cards];
+    const addedJunk = [];
+
+    for (const jc of sortedJunk) {
+      if (augmentedCards.length >= targetCount) break;
+
+      const testSelection = [...augmentedCards, jc];
+      const testEval = evaluateHandScore(testSelection, state.jokers, state.blind, state);
+      if (!testEval) continue;
+
+      // Ensure testEval doesn't degrade score or violate fatal constraints
+      if (testEval.violation) continue;
+      if (testEval.totalScore < basePlay.totalScore * 0.99) continue;
+
+      // Verify that hand ranking didn't degrade
+      const oldRankVal = POKER_HAND_TIERS[basePlay.handName] || 0;
+      const newRankVal = POKER_HAND_TIERS[testEval.handName] || 0;
+      if (newRankVal < oldRankVal) continue;
+
+      // Accept this junk card!
+      augmentedCards.push(jc);
+      addedJunk.push(jc);
+    }
+
+    if (addedJunk.length > 0) {
+      const finalEval = evaluateHandScore(augmentedCards, state.jokers, state.blind, state);
+      return {
+        ...basePlay,
+        cards: augmentedCards,
+        handName: finalEval ? finalEval.handName : basePlay.handName,
+        chips: finalEval ? finalEval.chips : basePlay.chips,
+        mult: finalEval ? finalEval.mult : basePlay.mult,
+        totalScore: finalEval ? finalEval.totalScore : basePlay.totalScore,
+        isFilteringPlay: true,
+        junkCards: addedJunk
+      };
+    }
+
+    return basePlay;
+  }
+
   // Stage Decision Arbitration (Play vs Discard)
-  function arbitrateAction(state, bestPlay, bestDiscard) {
-    if (!bestPlay) return null;
+  function arbitrateAction(state, rawBestPlay, bestDiscard) {
+    if (!rawBestPlay) return null;
+
+    const constraints = detectConstraints(state.jokers, state.blind);
+    const bestPlay = optimizePlayWithJunkFilter(rawBestPlay, state);
 
     const blind = state.blind || {};
     const chipsTarget = Number(blind.chips) || 300;
@@ -1090,15 +1599,22 @@ end
     const handsLeft = Number(state.hands_left) || 1;
     const discardsLeft = Number(state.discards_left) || 0;
 
+    const filteringNote = (bestPlay.junkCards && bestPlay.junkCards.length > 0)
+      ? ` [附带 ${bestPlay.junkCards.length} 张废牌 (${bestPlay.junkCards.map(c => (c.rank || '') + (c.suit || '')).join(' ')}) 进行伪弃牌过滤]`
+      : "";
+
     // 1. Force Play:
     // - Hand score directly beats remaining blind requirement
     if (bestPlay.totalScore >= need) {
+      const isPsychicSave = constraints.requires5Cards && bestPlay.junkCards && bestPlay.junkCards.length > 0;
       return {
         verdict: "PLAY",
         confidence: "CERTAIN",
         badgeClass: "arb-play",
-        title: "⚡ 推荐立即出牌 (直接通关)",
-        reason: `本手预期得分 ${bestPlay.totalScore.toLocaleString()} 分直接超越通关差额 (${need.toLocaleString()} 分)，可直接通关，无需消耗弃牌次数！`,
+        title: isPsychicSave ? "⚡ 破咒绝杀 (The Psychic 5张成行)" : (filteringNote ? "⚡ 绝杀出牌 (附带杂牌清洗)" : "⚡ 推荐立即出牌 (直接通关)"),
+        reason: isPsychicSave
+          ? `当前处于 The Psychic (需5张)，已智能附带 ${bestPlay.junkCards.length} 张废牌补齐 5 张，打出 ${bestPlay.totalScore.toLocaleString()} 分直接通关！`
+          : `本手预期得分 ${bestPlay.totalScore.toLocaleString()} 分直接超越通关差额 (${need.toLocaleString()} 分)，可直接通关${filteringNote}！`,
         cards: bestPlay.cards
       };
     }
@@ -1109,24 +1625,23 @@ end
         verdict: "PLAY",
         confidence: "FORCED",
         badgeClass: "arb-play",
-        title: "⚡ 必须出牌 (弃牌耗尽)",
-        reason: `剩余弃牌次数为 0，必须出牌积累筹码 (本手预计打出 +${bestPlay.totalScore.toLocaleString()} 分)`,
+        title: filteringNote ? "⚡ 伪弃牌出牌 (弃牌耗尽·手牌清洗)" : "⚡ 必须出牌 (弃牌耗尽)",
+        reason: `剩余弃牌次数为 0，必须出牌积累筹码 (本手预计打出 +${bestPlay.totalScore.toLocaleString()} 分)${filteringNote}`,
         cards: bestPlay.cards
       };
     }
 
     // - Passive Constraints: Green Joker / The Water (strictly avoid discarding)
-    const constraints = detectConstraints(state.jokers, state.blind);
     if (constraints && constraints.avoidDiscard) {
       const isGreen = (state.jokers || []).some(j => j.name === "Green Joker" && !j.debuff);
       return {
         verdict: "PLAY",
         confidence: "HIGH",
         badgeClass: "arb-play",
-        title: "⚡ 规避弃牌出牌 (被动保护)",
+        title: filteringNote ? "⚡ 规避弃牌出牌 (被动保护·手牌清洗)" : "⚡ 规避弃牌出牌 (被动保护)",
         reason: isGreen
-          ? `当前持有 Green Joker，弃牌会永久损失 -1 倍率，优先出牌或打出杂牌过牌！`
-          : `当前处于 The Water 盲注限制，严禁弃牌，直接出牌！`,
+          ? `当前持有 Green Joker，弃牌会永久损失 -1 倍率，优先出牌过牌${filteringNote}！`
+          : `当前处于 The Water 盲注限制，严禁弃牌，直接出牌${filteringNote}！`,
         cards: bestPlay.cards
       };
     }
@@ -1138,14 +1653,36 @@ end
         confidence: "CRITICAL",
         badgeClass: "arb-play",
         title: "⚡ 决胜出牌 (最后出牌)",
-        reason: `仅剩最后 1 次出牌机会，不可再冒险弃牌，打出最高分组合！`,
+        reason: `仅剩最后 1 次出牌机会，不可再冒险弃牌，打出最高分组合${filteringNote}！`,
+        cards: bestPlay.cards
+      };
+    }
+
+    // - Steady accumulation check: If continuing to play best hand safely clears the blind across remaining hands, play it!
+    if (bestPlay.totalScore * handsLeft >= need && bestPlay.totalScore >= need * 0.35) {
+      return {
+        verdict: "PLAY",
+        confidence: "STEADY",
+        badgeClass: "arb-play",
+        title: filteringNote ? "⚡ 稳健出牌 (附带杂牌清洗)" : "⚡ 稳健出牌 (手牌足够通关)",
+        reason: `当前手牌预期得分 ${bestPlay.totalScore.toLocaleString()} 分，结合剩余 ${handsLeft} 次出牌累计可得 ${(bestPlay.totalScore * handsLeft).toLocaleString()} 分 (需 ${need.toLocaleString()} 分)${filteringNote}，无需冒险弃牌！`,
         cards: bestPlay.cards
       };
     }
 
     // 2. High-expected Strategic Discard:
     if (bestDiscard && bestDiscard.cards && bestDiscard.cards.length > 0) {
-      if (bestDiscard.intent === "flush_draw") {
+      if (bestDiscard.intent === "debuffed_discard") {
+        return {
+          verdict: "DISCARD",
+          confidence: "STRATEGIC",
+          badgeClass: "arb-discard",
+          title: "🗑️ 战略弃牌 (净化无效牌)",
+          reason: bestDiscard.reason,
+          cards: bestDiscard.cards
+        };
+      }
+      if (bestDiscard.intent === "flush_draw" && (bestPlay.totalScore < need * 0.7 || discardsLeft >= 3)) {
         return {
           verdict: "DISCARD",
           confidence: "STRATEGIC",
@@ -1155,17 +1692,17 @@ end
           cards: bestDiscard.cards
         };
       }
-      if (bestDiscard.intent === "straight_draw") {
+      if (bestDiscard.intent === "straight_draw" && discardsLeft >= 2 && bestPlay.totalScore < need * 0.45) {
         return {
           verdict: "DISCARD",
           confidence: "STRATEGIC",
           badgeClass: "arb-discard",
           title: "🗑️ 战略弃牌 (顺子听牌)",
-          reason: `手牌具有 4 连张顺子胚子，建议战略弃牌寻找成型顺子！`,
+          reason: `手牌具有 4 连张两头顺子胚子，建议战略弃牌寻找成型顺子！`,
           cards: bestDiscard.cards
         };
       }
-      if (bestDiscard.intent === "pair_upgrade" && bestPlay.totalScore < need * 0.45) {
+      if (bestDiscard.intent === "pair_upgrade" && bestPlay.totalScore < need * 0.45 && discardsLeft >= 2) {
         return {
           verdict: "DISCARD",
           confidence: "HIGH",
@@ -1200,11 +1737,168 @@ end
     };
   }
 
+  const VOUCHER_BASE_SCORES = {
+    "Antimatter": 95,
+    "Blank": 70,
+    "Grabber": 88,
+    "Nacho Tong": 90,
+    "Wasteful": 82,
+    "Recycler": 85,
+    "Recyclomancy": 85,
+    "Seed Money": 86,
+    "Money Tree": 88,
+    "Director's Cut": 84,
+    "Retcon": 86,
+    "Overstock": 80,
+    "Overstock Plus": 82,
+    "Clearance Sale": 78,
+    "Liquidation": 80,
+    "Tarot Merchant": 76,
+    "Tarot Tycoon": 80,
+    "Planet Merchant": 76,
+    "Planet Tycoon": 80,
+    "Hone": 72,
+    "Glow Up": 78,
+    "Telescope": 86,
+    "Observatory": 92,
+    "Paint Brush": 82,
+    "Palette": 88,
+  };
+
+  function scoreOwnedJoker(joker, synergy) {
+    const jname = joker.name || "";
+    let base = 50;
+    if (["Cavendish", "Blueprint", "Brainstorm", "Constellation", "Hologram", "Baron"].includes(jname)) base = 90;
+    else if (["Card Sharp", "Blackboard", "Baseball Card", "Stuntman", "Bull", "Bootstraps"].includes(jname)) base = 80;
+    else if (["Green Joker", "Ride the Bus", "Red Card", "Square Joker", "Supernova", "Golden Joker", "Mail-In Rebate", "Trading Card"].includes(jname)) base = 70;
+    else if (["Half Joker", "Gros Michel", "Blue Joker", "Banner", "Scary Face", "Odd Todd"].includes(jname)) base = 55;
+    else base = 40;
+
+    if (jname === "Ice Cream" && (joker.chips || 0) <= 20) base = 25;
+    else if (jname === "Popcorn" && (joker.mult || 0) <= 4) base = 25;
+    else if (jname === "Gros Michel") base = 45;
+
+    return base;
+  }
+
+  // Tag Evaluation Catalog and Blind Choice System
+  const TAG_EVAL_CATALOG = {
+    "tag_negative": { name: "Negative Tag", ev: 9.5, tier: "S", desc: "下一个商店小丑额外提供 +1 槽位 (负片)" },
+    "tag_polychrome": { name: "Polychrome Tag", ev: 8.2, tier: "S", desc: "下一个商店版本小丑免费且多彩 (x1.5 Mult)" },
+    "tag_investment": { name: "Investment Tag", ev: 8.0, tier: "S", desc: "击败下一个 Boss 获得 $25 奖金" },
+    "tag_ethereal": { name: "Ethereal Tag", ev: 7.5, tier: "A", desc: "免费获得 1 个幻灵牌包" },
+    "tag_economy": { name: "Economy Tag", ev: 7.2, tier: "A", desc: "当前资金直接翻倍 (上限 +$40)" },
+    "tag_rare": { name: "Rare Tag", ev: 7.0, tier: "A", desc: "下一个商店免费获得 1 张 Rare 稀有小丑" },
+    "tag_coupon": { name: "Coupon Tag", ev: 6.8, tier: "A", desc: "下一个商店卡牌与补充包全免费" },
+    "tag_holo": { name: "Holographic Tag", ev: 6.8, tier: "A", desc: "下一个商店版本小丑免费且全息 (+10 Mult)" },
+    "tag_buffoon": { name: "Buffoon Tag", ev: 6.5, tier: "B", desc: "免费获得 1 个大型小丑包" },
+    "tag_voucher": { name: "Voucher Tag", ev: 6.5, tier: "B", desc: "下一个商店额外增加 1 张优惠券" },
+    "tag_foil": { name: "Foil Tag", ev: 6.2, tier: "B", desc: "下一个商店版本小丑免费且闪箔 (+50 Chips)" },
+    "tag_charm": { name: "Charm Tag", ev: 6.2, tier: "B", desc: "免费获得 1 个大型奥秘包" },
+    "tag_meteor": { name: "Meteor Tag", ev: 6.0, tier: "B", desc: "免费获得 1 个大型天体包" },
+    "tag_uncommon": { name: "Uncommon Tag", ev: 5.5, tier: "B", desc: "下一个商店免费获得 1 张 Uncommon 罕见小丑" },
+    "tag_double": { name: "Double Tag", ev: 5.5, tier: "B", desc: "复制下一个获取的 Tag 效果" },
+    "tag_orbital": { name: "Orbital Tag", ev: 5.2, tier: "B", desc: "指定手牌等级提升 3 级" },
+    "tag_standard": { name: "Standard Tag", ev: 5.0, tier: "C", desc: "免费获得 1 个大型标准包" },
+    "tag_d_six": { name: "D6 Tag", ev: 5.0, tier: "C", desc: "下一个商店初始刷新费用为 $0" },
+    "tag_boss": { name: "Boss Tag", ev: 4.5, tier: "C", desc: "重置下一个 Boss Blind" },
+    "tag_speed": { name: "Speed Tag", ev: 3.5, tier: "D", desc: "每跳过一次盲注获得 $5" },
+    "tag_handy": { name: "Handy Tag", ev: 3.5, tier: "D", desc: "每打出过一次手牌获得 $1" },
+    "tag_garbage": { name: "Garbage Tag", ev: 3.5, tier: "D", desc: "每次未使用的弃牌获得 $1" },
+    "tag_top_up": { name: "Top-up Tag", ev: 3.2, tier: "D", desc: "随机生成最多 2 张基础小丑" },
+    "tag_juggle": { name: "Juggle Tag", ev: 3.0, tier: "D", desc: "下回合手牌上限 +3" },
+  };
+
+  function evaluateBlindChoice(state) {
+    const b = state.blind || {};
+    const bname = b.name || "Small Blind";
+    const btype = (b.type || "small").toLowerCase();
+    const chipsReq = b.chips || 300;
+    const ante = state.ante || 1;
+    const money = state.money || 0;
+    const jokers = state.jokers || [];
+    const jCount = jokers.length;
+
+    if (btype === "boss" || bname.toLowerCase().includes("boss")) {
+      return {
+        action: "select_blind",
+        canSkip: false,
+        selectEv: 8.0,
+        skipEv: 0.0,
+        tagKey: null,
+        tagName: null,
+        reason: "Boss 盲注无法跳过，必须进入出牌阶段斩杀"
+      };
+    }
+
+    let selectEv = 6.4;
+    if (btype === "big") selectEv += 0.3;
+    const interest = Math.min(5, Math.floor(money / 5));
+    selectEv += interest * 0.12;
+    if (ante === 1) selectEv += 0.6;
+    if (jCount < 2) selectEv += 0.8;
+    else if (jCount >= 4) selectEv -= 0.2;
+    selectEv = Math.min(8.5, Math.max(5.0, selectEv));
+
+    const tagData = state.blind_tag || {};
+    let rawKey = tagData.key || tagData.name || "";
+    let normKey = String(rawKey).toLowerCase().replace(/\s+/g, "_");
+    if (!normKey.startsWith("tag_")) normKey = "tag_" + normKey;
+    const tagInfo = TAG_EVAL_CATALOG[normKey] || { name: tagData.name || "Unknown Tag", ev: 4.8, tier: "C", desc: "普通奖励 Tag" };
+
+    let skipEv = tagInfo.ev;
+    let riskWarning = null;
+
+    if (normKey === "tag_economy") {
+      if (money >= 20) skipEv += 1.5;
+      else if (money <= 6) skipEv -= 3.2;
+    }
+    if (normKey === "tag_investment") {
+      if (jCount >= 2) skipEv += 0.8;
+      else if (jCount === 0) skipEv -= 1.8;
+    }
+
+    if (ante === 1 && btype === "big" && jCount === 0) {
+      skipEv -= 4.5;
+      riskWarning = "⚠️ 严禁在 Ante 1 零小丑时跳过大盲注，直面 Boss 极大概率暴毙！";
+    } else if (ante === 1 && btype === "small" && jCount === 0) {
+      if (tagInfo.tier !== "S") {
+        skipEv -= 2.2;
+        riskWarning = "Ante 1 首轮盲注缺少小丑基础，非 S 级神级 Tag 建议进入商店采购";
+      }
+    } else if (jCount === 0 && ante > 1) {
+      skipEv -= 2.8;
+      riskWarning = "场上暂无小丑战力，急需进入商店构建阵容";
+    } else if (jCount >= 3 && ["S", "A"].includes(tagInfo.tier)) {
+      skipEv += 0.5;
+    }
+
+    skipEv = Math.max(1.0, skipEv);
+    const shouldSkip = skipEv > selectEv;
+    return {
+      action: shouldSkip ? "skip_blind" : "select_blind",
+      canSkip: true,
+      selectEv: Number(selectEv.toFixed(2)),
+      skipEv: Number(skipEv.toFixed(2)),
+      tagKey: normKey,
+      tagName: tagInfo.name,
+      tagTier: tagInfo.tier,
+      tagDesc: tagInfo.desc,
+      riskWarning: riskWarning,
+      reason: shouldSkip
+        ? `Tag [${tagInfo.name}] (${tagInfo.tier}级) 期望收益 (${skipEv.toFixed(1)}) 优于进入盲注 (${selectEv.toFixed(1)}): ${tagInfo.desc}`
+        : (riskWarning
+            ? `优先进入盲注以保全战力，避免盲目跳过: ${riskWarning}`
+            : `进入盲注稳健获取奖金与商店发展机会，Tag [${tagInfo.name}] 价值不足以弥补跳过商店损失`)
+    };
+  }
+
   // Shop Evaluation System
   function findBestShopPurchases(state) {
     const shop = state.shop || {};
     const cards = shop.cards || [];
     const boosters = shop.boosters || [];
+    const vouchers = shop.vouchers || [];
     const money = Number(state.money) || 0;
     const jokersCount = Number(state.jokers_count) || (state.jokers ? state.jokers.length : 0);
     const maxSlots = Number(state.joker_slots) || 5;
@@ -1239,6 +1933,30 @@ end
       else if (c.edition === "holo") score += 20;
       else if (c.edition === "foil") score += 15;
 
+      // Boss Blind 针对性规避与特化加成
+      const upcomingBoss = (state.blind && state.blind.upcoming_boss) || null;
+      if (upcomingBoss) {
+        if (upcomingBoss === "The Plant") {
+          const faceJokers = ["Scary Face", "Smiley Face", "Photograph", "Baron", "Sock and Buskin", "Pareidolia", "Business Card"];
+          if (faceJokers.includes(cname)) {
+            score -= 50; // 即将面临人头牌封印，严禁选购
+          }
+        } else if (upcomingBoss === "The Head" && ["Lusty Joker", "Bloodstone"].includes(cname)) {
+          score -= 45; // 红桃封印
+        } else if (upcomingBoss === "The Window" && ["Greedy Joker", "Rough Gem"].includes(cname)) {
+          score -= 45; // 方块封印
+        } else if (upcomingBoss === "The Goad" && ["Wrathful Joker", "Arrowhead"].includes(cname)) {
+          score -= 45; // 黑桃封印
+        } else if (upcomingBoss === "The Club" && ["Gluttonous Joker", "Onyx Agate"].includes(cname)) {
+          score -= 45; // 梅花封印
+        } else if (upcomingBoss === "The Needle") {
+          if (["Burglar", "Grabber", "Nacho Tong"].includes(cname)) score += 35; // 补足出牌次数
+          if (["Ice Cream", "Bull", "Cavendish"].includes(cname)) score += 25; // 强化单发一击必杀爆发力
+        } else if (upcomingBoss === "The Water") {
+          if (["Mail-In Rebate", "Castle"].includes(cname)) score -= 35; // 0次弃牌下失效
+        }
+      }
+
       // 利息线保护 ($25 黄金利息法则)
       if (canAfford) {
         const remaining = money - cost;
@@ -1266,6 +1984,61 @@ end
     evaluatedCards.sort((a, b) => b.score - a.score);
     const bestCard = evaluatedCards[0];
 
+    // Evaluate shop vouchers
+    const evaluatedVouchers = [];
+    for (const v of vouchers) {
+      const vname = v.name || "Voucher";
+      const cost = Number(v.cost) || 10;
+      const vScore = VOUCHER_BASE_SCORES[vname] || 65;
+      const canAfford = money >= cost;
+      const budgetAllowed = (money - cost >= 25) || (canAfford && vScore >= 85);
+      evaluatedVouchers.push({
+        ...v,
+        name: vname,
+        cost: cost,
+        score: vScore,
+        canAfford: canAfford,
+        budgetAllowed: budgetAllowed,
+        recommendation: budgetAllowed && vScore >= 80 ? "强烈推荐" : (budgetAllowed ? "值得购买" : "资金暂缓")
+      });
+    }
+    evaluatedVouchers.sort((a, b) => b.score - a.score);
+    const bestVoucher = evaluatedVouchers.find(v => v.canAfford && v.budgetAllowed) || null;
+
+    // Full Joker Replacement / Sell Evaluation
+    let sellRecommendation = null;
+    if (!hasSlot && state.jokers && state.jokers.length > 0 && evaluatedCards.length > 0) {
+      const bestCandidate = evaluatedCards[0];
+      if (bestCandidate && bestCandidate.score >= 80 && money >= bestCandidate.cost) {
+        let weakest = null;
+        let weakestScore = 999;
+        state.jokers.forEach((j, idx) => {
+          const sc = scoreOwnedJoker(j, synergy);
+          if (sc < weakestScore) {
+            weakestScore = sc;
+            weakest = { index: idx + 1, name: j.name, score: sc };
+          }
+        });
+        if (weakest && weakestScore <= 48 && (bestCandidate.score - weakestScore) >= 30) {
+          sellRecommendation = {
+            sellIndex: weakest.index,
+            sellName: weakest.name,
+            sellScore: weakestScore,
+            targetCard: bestCandidate,
+            scoreGain: bestCandidate.score - weakestScore,
+          };
+        }
+      }
+    }
+
+    // Reroll evaluation
+    const hasStrongShopCard = (bestCard && bestCard.score >= 75) ||
+                              (bestVoucher && bestVoucher.score >= 75) ||
+                              boosters.some(b => b.cost && money - b.cost >= 25);
+    const safeReroll = money >= 25 + rerollCost && !hasStrongShopCard;
+    const emergencyReroll = (state.ante || 1) <= 2 && jokersCount === 0 && money >= rerollCost && !hasStrongShopCard;
+    const shouldReroll = safeReroll || emergencyReroll;
+
     let interestAdvice = "💰 当前资金充足";
     if (money >= 25) {
       interestAdvice = "当前资金已达 $25 吃满每轮 $5 顶额利息，盈余资金可自由采购或刷新";
@@ -1276,19 +2049,225 @@ end
 
     return {
       evaluatedCards: evaluatedCards,
-      bestCard: bestCard && bestCard.canAfford && bestCard.score >= 60 ? bestCard : null,
+      bestCard: bestCard && bestCard.canAfford && (bestCard.score >= 60 || (jokersCount < 2 && bestCard.score >= 45)) ? bestCard : null,
+      evaluatedVouchers: evaluatedVouchers,
+      bestVoucher: bestVoucher,
+      sellRecommendation: sellRecommendation,
       boosters: boosters,
       interestAdvice: interestAdvice,
       canReroll: money >= rerollCost,
+      shouldReroll: shouldReroll,
       rerollCost: rerollCost,
       hasSlot: hasSlot,
       synergy: synergy
     };
   }
 
+  const CARD_RANKS_ORDER = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"];
+  function getRankVal(r) {
+    const idx = CARD_RANKS_ORDER.indexOf(r);
+    return idx >= 0 ? idx : 0;
+  }
+
+  function selectConsumableTargets(cname, hand, jokers) {
+    if (!hand || hand.length === 0) return [];
+    const indexed = hand.map((c, i) => ({ card: c, index: i + 1 }));
+    const hasBaron = (jokers || []).some(j => j.name === "Baron");
+
+    if (cname === "The Hanged Man") {
+      // Destroy up to 2 worst unenhanced, non-sealed cards
+      const unenhanced = indexed.filter(x => !x.card.enhancement && !x.card.seal && !x.card.edition);
+      const pool = unenhanced.length > 0 ? unenhanced : indexed;
+      pool.sort((a, b) => getRankVal(a.card.rank) - getRankVal(b.card.rank));
+      return pool.slice(0, 2).map(x => x.index);
+    } else if (cname === "Death") {
+      // Convert left card into right card: 2 cards needed
+      if (indexed.length < 2) return [];
+      const sorted = [...indexed].sort((a, b) => {
+        const valA = (a.card.enhancement || a.card.edition || a.card.seal ? 100 : 0) + getRankVal(a.card.rank);
+        const valB = (b.card.enhancement || b.card.edition || b.card.seal ? 100 : 0) + getRankVal(b.card.rank);
+        return valA - valB;
+      });
+      const worst = sorted[0];
+      const best = sorted[sorted.length - 1];
+      if (worst.index !== best.index) return [worst.index, best.index];
+      return [sorted[0].index, sorted[1].index];
+    } else if (cname === "The Chariot") {
+      // Steel Card (+1.5x Mult held in hand):
+      // If Baron present, target King! Otherwise target low unenhanced card kept in hand
+      if (hasBaron) {
+        const kings = indexed.filter(x => x.card.rank === "K" && x.card.enhancement !== "steel");
+        if (kings.length > 0) return [kings[0].index];
+      }
+      const unenhanced = indexed.filter(x => !x.card.enhancement && !x.card.seal && !x.card.edition);
+      const pool = unenhanced.length > 0 ? unenhanced : indexed;
+      pool.sort((a, b) => getRankVal(a.card.rank) - getRankVal(b.card.rank));
+      return [pool[0].index];
+    } else if (cname === "The Devil") {
+      // Gold Card ($3 held in hand at end of round): target low unenhanced card kept in hand
+      const unenhanced = indexed.filter(x => !x.card.enhancement && !x.card.seal && !x.card.edition);
+      const pool = unenhanced.length > 0 ? unenhanced : indexed;
+      pool.sort((a, b) => getRankVal(a.card.rank) - getRankVal(b.card.rank));
+      return [pool[0].index];
+    } else if (cname === "The Tower") {
+      // Stone Card (+50 chips): target lowest unenhanced junk
+      const unenhanced = indexed.filter(x => !x.card.enhancement && !x.card.seal && !x.card.edition);
+      const pool = unenhanced.length > 0 ? unenhanced : indexed;
+      pool.sort((a, b) => getRankVal(a.card.rank) - getRankVal(b.card.rank));
+      return [pool[0].index];
+    } else if (cname === "Justice") {
+      // Glass Card (2x Mult when scored): target highest rank card (Ace / King)
+      const sorted = [...indexed].sort((a, b) => getRankVal(b.card.rank) - getRankVal(a.card.rank));
+      return [sorted[0].index];
+    } else if (cname === "The Empress" || cname === "The Hierophant" || cname === "The Magician") {
+      // Empress (+4 Mult), Hierophant (+30 Chips), Magician (Lucky): target up to 2 unenhanced highest ranks
+      const unenhanced = indexed.filter(x => !x.card.enhancement);
+      const pool = unenhanced.length > 0 ? unenhanced : indexed;
+      pool.sort((a, b) => getRankVal(b.card.rank) - getRankVal(a.card.rank));
+      return pool.slice(0, 2).map(x => x.index);
+    } else if (cname === "The Lovers") {
+      // Wild Card: target unenhanced card
+      const unenhanced = indexed.filter(x => !x.card.enhancement);
+      const pool = unenhanced.length > 0 ? unenhanced : indexed;
+      pool.sort((a, b) => getRankVal(b.card.rank) - getRankVal(a.card.rank));
+      return [pool[0].index];
+    } else if (cname === "Strength") {
+      // Target up to 2 cards rank < 'A'
+      const valid = indexed.filter(x => getRankVal(x.card.rank) < getRankVal("A"));
+      const pool = valid.length > 0 ? valid : indexed;
+      pool.sort((a, b) => getRankVal(b.card.rank) - getRankVal(a.card.rank));
+      return pool.slice(0, 2).map(x => x.index);
+    } else if (["The Moon", "The Sun", "The World", "The Star"].includes(cname)) {
+      // Suit converters (up to 3 cards to target suit)
+      const targetSuitMap = { "The Moon": "C", "The Sun": "H", "The World": "S", "The Star": "D" };
+      const targetSuit = targetSuitMap[cname];
+      const offSuit = indexed.filter(x => (x.card.suit || "")[0] !== targetSuit);
+      offSuit.sort((a, b) => getRankVal(b.card.rank) - getRankVal(a.card.rank));
+      return offSuit.slice(0, 3).map(x => x.index);
+    } else if (cname === "Cryptid") {
+      // Spectral Cryptid: duplicate best card
+      const sorted = [...indexed].sort((a, b) => {
+        const valA = (a.card.edition ? 200 : 0) + (["glass", "steel"].includes(a.card.enhancement) ? 100 : 0) + (a.card.seal === "red" ? 100 : 0) + getRankVal(a.card.rank);
+        const valB = (b.card.edition ? 200 : 0) + (["glass", "steel"].includes(b.card.enhancement) ? 100 : 0) + (b.card.seal === "red" ? 100 : 0) + getRankVal(b.card.rank);
+        return valB - valA;
+      });
+      return [sorted[0].index];
+    } else if (cname === "Aura") {
+      // Add Foil/Holo/Poly to 1 card without edition
+      const noEd = indexed.filter(x => !x.card.edition);
+      const pool = noEd.length > 0 ? noEd : indexed;
+      pool.sort((a, b) => getRankVal(b.card.rank) - getRankVal(a.card.rank));
+      return [pool[0].index];
+    } else if (cname === "Deja Vu") {
+      // Red seal (retrigger) to high rank scoring card
+      const noSeal = indexed.filter(x => !x.card.seal);
+      const pool = noSeal.length > 0 ? noSeal : indexed;
+      pool.sort((a, b) => getRankVal(b.card.rank) - getRankVal(a.card.rank));
+      return [pool[0].index];
+    } else if (cname === "Trance") {
+      // Blue seal (Planet card in hand) to low rank kept card
+      const noSeal = indexed.filter(x => !x.card.seal);
+      const pool = noSeal.length > 0 ? noSeal : indexed;
+      pool.sort((a, b) => getRankVal(a.card.rank) - getRankVal(b.card.rank));
+      return [pool[0].index];
+    } else if (cname === "Talisman") {
+      // Gold seal ($3 on score) to high rank scoring card
+      const noSeal = indexed.filter(x => !x.card.seal);
+      const pool = noSeal.length > 0 ? noSeal : indexed;
+      pool.sort((a, b) => getRankVal(b.card.rank) - getRankVal(a.card.rank));
+      return [pool[0].index];
+    } else if (cname === "Medium") {
+      // Purple seal (Tarot on discard) to low rank junk card
+      const noSeal = indexed.filter(x => !x.card.seal);
+      const pool = noSeal.length > 0 ? noSeal : indexed;
+      pool.sort((a, b) => getRankVal(a.card.rank) - getRankVal(b.card.rank));
+      return [pool[0].index];
+    }
+    return [];
+  }
+
+  // Alias for backward compatibility
+  const selectTarotHandTargets = selectConsumableTargets;
+
+  // Consumable Evaluation System
+  function findBestConsumableToUse(state) {
+    const cons = state.consumables || [];
+    if (cons.length === 0) return null;
+    const PLANET_NAMES = ["Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune", "Pluto", "Planet X", "Ceres", "Eris"];
+    const TARGETED_CONSUMABLE_SET = new Set([
+      "The Hanged Man", "Death", "The Chariot", "Justice", "The Devil", "The Tower",
+      "The Empress", "The Hierophant", "The Magician", "The Lovers", "Strength",
+      "The Moon", "The Sun", "The World", "The Star", "Cryptid", "Aura",
+      "Deja Vu", "Trance", "Talisman", "Medium"
+    ]);
+
+    for (let i = 0; i < cons.length; i++) {
+      const c = cons[i];
+      const name = c.name || "";
+      const idx = c.index !== undefined ? c.index : (i + 1);
+
+      // Black Hole: upgrades ALL poker hands +1 level!
+      if (name === "Black Hole") {
+        return { card: c, index: idx, targetIndices: null, reason: "全牌型等级统一 +1 级！" };
+      }
+      // Planet cards: permanently boost hand level!
+      if (PLANET_NAMES.includes(name) || (c.set === "Planet")) {
+        return { card: c, index: idx, targetIndices: null, reason: `升级手牌基础等级 (${name})` };
+      }
+      // The Hermit: Doubles money up to $20!
+      if (name === "The Hermit" && (state.money || 0) >= 10) {
+        return { card: c, index: idx, targetIndices: null, reason: `金钱翻倍 (现持 $${state.money})` };
+      }
+      // Temperance: Gives total sell value of all jokers
+      if (name === "Temperance") {
+        let totalSell = 0;
+        for (const j of (state.jokers || [])) totalSell += (j.sell_cost || j.sell_value || 1);
+        if (totalSell >= 6) return { card: c, index: idx, targetIndices: null, reason: `变现小丑总价值 (+$${totalSell})` };
+      }
+      // The Wheel of Fortune: 1 in 4 to add Foil, Holo, or Polychrome to a random joker
+      if (name === "The Wheel of Fortune") {
+        const hasEditionless = (state.jokers || []).some(j => !j.edition);
+        if (hasEditionless) return { card: c, index: idx, targetIndices: null, reason: "为小丑博取闪箔/全息/多彩特效" };
+      }
+      // Emperor / High Priestess: Add tarot / planet cards
+      if (name === "The Emperor" || name === "The High Priestess") {
+        const maxSlots = Number(state.consumable_slots) || 2;
+        if (cons.length < maxSlots) return { card: c, index: idx, targetIndices: null, reason: `获取补充消耗牌 (${name})` };
+      }
+      // The Fool: duplicate last tarot/planet
+      if (name === "The Fool") {
+        return { card: c, index: idx, targetIndices: null, reason: "复制上一张使用的塔罗/星球牌" };
+      }
+      // Judgement: Create a random joker
+      if (name === "Judgement") {
+        const maxJokers = Number(state.joker_slots) || 5;
+        if ((state.jokers || []).length < maxJokers) return { card: c, index: idx, targetIndices: null, reason: "随机生成新小丑" };
+      }
+      // Immolate: destroys 5 cards, gains $20
+      if (name === "Immolate" && (state.hand || []).length >= 5) {
+        return { card: c, index: idx, targetIndices: null, reason: "销毁 5 张杂牌并获取 $20 现金" };
+      }
+      // Targeted Consumables (Tarots, Spectrals)
+      if (TARGETED_CONSUMABLE_SET.has(name)) {
+        const targets = selectConsumableTargets(name, state.hand, state.jokers);
+        if (targets && targets.length > 0) {
+          return { card: c, index: idx, targetIndices: targets, reason: `强化/改造手牌 (${name} 作用于 ${targets.length} 张牌)` };
+        }
+      }
+    }
+    return null;
+  }
+
   // DecideX HUD Renderer
   window.onBalatroStateUpdate = function (state) {
     currentGameState = state;
+    window._lastDecidexState = state;
+    window._lastDecidexStateCount = (window._lastDecidexStateCount || 0) + 1;
+
+    // 1. Immediately notify AutoPilot so state transitions are NEVER blocked by early returns!
+    if (window.AutoPilot && typeof window.AutoPilot.onStateUpdated === "function") {
+      window.AutoPilot.onStateUpdated(state);
+    }
 
     // Update Quick Status Strip
     const cr = state;
@@ -1374,13 +2353,35 @@ end
 
     // Phase: BLIND_SELECT
     if (state.state_name === "BLIND_SELECT") {
+      const choice = evaluateBlindChoice(state);
+      const isSkipRec = choice.action === "skip_blind";
+      const tagHtml = choice.tagName ? `
+        <div style="margin: 6px 0; padding: 6px 10px; background: rgba(255,255,255,0.06); border-radius: 6px; border: 1px solid rgba(255,255,255,0.1);">
+          <div style="display:flex; justify-content:space-between; font-size:12px;">
+            <span>🏷️ 当前 Tag: <b style="color:#f59e0b;">${choice.tagName}</b> (${choice.tagTier}级)</span>
+            <span>Tag 期望: <b style="color:${isSkipRec ? '#4ade80' : '#888'};">${choice.skipEv}</b> vs 盲注: <b style="color:${!isSkipRec ? '#4ade80' : '#888'};">${choice.selectEv}</b></span>
+          </div>
+          <div style="font-size:11px; color:#aaa; margin-top:2px;">${choice.tagDesc || ''}</div>
+          ${choice.riskWarning ? `<div style="font-size:11px; color:#ef4444; margin-top:4px;">${choice.riskWarning}</div>` : ''}
+        </div>
+      ` : '';
+
       container.innerHTML = `
-        <div class="rec-placeholder">
-          <div style="font-weight: bold; margin-bottom: 6px;">🎯 当前阶段: 盲注选择 (Small Blind)</div>
-          <button class="btn-act btn-play" style="padding: 6px 14px; margin: 4px auto;" onclick="window.decidexSelectBlind()">▶️ 一键选择小盲注开始</button>
-          <div style="font-size: 11px; margin-top: 6px; color: #888;">进入对局后，AI 将自动分析当前手牌的最优出牌与弃牌打法</div>
+        <div class="rec-placeholder" style="text-align: left; padding: 10px 14px;">
+          <div style="font-weight: bold; margin-bottom: 4px; font-size: 13px;">🎯 盲注选择: <span style="color:#60a5fa;">${state.blind?.name || 'Small Blind'}</span> (目标 ${(state.blind?.chips || 300).toLocaleString()} 筹码)</div>
+          ${tagHtml}
+          <div style="font-size: 11px; margin-bottom: 8px; color: #ccc;">💡 DecideX 建议: ${choice.reason}</div>
+          <div style="display:flex; gap: 8px;">
+            <button class="btn-act ${!isSkipRec ? 'btn-play' : ''}" style="flex:1; padding: 6px 10px; border-radius: 6px; ${!isSkipRec ? 'font-weight:bold; border: 1px solid #4ade80;' : 'background:#374151; color:#aaa;'}" onclick="window.decidexSelectBlind()">
+              ▶️ 进入盲注 (${choice.selectEv})
+            </button>
+            ${choice.canSkip ? `
+            <button class="btn-act ${isSkipRec ? 'btn-play' : ''}" style="flex:1; padding: 6px 10px; border-radius: 6px; ${isSkipRec ? 'font-weight:bold; border: 1px solid #f59e0b; background:#b45309;' : 'background:#374151; color:#aaa;'}" onclick="window.decidexSkipBlind()">
+              ⏩ 跳过盲注 (${choice.skipEv})
+            </button>` : ''}
+          </div>
         </div>`;
-      if (candList) candList.innerHTML = `<div style="font-size:11px;color:#888;">盲注选择阶段无需出牌</div>`;
+      if (candList) candList.innerHTML = `<div style="font-size:11px;color:#888;">盲注选择阶段: ${choice.reason}</div>`;
       return;
     }
 
@@ -1413,12 +2414,18 @@ end
     }
 
     currentRecommendation = topPlays[0];
-    window.currentRecommendation = currentRecommendation;
-    window._lastBestPlayCards = currentRecommendation.cards;
-    const bestPlay = currentRecommendation;
-    const bestDiscard = findBestDiscards(state, bestPlay);
-    const arbitration = arbitrateAction(state, bestPlay, bestDiscard);
+    const bestDiscard = findBestDiscards(state, currentRecommendation);
+    const arbitration = arbitrateAction(state, currentRecommendation, bestDiscard);
     window._currentArbitration = arbitration;
+    if (arbitration && arbitration.cards) {
+      window._lastBestPlayCards = arbitration.cards;
+    } else {
+      window._lastBestPlayCards = currentRecommendation.cards;
+    }
+    const bestPlay = (arbitration && arbitration.verdict === "PLAY" && arbitration.cards)
+      ? { ...currentRecommendation, cards: arbitration.cards, junkCards: (arbitration.cards.length > (currentRecommendation.cards || []).length) ? arbitration.cards.slice((currentRecommendation.cards || []).length) : [] }
+      : currentRecommendation;
+    window.currentRecommendation = bestPlay;
 
     container.innerHTML = "";
 
@@ -1555,11 +2562,6 @@ end
         candList.appendChild(row);
       }
     }
-
-    // Trigger AutoPilot hook if active
-    if (window.AutoPilot && typeof window.AutoPilot.onStateUpdated === "function") {
-      window.AutoPilot.onStateUpdated(state);
-    }
   };
 
   // Programmatic execution via Emscripten virtual FS
@@ -1595,6 +2597,16 @@ end
     console.log("[DecideX] Dispatched buy action:", luaCode);
   };
 
+  window.executeSellCard = function (index, area) {
+    if (!window.Module || !window.Module.FS) {
+      console.warn("游戏引擎尚未就绪");
+      return;
+    }
+    const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("sell_card", {index = ${index}, area = "${area || 'jokers'}"}) end`;
+    window.Module.FS.writeFile("/tmp/balatro_eval.lua", luaCode);
+    console.log("[DecideX] Dispatched sell_card action:", luaCode);
+  };
+
   window.executeRerollShop = function () {
     if (!window.Module || !window.Module.FS) {
       console.warn("游戏引擎尚未就绪");
@@ -1626,11 +2638,49 @@ end
     console.log("[DecideX] Dispatched reorder_jokers action:", orderStr);
   };
 
+  window.executeUseCard = function (index, targetIndices, area) {
+    if (!window.Module || !window.Module.FS) {
+      console.warn("游戏引擎尚未就绪");
+      return;
+    }
+    const tIndices = (targetIndices && targetIndices.length > 0) ? `{${targetIndices.join(",")}}` : "nil";
+    const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("use_card", {index = ${index}, area = "${area || 'consumeables'}", target_indices = ${tIndices}}) end`;
+    window.Module.FS.writeFile("/tmp/balatro_eval.lua", luaCode);
+    console.log("[DecideX] Dispatched use_card action:", luaCode);
+  };
+
+  window.executeSkipBooster = function () {
+    if (!window.Module || !window.Module.FS) {
+      console.warn("游戏引擎尚未就绪");
+      return;
+    }
+    const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("skip_booster") end`;
+    window.Module.FS.writeFile("/tmp/balatro_eval.lua", luaCode);
+    console.log("[DecideX] Dispatched skip_booster action");
+  };
+
+  window.executeSelectPackCard = function (index) {
+    if (!window.Module || !window.Module.FS) {
+      console.warn("游戏引擎尚未就绪");
+      return;
+    }
+    const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("select_pack_card", {index = ${index}}) end`;
+    window.Module.FS.writeFile("/tmp/balatro_eval.lua", luaCode);
+    console.log("[DecideX] Dispatched select_pack_card action:", index);
+  };
+
   // Utilities
   window.decidexSelectBlind = function () {
     if (window.Module && window.Module.FS) {
       window.Module.FS.writeFile("/tmp/balatro_eval.lua", 'local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("select_blind") end');
       console.log("[DecideX] Dispatched select_blind action");
+    }
+  };
+
+  window.decidexSkipBlind = function () {
+    if (window.Module && window.Module.FS) {
+      window.Module.FS.writeFile("/tmp/balatro_eval.lua", 'local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("skip_blind") end');
+      console.log("[DecideX] Dispatched skip_blind action");
     }
   };
 
@@ -1696,6 +2746,8 @@ end
     pendingState: null,
     lastBlindSelectTime: 0,
     lastStartRunTime: 0,
+    _lastProgressTimestamp: 0,
+    _shopAttemptedItems: new Set(),
 
     toggle(enable) {
       this.enabled = enable !== undefined ? Boolean(enable) : !this.enabled;
@@ -1705,6 +2757,7 @@ end
 
       console.log(`[AutoPilot] ${this.enabled ? "Enabled" : "Disabled"}`);
       if (this.enabled) {
+        this._lastProgressTimestamp = Date.now();
         this.startWatchdog();
         this.scheduleNextAction(200);
       } else {
@@ -1714,28 +2767,52 @@ end
           this.stepTimeout = null;
         }
         this.busy = false;
+        this._actionInFlight = null;
         this.pendingState = null;
       }
     },
 
     startWatchdog() {
       if (this.watchdogTimer) clearInterval(this.watchdogTimer);
-      // Fast responsive watchdog (450ms) to ensure zero freeze across states
+      // Responsive watchdog (350ms) with anti-hang and anti-deadlock guards
       this.watchdogTimer = setInterval(() => {
         if (!this.enabled) return;
-        if (this.busy && this._busyTimestamp && (Date.now() - this._busyTimestamp > 3500)) {
-          console.warn("[AutoPilot] Busy lock held > 3.5s, auto-clearing busy lock");
+        const now = Date.now();
+
+        // 1. Force-clear busy lock if held too long (max 4.5s for play, 3.0s for others)
+        const maxBusyTime = (this._actionInFlight === "play") ? 4500 : 3000;
+        if (this.busy && this._busyTimestamp && (now - this._busyTimestamp > maxBusyTime)) {
+          console.warn(`[AutoPilot Watchdog] Busy lock held > ${maxBusyTime}ms for action ${this._actionInFlight}, auto-clearing busy lock`);
+          this.busy = false;
+          this._actionInFlight = null;
+          this._busyTimestamp = null;
+        }
+
+        // 2. Anti-hang: if stuck in an actionable state for > 3.8s without progress, force unlock
+        if (!this._lastProgressTimestamp) this._lastProgressTimestamp = now;
+        if (now - this._lastProgressTimestamp > 3800) {
+          if (this._actionInFlight) {
+            console.warn(`[AutoPilot Watchdog] Action ${this._actionInFlight} stuck for ${now - this._lastProgressTimestamp}ms, force-clearing in-flight lock`);
+            this._actionInFlight = null;
+          }
           this.busy = false;
         }
+
         if (this.busy) return;
         const state = currentGameState || window._lastDecidexState;
         if (!state || !state.state_name) return;
         const sname = state.state_name;
+
+        // Animation states: do NOT nudge actions during animation
+        if (["HAND_PLAYED", "DRAW_TO_HAND", "NEW_ROUND"].includes(sname)) {
+          return;
+        }
+
         // In actionable states, if idle, nudge execution immediately
-        if (["SPLASH", "MENU", "BLIND_SELECT", "SELECTING_HAND", "ROUND_EVAL", "SHOP"].includes(sname)) {
+        if (["SPLASH", "MENU", "BLIND_SELECT", "SELECTING_HAND", "ROUND_EVAL", "SHOP", "TAROT_PACK", "PLANET_PACK", "SPECTRAL_PACK", "STANDARD_PACK", "BUFFOON_PACK"].includes(sname)) {
           this.executeStep();
         }
-      }, 450);
+      }, 350);
     },
 
     stopWatchdog() {
@@ -1756,20 +2833,76 @@ end
     getDelayForState(sname) {
       if (sname === "SPLASH" || sname === "MENU") return 150;
       if (sname === "BLIND_SELECT") return 150;
-      if (sname === "ROUND_EVAL") return 200;
-      if (sname === "SHOP") return 250;
-      if (sname === "SELECTING_HAND") return 450;
-      return 300;
+      if (sname === "ROUND_EVAL") return 180;
+      if (sname === "SHOP") return 220;
+      if (sname === "SELECTING_HAND") return 350;
+      if (["TAROT_PACK", "PLANET_PACK", "SPECTRAL_PACK", "STANDARD_PACK", "BUFFOON_PACK"].includes(sname)) return 300;
+      return 250;
+    },
+
+    onActionResult(resultStr) {
+      if (!this.enabled) return;
+      const mAction = resultStr.match(/action=([^\s]+)/);
+      const mOk = resultStr.match(/ok=([^\s]+)/);
+      const mInfo = resultStr.match(/info=(.*)$/);
+      const action = mAction ? mAction[1] : null;
+      const ok = mOk ? mOk[1] === "true" : false;
+      const info = mInfo ? mInfo[1].trim() : "";
+
+      if (action) {
+        if (!ok) {
+          console.warn(`[AutoPilot] Action ${action} rejected by Lua: ${info}`);
+          // Clear locks immediately so AutoPilot can retry without waiting for watchdog timeout
+          if (this._actionInFlight === action || this.busy) {
+            this._actionInFlight = null;
+            this.busy = false;
+            this._busyTimestamp = null;
+            this.scheduleNextAction(250);
+          }
+        } else {
+          console.log(`[AutoPilot] Action ${action} confirmed by Lua: ${info}`);
+          this._lastProgressTimestamp = Date.now();
+        }
+      }
     },
 
     onStateUpdated(state) {
-      if (!this.enabled) return;
+      if (!this.enabled || !state) return;
+      const sname = state.state_name;
+      const now = Date.now();
+      const handsLeft = Number(state.hands_left);
+      const discardsLeft = Number(state.discards_left);
+      const handLen = Array.isArray(state.hand) ? state.hand.length : 0;
+      const money = Number(state.money);
+
+      const stateChanged = Boolean(sname && sname !== this._lastSeenState);
+      const actionMadeProgress = (
+        (this._lastHandsLeft !== undefined && handsLeft !== this._lastHandsLeft) ||
+        (this._lastDiscardsLeft !== undefined && discardsLeft !== this._lastDiscardsLeft) ||
+        (this._lastHandLen !== undefined && handLen !== this._lastHandLen && this._actionInFlight)
+      );
+
+      // When the state changes or hands/discards progress, unlock immediately!
+      if (stateChanged || actionMadeProgress) {
+        this.busy = false;
+        this._actionInFlight = null;
+        this.pendingState = null;
+        this._lastHandsLeft = handsLeft;
+        this._lastDiscardsLeft = discardsLeft;
+        this._lastHandLen = handLen;
+        this._lastProgressTimestamp = now;
+        this.scheduleNextAction(this.getDelayForState(sname));
+        return;
+      }
+
+      this._lastHandsLeft = handsLeft;
+      this._lastDiscardsLeft = discardsLeft;
+      this._lastHandLen = handLen;
+
       if (this.busy) {
-        // State updated while action was in flight; buffer it so we don't drop the transition!
         this.pendingState = state;
         return;
       }
-      const sname = state && state.state_name;
       this.scheduleNextAction(this.getDelayForState(sname));
     },
 
@@ -1791,130 +2924,424 @@ end
       let executedAction = false;
       let unlockCooldownMs = 300;
 
+      // Track state dwell time and reset sub-state clocks on transition
+      const now = Date.now();
+      if (sname !== this._lastSeenState) {
+        this._lastSeenState = sname;
+        this._stateEnterTime = now;
+        this._lastProgressTimestamp = now;
+        if (sname !== "BLIND_SELECT") this._blindSelectEnterTime = null;
+        if (sname !== "ROUND_EVAL") this._roundEvalEnterTime = null;
+        if (sname !== "SHOP") {
+          this._shopEnterTime = null;
+          this._shopPurchasedCard = false;
+          this._shopPurchasedBooster = false;
+          this._shopAttemptedItems.clear();
+        }
+      }
+
       this.busy = true;
-      this._busyTimestamp = Date.now();
+      this._busyTimestamp = now;
       try {
         console.log(`[AutoPilot] Step executing for state: ${sname}`);
 
         if (sname === "SPLASH" || sname === "MENU") {
-          const now = Date.now();
-          if (now - this.lastStartRunTime > 3000) {
+          if (now - this.lastStartRunTime > 2500) {
             this.lastStartRunTime = now;
             this.updateStatus("正在启动新局...", true);
             console.log(`[AutoPilot] In ${sname}, auto starting new run`);
             window.decidexStartRun();
             executedAction = true;
-            unlockCooldownMs = 1500;
+            unlockCooldownMs = 1200;
           } else {
             this.updateStatus("等待新局加载...", true);
             executedAction = false;
-            unlockCooldownMs = 300;
+            unlockCooldownMs = 250;
           }
         } else if (sname === "BLIND_SELECT") {
+          this.lastToggleShopTime = 0;
+          this.lastCashOutTime = 0;
+          this._shopEnterTime = null;
+          this._togglingShop = false;
+          if (!this._blindSelectEnterTime) this._blindSelectEnterTime = now;
+          const timeInBlindSelect = now - this._blindSelectEnterTime;
+
           if (state.can_select_blind) {
-            this._blindWaitStart = null;
-            const now = Date.now();
             // Debounce repeated blind selection in the same transition window
-            if (now - this.lastBlindSelectTime > 400) {
+            if (now - (this.lastBlindSelectTime || 0) > 800) {
               this.lastBlindSelectTime = now;
-              this.updateStatus("自动选择盲注...", true);
-              console.log("[AutoPilot] In BLIND_SELECT, auto selecting blind");
-              window.decidexSelectBlind();
+              this._lastProgressTimestamp = now;
+              const choice = evaluateBlindChoice(state);
+              if (choice.action === "skip_blind" && state.can_skip_blind) {
+                this._actionInFlight = "skip_blind";
+                this.updateStatus(`跳过盲注获取 [${choice.tagName || 'Tag'}]...`, true);
+                console.log(`[AutoPilot] In BLIND_SELECT, auto skipping blind for ${choice.tagName} (skipEv=${choice.skipEv} > selectEv=${choice.selectEv}, time=${timeInBlindSelect}ms)`);
+                window.decidexSkipBlind();
+              } else {
+                this._actionInFlight = "select_blind";
+                this.updateStatus("自动选择盲注...", true);
+                console.log(`[AutoPilot] In BLIND_SELECT, auto selecting blind (can_select_blind=true, time=${timeInBlindSelect}ms)`);
+                window.decidexSelectBlind();
+              }
               executedAction = true;
-              unlockCooldownMs = 400;
+              unlockCooldownMs = 900;
             } else {
               this.updateStatus("盲注确认中...", true);
               executedAction = false;
-              unlockCooldownMs = 100;
+              unlockCooldownMs = 200;
+            }
+          } else if (timeInBlindSelect > 3000) {
+            // Watchdog fallback after 3s (never stall for 18s!)
+            if (now - (this.lastBlindSelectTime || 0) > 1200) {
+              this.lastBlindSelectTime = now;
+              this._lastProgressTimestamp = now;
+              this._actionInFlight = "select_blind";
+              this.updateStatus("超时保底选择盲注...", true);
+              console.log(`[AutoPilot] In BLIND_SELECT, watchdog fallback selecting blind (time=${timeInBlindSelect}ms)`);
+              window.decidexSelectBlind();
+              executedAction = true;
+              unlockCooldownMs = 1000;
+            } else {
+              this.updateStatus("盲注确认中...", true);
+              executedAction = false;
+              unlockCooldownMs = 200;
             }
           } else {
-            this._blindWaitStart = this._blindWaitStart || Date.now();
-            if (Date.now() - this._blindWaitStart > 1200) {
-              console.log("[AutoPilot] Blind select waiting > 1.2s, forcing state dump");
-              window.decidexReEvaluate();
-              this._blindWaitStart = Date.now();
-            }
             this.updateStatus("等待盲注界面就绪...", false);
             executedAction = false;
-            unlockCooldownMs = 100;
+            unlockCooldownMs = 150;
           }
         } else if (sname === "SELECTING_HAND") {
+          this.lastToggleShopTime = 0;
+          this.lastCashOutTime = 0;
+          this._shopEnterTime = null;
+          this._togglingShop = false;
           if (!state.hand || state.hand.length === 0) {
             this.updateStatus("等待发牌...", false);
             executedAction = false;
-            unlockCooldownMs = 150;
+            unlockCooldownMs = 200;
+          } else if (this._actionInFlight === "play" && (now - (this._lastPlayActionTime || 0) < 3500)) {
+            // A play was dispatched and is animating; wait up to 3.5s (not 8s!)
+            this.updateStatus("出牌结算中...", true);
+            executedAction = false;
+            unlockCooldownMs = 400;
+          } else if (this._actionInFlight === "discard" && (now - (this._lastDiscardActionTime || 0) < 2200)) {
+            // A discard was dispatched and is drawing; wait up to 2.2s
+            this.updateStatus("弃牌处理中...", true);
+            executedAction = false;
+            unlockCooldownMs = 400;
           } else {
-            // Priority: Check if jokers need reordering according to left-to-right math rule
+            // If in-flight action was not acknowledged after timeout, clear it for retry
+            if (this._actionInFlight) {
+              console.warn(`[AutoPilot] In-flight action ${this._actionInFlight} timed out in SELECTING_HAND, resetting action lock`);
+              this._actionInFlight = null;
+            }
+
+            // Priority 1: Check if jokers need reordering according to left-to-right math rule
             const orderAdv = computeOptimalJokerOrder(state.jokers);
             const now = Date.now();
-            if (orderAdv && orderAdv.needsReorder && (!this._lastReorderTime || now - this._lastReorderTime > 1500)) {
+            if (orderAdv && orderAdv.needsReorder && (!this._lastReorderTime || now - this._lastReorderTime > 1200)) {
               this._lastReorderTime = now;
+              this._lastProgressTimestamp = now;
               this.updateStatus("优化小丑排布顺序...", true);
               console.log("[AutoPilot] Auto-reordering jokers:", orderAdv.reason, orderAdv.optimalIndices);
               window.executeReorderJokers(orderAdv.optimalIndices);
               executedAction = true;
-              unlockCooldownMs = 350;
+              unlockCooldownMs = 400;
             } else {
-              const topPlays = findBestPlays(state);
-              if (topPlays && topPlays.length > 0) {
-                const bestPlay = topPlays[0];
-                const bestDiscard = findBestDiscards(state, bestPlay);
-                const arb = arbitrateAction(state, bestPlay, bestDiscard);
+              // Priority 2: Check if beneficial consumables can be used before playing/discarding
+              const bestCons = findBestConsumableToUse(state);
+              if (bestCons && (!this._lastConsumableTime || now - this._lastConsumableTime > 1200)) {
+                this._lastConsumableTime = now;
+                this._lastProgressTimestamp = now;
+                this.updateStatus(`使用消耗牌: ${bestCons.card.name}`, true);
+                console.log("[AutoPilot] Auto-using consumable:", bestCons.card.name, bestCons.reason);
+                window.executeUseCard(bestCons.index, bestCons.targetIndices || null, "consumeables");
+                executedAction = true;
+                unlockCooldownMs = 500;
+              } else {
+                const topPlays = findBestPlays(state);
+                if (topPlays && topPlays.length > 0) {
+                  const bestPlay = topPlays[0];
+                  const bestDiscard = findBestDiscards(state, bestPlay);
+                  const arb = arbitrateAction(state, bestPlay, bestDiscard);
 
-                if (arb && arb.verdict === "DISCARD" && arb.cards && arb.cards.length > 0) {
-                  this.updateStatus(`自动弃牌 (${arb.cards.length}张)...`, true);
-                  console.log("[AutoPilot] Executing strategic discard:", arb.reason);
-                  window.executeDiscardAction(arb.cards);
-                  executedAction = true;
-                  unlockCooldownMs = 500;
-                } else if (arb && arb.cards && arb.cards.length > 0) {
-                  this.updateStatus(`自动出牌 (${bestPlay.handName})...`, true);
-                  console.log("[AutoPilot] Executing play hand:", bestPlay.handName, arb.reason);
-                  window.executePlayAction(arb.cards);
-                  executedAction = true;
-                  unlockCooldownMs = 600;
+                  if (arb && arb.verdict === "DISCARD" && arb.cards && arb.cards.length > 0) {
+                    if (now - (this._lastDiscardActionTime || 0) > 1200) {
+                      this._lastDiscardActionTime = now;
+                      this._lastProgressTimestamp = now;
+                      this._actionInFlight = "discard";
+                      this.updateStatus(`自动弃牌 (${arb.cards.length}张)...`, true);
+                      console.log("[AutoPilot] Executing strategic discard:", arb.reason);
+                      window.executeDiscardAction(arb.cards);
+                      executedAction = true;
+                      unlockCooldownMs = 1200;
+                    } else {
+                      this.updateStatus("弃牌冷却中...", true);
+                      executedAction = false;
+                      unlockCooldownMs = 250;
+                    }
+                  } else if (arb && arb.cards && arb.cards.length > 0) {
+                    if (now - (this._lastPlayActionTime || 0) > 1800) {
+                      this._lastPlayActionTime = now;
+                      this._lastProgressTimestamp = now;
+                      this._actionInFlight = "play";
+                      this.updateStatus(`自动出牌 (${bestPlay.handName})...`, true);
+                      console.log("[AutoPilot] Executing play hand:", bestPlay.handName, arb.reason);
+                      window.executePlayAction(arb.cards);
+                      executedAction = true;
+                      unlockCooldownMs = 2200;
+                    } else {
+                      this.updateStatus("出牌冷却中...", true);
+                      executedAction = false;
+                      unlockCooldownMs = 250;
+                    }
+                  }
                 }
               }
             }
           }
         } else if (sname === "ROUND_EVAL") {
-          if (state.can_cash_out !== false) {
-            this.updateStatus("通关结算中...", true);
-            console.log("[AutoPilot] Auto cash out");
+          this._shopEnterTime = null;
+          this._togglingShop = false;
+          if (!this._roundEvalEnterTime) this._roundEvalEnterTime = now;
+          const timeInEval = now - this._roundEvalEnterTime;
+
+          if (now - (this.lastCashOutTime || 0) < 1000) {
+            this.updateStatus("正在进入商店...", true);
+            executedAction = false;
+            unlockCooldownMs = 250;
+          } else if (state.can_cash_out || timeInEval > 1500) {
+            this.lastCashOutTime = now;
+            this._lastProgressTimestamp = now;
+            this.updateStatus("通关结算，前往商店...", true);
+            console.log(`[AutoPilot] Auto cash out (can_cash_out=${state.can_cash_out}, time=${timeInEval}ms)`);
             window.decidexCashOut();
             executedAction = true;
-            unlockCooldownMs = 350;
+            unlockCooldownMs = 800;
           } else {
-            this.updateStatus("等待结算就绪...", false);
+            this.updateStatus("清算通关奖励中...", true);
             executedAction = false;
-            unlockCooldownMs = 100;
+            unlockCooldownMs = 150;
           }
         } else if (sname === "SHOP") {
-          if (state.can_toggle_shop !== false) {
+          this.lastCashOutTime = 0;
+          this._roundEvalEnterTime = 0;
+          this._blindSelectEnterTime = null;
+          if (this._togglingShop) {
+            if (now - (this._togglingShopStart || 0) < 3500) {
+              this.updateStatus("正在进入下轮盲注...", true);
+              executedAction = false;
+              unlockCooldownMs = 300;
+              return;
+            } else {
+              this._togglingShop = false;
+            }
+          }
+          const shop = state.shop || {};
+          const cards = shop.cards || [];
+          const boosters = shop.boosters || [];
+          if (!this._shopEnterTime) this._shopEnterTime = now;
+          const timeInShop = now - this._shopEnterTime;
+
+          // If shop items haven't arrived yet and we just entered, wait for shelf rendering (up to 1500ms)
+          if (cards.length === 0 && boosters.length === 0 && timeInShop < 1500) {
+            this.updateStatus("等待商店上架商品...", false);
+            console.log("[AutoPilot] Shop waiting for shelf population, elapsed:", timeInShop);
+            executedAction = false;
+            unlockCooldownMs = 200;
+          } else if (state.can_toggle_shop || timeInShop > 2500) {
             const shopAdv = findBestShopPurchases(state);
             const bestCard = shopAdv && shopAdv.bestCard;
-            if (bestCard && bestCard.recommendation === "强烈推荐" && bestCard.canAfford && bestCard.hasSlot) {
+            const bestVoucher = shopAdv && shopAdv.bestVoucher;
+            const sellRec = shopAdv && shopAdv.sellRecommendation;
+            const jokersCount = (state.jokers || []).length;
+            const shouldBuyJoker = bestCard && bestCard.canAfford && bestCard.hasSlot && (
+              bestCard.recommendation === "强烈推荐" ||
+              (jokersCount < 2 && bestCard.score >= 45) ||
+              (jokersCount === 0 && bestCard.score >= 35)
+            );
+
+            const cardKey = bestCard ? `card_${bestCard.index}_${bestCard.name}` : null;
+            const voucherKey = bestVoucher ? `voucher_${bestVoucher.index}_${bestVoucher.name}` : null;
+
+            // 1. Sell joker to make room for god-tier candidate
+            if (sellRec && !this._shopSoldJoker) {
+              this._shopSoldJoker = true;
+              this._lastProgressTimestamp = now;
+              this.updateStatus(`出售小丑: ${sellRec.sellName} (腾出槽位购买 ${sellRec.targetCard.name})`, true);
+              console.log("[AutoPilot] Auto sell joker:", sellRec.sellName, "at index", sellRec.sellIndex, "score gain:", sellRec.scoreGain);
+              window.executeSellCard(sellRec.sellIndex, "jokers");
+              executedAction = true;
+              unlockCooldownMs = 600;
+            } else if (shouldBuyJoker && cardKey && !this._shopAttemptedItems.has(cardKey)) {
+              // 2. Buy recommended joker (only once per item key)
+              this._shopAttemptedItems.add(cardKey);
+              this._lastProgressTimestamp = now;
               this.updateStatus(`购买小丑: ${bestCard.name}`, true);
-              console.log("[AutoPilot] Auto buy top joker:", bestCard.name);
+              console.log("[AutoPilot] Auto buy joker:", bestCard.name, "score:", bestCard.score);
               window.executeBuyAction(bestCard.index, "shop_jokers");
               executedAction = true;
-              unlockCooldownMs = 450;
-            } else {
-              this.updateStatus("离开商店进入下轮...", true);
-              console.log("[AutoPilot] Auto toggle shop");
-              window.executeToggleShop();
+              unlockCooldownMs = 600;
+            } else if (bestVoucher && voucherKey && !this._shopAttemptedItems.has(voucherKey)) {
+              // 3. Buy recommended voucher (only once per item key)
+              this._shopAttemptedItems.add(voucherKey);
+              this._lastProgressTimestamp = now;
+              this.updateStatus(`购买优惠券: ${bestVoucher.name}`, true);
+              console.log("[AutoPilot] Auto buy voucher:", bestVoucher.name, "at index", bestVoucher.index, "score:", bestVoucher.score);
+              window.executeBuyAction(bestVoucher.index, "shop_vouchers");
               executedAction = true;
-              unlockCooldownMs = 350;
+              unlockCooldownMs = 600;
+            } else {
+              // 4. Consider purchasing booster pack if economy allows ($25 interest line or early healthy cash)
+              const safeThreshold = (state.ante && state.ante > 2) ? 25 : 12;
+              const affordableBooster = boosters.find(b => b.cost && (state.money - b.cost >= safeThreshold) && !this._shopAttemptedItems.has(`booster_${b.index}`));
+              if (affordableBooster) {
+                const bKey = `booster_${affordableBooster.index}`;
+                this._shopAttemptedItems.add(bKey);
+                this._lastProgressTimestamp = now;
+                this.updateStatus(`购买补充包: ${affordableBooster.name || '补充包'}`, true);
+                console.log("[AutoPilot] Auto buy booster pack:", affordableBooster.name, "at index", affordableBooster.index);
+                window.executeBuyAction(affordableBooster.index, "shop_booster");
+                executedAction = true;
+                unlockCooldownMs = 600;
+              } else if (shopAdv && shopAdv.shouldReroll && !this._shopRerolled) {
+                // 5. Reroll shop if cash is abundant (> $25 + cost) and shelf has no strong cards
+                this._shopRerolled = true;
+                this._lastProgressTimestamp = now;
+                this.updateStatus(`刷新商店 ($${shopAdv.rerollCost})...`, true);
+                console.log("[AutoPilot] Auto reroll shop:", "cost=", shopAdv.rerollCost);
+                window.executeRerollShop();
+                executedAction = true;
+                unlockCooldownMs = 600;
+              } else {
+                if (this._togglingShop || (now - (this.lastToggleShopTime || 0) < 2500)) {
+                  this.updateStatus("正在进入下轮盲注...", true);
+                  executedAction = false;
+                  unlockCooldownMs = 300;
+                } else {
+                  this._togglingShop = true;
+                  this._togglingShopStart = now;
+                  this.lastToggleShopTime = now;
+                  this._lastProgressTimestamp = now;
+                  this._shopSoldJoker = false;
+                  this._shopAttemptedItems.clear();
+                  this._shopRerolled = false;
+                  this.updateStatus("离开商店进入下轮...", true);
+                  console.log(`[AutoPilot] Auto toggle shop (can_toggle_shop=${state.can_toggle_shop}, time=${timeInShop}ms)`);
+                  window.executeToggleShop();
+                  executedAction = true;
+                  unlockCooldownMs = 1000;
+                }
+              }
             }
           } else {
             this.updateStatus("等待商店就绪...", false);
+            console.log("[AutoPilot] Shop waiting for can_toggle_shop to become true, elapsed:", timeInShop);
             executedAction = false;
             unlockCooldownMs = 150;
+          }
+        } else if (["TAROT_PACK", "PLANET_PACK", "SPECTRAL_PACK", "STANDARD_PACK", "BUFFOON_PACK"].includes(sname)) {
+          const packCards = state.pack_cards || [];
+          if (packCards.length > 0) {
+            let bestCard = packCards[0];
+            if (sname === "PLANET_PACK") {
+              const priorityPlanets = ["Jupiter", "Earth", "Saturn", "Mercury", "Uranus", "Mars", "Venus", "Pluto"];
+              for (const p of priorityPlanets) {
+                const found = packCards.find(c => c.name === p);
+                if (found) { bestCard = found; break; }
+              }
+            } else if (sname === "BUFFOON_PACK") {
+              const syn = analyzeSynergy(state.jokers);
+              let bestScore = -999;
+              for (const c of packCards) {
+                const p = JOKER_PILLAR_MAP[c.name] || "utility";
+                let score = (p === syn.primaryNeed ? 30 : 10);
+                if (score > bestScore) { bestScore = score; bestCard = c; }
+              }
+            } else if (sname === "TAROT_PACK") {
+              const priorityTarot = ["The Hermit", "The Wheel of Fortune", "The Emperor", "The High Priestess", "Judgement", "Death", "The Hanged Man", "The Empress", "The Hierophant"];
+              for (const t of priorityTarot) {
+                const found = packCards.find(c => c.name === t);
+                if (found) { bestCard = found; break; }
+              }
+            } else if (sname === "SPECTRAL_PACK") {
+              const jCount = (state.jokers || []).length;
+              let bestScore = -999;
+              for (const c of packCards) {
+                const name = c.name || "";
+                let score = 50;
+                if (name === "Black Hole") score = 100;
+                else if (name === "Immolate") score = 95;
+                else if (name === "Cryptid") score = 92;
+                else if (name === "DejaVu") score = 90;
+                else if (name === "Trance") score = 88;
+                else if (name === "Talisman" || name === "Medium") score = 85;
+                else if (name === "Aura") score = 82;
+                else if (name === "Ectoplasm") score = 80;
+                else if (name === "Ankh") {
+                  score = (jCount === 1 ? 98 : (jCount === 2 ? 40 : 10)); // 仅当单核小丑时无损质变
+                } else if (name === "Hex") {
+                  score = (jCount === 1 ? 85 : 10);
+                } else if (name === "Wraith") {
+                  score = ((state.money || 0) <= 8 ? 85 : 30);
+                }
+                if (score > bestScore) { bestScore = score; bestCard = c; }
+              }
+            } else if (sname === "STANDARD_PACK") {
+              let bestScore = -999;
+              for (const c of packCards) {
+                let score = 30;
+                if (c.edition === "poly") score += 35;
+                else if (c.edition === "holo") score += 25;
+                else if (c.edition === "foil") score += 18;
+
+                if (c.seal === "red") score += 30;
+                else if (c.seal === "purple" || c.seal === "blue") score += 24;
+                else if (c.seal === "gold") score += 20;
+
+                if (c.enhancement === "glass") score += 28;
+                else if (c.enhancement === "steel") score += 26;
+                else if (c.enhancement === "lucky") score += 20;
+                else if (["bonus", "mult", "wild"].includes(c.enhancement)) score += 15;
+
+                if (["A", "K", "Q"].includes(c.rank)) score += 8;
+                else if (["2", "3"].includes(c.rank) && !c.edition && !c.seal && !c.enhancement) score -= 15;
+
+                if (score > bestScore) { bestScore = score; bestCard = c; }
+              }
+            }
+            this.updateStatus(`补充包选择: ${bestCard.name || '卡牌'}`, true);
+            console.log("[AutoPilot] Selecting pack card:", bestCard.name, "at index", bestCard.index || 1);
+            window.executeSelectPackCard(bestCard.index || 1);
+            executedAction = true;
+            unlockCooldownMs = 600;
+          } else {
+            this.updateStatus("跳过补充包...", true);
+            console.log("[AutoPilot] Skipping booster pack");
+            window.executeSkipBooster();
+            executedAction = true;
+            unlockCooldownMs = 400;
           }
         } else if (sname === "GAME_OVER") {
           this.updateStatus("游戏结束", false);
           this.toggle(false);
           executedAction = true;
+        } else if (sname === "HAND_PLAYED") {
+          this._actionInFlight = null;
+          this.updateStatus("计分结算中...", true);
+          executedAction = false;
+          unlockCooldownMs = 400;
+        } else if (sname === "DRAW_TO_HAND") {
+          this._actionInFlight = null;
+          this.updateStatus("发牌动画中...", true);
+          executedAction = false;
+          unlockCooldownMs = 400;
+        } else if (sname === "NEW_ROUND") {
+          this._actionInFlight = null;
+          this.updateStatus("进入新回合...", true);
+          executedAction = false;
+          unlockCooldownMs = 400;
         } else {
           this.updateStatus(`等待动画 (${sname})...`, false);
           executedAction = false;

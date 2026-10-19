@@ -3,7 +3,19 @@
   - Intercepts state changes in SELECTING_HAND and emits [DECIDEX_STATE] JSON via print()
   - Provides G.DECIDEX_EXECUTE for direct in-browser programmatic control
   - Polls /tmp/balatro_eval.lua from Emscripten virtual FS for commands from JS
+  - Enforces windowed mode: permanently blocks fullscreen to preserve DecideX HUD and coordinate fidelity
 ]]
+
+if love and love.window then
+  love.window.setFullscreen = function(fullscreen, ftype)
+    return false
+  end
+  if love.window.getFullscreen then
+    love.window.getFullscreen = function()
+      return false, "windowed"
+    end
+  end
+end
 
 local SUIT_MAP = { Spades = "S", Hearts = "H", Diamonds = "D", Clubs = "C" }
 local RANK_MAP = {
@@ -89,6 +101,7 @@ local function card_json(c, idx)
     '"enhancement":' .. jstr(enh),
     '"edition":' .. jstr(edition),
     '"seal":' .. jstr(seal),
+    '"debuff":' .. (c.debuff and "true" or "false"),
     '"highlighted":' .. jstr(c.highlighted and true or false),
     '"index":' .. jstr(idx)
   }
@@ -192,12 +205,34 @@ local function blind_info()
   local btype = "small"
   if b.name == "Big Blind" or (type(b.key) == "string" and b.key:find("big")) then btype = "big" end
   if b.boss or (type(b.key) == "string" and b.key:find("boss")) then btype = "boss" end
-  return {
+
+  local upcoming_boss = nil
+  if G.GAME and G.GAME.round_resets and G.GAME.round_resets.blind_choices and G.GAME.round_resets.blind_choices.Boss then
+    local bkey = G.GAME.round_resets.blind_choices.Boss
+    if G.P_BLINDS and G.P_BLINDS[bkey] and G.P_BLINDS[bkey].name then
+      upcoming_boss = G.P_BLINDS[bkey].name
+    else
+      upcoming_boss = tostring(bkey)
+    end
+  end
+
+  local res = {
     name = tostring(b.name or "Blind"),
     type = btype,
     chips = tonumber(b.chips or 0) or 0,
     scored = tonumber(G.GAME and G.GAME.chips or 0) or 0
   }
+  if upcoming_boss then
+    res.upcoming_boss = upcoming_boss
+  end
+  if type(b.debuff) == "table" and next(b.debuff) and not b.disabled then
+    res.debuff = true
+    if b.debuff.suit then res.debuff_suit = tostring(b.debuff.suit) end
+    if b.debuff.is_face then res.debuff_face = true end
+  else
+    res.debuff = false
+  end
+  return res
 end
 
 local function area_cards(area)
@@ -207,37 +242,108 @@ end
 
 local function find_uie_by_id(id)
   if not G then return nil end
-  if G.round_eval and G.round_eval.get_UIE_by_ID then
+  if G.round_eval and not G.round_eval.REMOVED and G.round_eval.get_UIE_by_ID then
     local res = nil
     pcall(function() res = G.round_eval:get_UIE_by_ID(id) end)
     if res then return res end
   end
-  if G.shop and G.shop.get_UIE_by_ID then
+  if G.shop and not G.shop.REMOVED and G.shop.get_UIE_by_ID then
     local res = nil
     pcall(function() res = G.shop:get_UIE_by_ID(id) end)
     if res then return res end
   end
-  if G.blind_select and G.blind_select.get_UIE_by_ID then
+  if G.blind_select and not G.blind_select.REMOVED and G.blind_select.get_UIE_by_ID then
     local res = nil
     pcall(function() res = G.blind_select:get_UIE_by_ID(id) end)
     if res then return res end
   end
+  return nil
+end
+
+local function find_cash_out_button()
+  if not (G and G.STATES and G.STATE == G.STATES.ROUND_EVAL) then
+    return nil
+  end
+  local now = (love.timer and love.timer.getTime()) or os.clock()
+  if G.cashing_out and _G._last_cash_out_time and (now - _G._last_cash_out_time > 1.8) then
+    G.cashing_out = false
+  end
+  if G.cashing_out then return nil end
+  if G.round_eval and not G.round_eval.REMOVED and G.round_eval.get_UIE_by_ID then
+    local btn = nil
+    pcall(function() btn = G.round_eval:get_UIE_by_ID('cash_out_button') end)
+    if btn and btn.config and btn.config.button == 'cash_out' then
+      return btn
+    end
+  end
   if G.I and G.I.UIBOX then
     for _, uibox in ipairs(G.I.UIBOX) do
-      if uibox and uibox.get_UIE_by_ID then
-        local res = nil
-        pcall(function() res = uibox:get_UIE_by_ID(id) end)
-        if res then return res end
+      if not uibox.REMOVED and uibox.get_UIE_by_ID then
+        local btn = nil
+        pcall(function() btn = uibox:get_UIE_by_ID('cash_out_button') end)
+        if btn and btn.config and btn.config.button == 'cash_out' then
+          return btn
+        end
       end
     end
   end
   return nil
 end
 
+local function force_advance_to_shop()
+  if not (G and G.STATES and G.STATE == G.STATES.ROUND_EVAL) then return false end
+  pcall(function()
+    if G.round_eval then
+      G.round_eval:remove()
+      G.round_eval = nil
+    end
+    if G.I and G.I.UIBOX then
+      for i = #G.I.UIBOX, 1, -1 do
+        local uibox = G.I.UIBOX[i]
+        if uibox and not uibox.REMOVED and uibox.get_UIE_by_ID then
+          local btn = nil
+          pcall(function() btn = uibox:get_UIE_by_ID('cash_out_button') end)
+          if btn then
+            pcall(function() uibox:remove() end)
+          end
+        end
+      end
+    end
+    if G.GAME and G.GAME.current_round then
+      G.GAME.current_round.jokers_purchased = 0
+      local resets = G.GAME.round_resets or {}
+      local bonus = G.GAME.round_bonus or {}
+      G.GAME.current_round.discards_left = math.max(0, (resets.discards or 3) + (bonus.discards or 0))
+      G.GAME.current_round.hands_left = math.max(1, (resets.hands or 4) + (bonus.next_hands or 0))
+      if G.GAME.current_round.dollars and G.GAME.current_round.dollars > 0 then
+        if ease_dollars then ease_dollars(G.GAME.current_round.dollars) end
+      end
+    end
+    G.STATE = G.STATES.SHOP
+    if G.GAME then
+      G.GAME.shop_free = nil
+      G.GAME.shop_d6ed = nil
+    end
+    G.STATE_COMPLETE = false
+    G.cashing_out = false
+    _G._round_eval_enter_time = nil
+  end)
+  return true
+end
+
 local function find_next_round_button()
-  if not (G and G.shop) then return nil end
+  if not (G and G.shop and not G.shop.REMOVED) then return nil end
   if G.CONTROLLER and G.CONTROLLER.locks and G.CONTROLLER.locks.toggle_shop then
-    return nil
+    local now = (love.timer and love.timer.getTime()) or os.clock()
+    if not _G._toggle_shop_lock_time then _G._toggle_shop_lock_time = now end
+    if (now - _G._toggle_shop_lock_time > 2.5) then
+      G.CONTROLLER.locks.toggle_shop = nil
+      _G._toggle_shop_lock_time = nil
+    else
+      return nil
+    end
+  else
+    _G._toggle_shop_lock_time = nil
   end
   if G.shop.get_UIE_by_ID then
     local btn = nil
@@ -245,25 +351,14 @@ local function find_next_round_button()
     if btn and btn.config and btn.config.button == 'toggle_shop' then return btn end
     if btn then return btn end
   end
-  if G.I and G.I.UIBOX then
-    for _, uibox in ipairs(G.I.UIBOX) do
-      if (not uibox.config or uibox.config.major == G.shop) and not uibox.REMOVED and uibox.get_UIE_by_ID then
-        local btn = nil
-        pcall(function() btn = uibox:get_UIE_by_ID('next_round_button') end)
-        if btn and btn.config and btn.config.button == 'toggle_shop' then return btn end
-        if btn then return btn end
-      end
-    end
-  end
-  local btn = find_uie_by_id('next_round_button')
-  if btn then return btn end
-  return nil
+  return { config = { id = 'next_round_button', button = 'toggle_shop' } }
 end
 
 local function find_select_blind_button()
   if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then return nil end
   if G.GAME and G.GAME.facing_blind then return nil end
-  if not G.blind_select or not G.blind_prompt_box then return nil end
+  if not (G.blind_select and not G.blind_select.REMOVED) then return nil end
+  if not (G.blind_prompt_box and not G.blind_prompt_box.REMOVED) then return nil end
 
   local on_deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or "Small"
   local opt = G.blind_select_opts and G.blind_select_opts[string.lower(on_deck)]
@@ -277,17 +372,6 @@ local function find_select_blind_button()
     pcall(function() btn = G.blind_select:get_UIE_by_ID('select_blind_button') end)
     if btn and btn.config and btn.config.ref_table then return btn, on_deck end
   end
-  if G.I and G.I.UIBOX then
-    for _, uibox in ipairs(G.I.UIBOX) do
-      if uibox and uibox.get_UIE_by_ID and not uibox.REMOVED then
-        local btn = nil
-        pcall(function() btn = uibox:get_UIE_by_ID('select_blind_button') end)
-        if btn and btn.config and btn.config.ref_table then return btn, on_deck end
-      end
-    end
-  end
-  local btn = find_uie_by_id('select_blind_button')
-  if btn and btn.config and btn.config.ref_table then return btn, on_deck end
 
   local choice_key = G.GAME and G.GAME.round_resets and G.GAME.round_resets.blind_choices and G.GAME.round_resets.blind_choices[on_deck]
   local pb = choice_key and G.P_BLINDS and G.P_BLINDS[choice_key]
@@ -298,6 +382,64 @@ local function find_select_blind_button()
     return { config = { id = 'select_blind_button', ref_table = pb } }, on_deck
   end
   return nil, on_deck
+end
+
+local function find_skip_blind_button()
+  if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then return nil end
+  if G.GAME and G.GAME.facing_blind then return nil end
+  local on_deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or "Small"
+  if on_deck == "Boss" then return nil end
+
+  local opt = G.blind_select_opts and G.blind_select_opts[string.lower(on_deck)]
+  if not opt then return nil end
+
+  local skip_btn = nil
+  if opt.get_UIE_by_ID then
+    pcall(function() skip_btn = opt:get_UIE_by_ID('skip_blind_button') end)
+    if skip_btn then return skip_btn, on_deck end
+    if opt.tag and opt.tag.key then
+      pcall(function() skip_btn = opt:get_UIE_by_ID('tag_' .. opt.tag.key) end)
+      if skip_btn then return skip_btn, on_deck end
+    end
+  end
+
+  local function search_btn(node)
+    if not node then return nil end
+    if node.config and (node.config.button == 'skip_blind' or node.config.id == 'skip_blind_button') then
+      return node
+    end
+    if node.children then
+      for _, child in ipairs(node.children) do
+        local found = search_btn(child)
+        if found then return found end
+      end
+    end
+    return nil
+  end
+  pcall(function() skip_btn = search_btn(opt) end)
+  if skip_btn then return skip_btn, on_deck end
+
+  local tag_obj = opt.tag or (opt.config and opt.config.tag)
+  return { config = { id = 'skip_blind_button', button = 'skip_blind', ref_table = tag_obj or opt } }, on_deck
+end
+
+local function get_blind_tag_info()
+  local on_deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or "Small"
+  if on_deck == "Boss" then return nil end
+  local opt = G.blind_select_opts and G.blind_select_opts[string.lower(on_deck)]
+  local tag = nil
+  if opt then
+    tag = opt.tag or (opt.config and opt.config.tag)
+  end
+  if not tag and G.GAME and G.GAME.round_resets and G.GAME.round_resets.blind_tags then
+    tag = G.GAME.round_resets.blind_tags[on_deck] or G.GAME.round_resets.blind_tags[string.lower(on_deck)]
+  end
+  if tag then
+    local tname = (type(tag) == "table" and (tag.name or (tag.ability and tag.ability.name))) or (type(tag) == "string" and tag) or ""
+    local tkey = (type(tag) == "table" and (tag.key or (tag.config and tag.config.type))) or (type(tag) == "string" and tag) or ""
+    return { name = tostring(tname), key = tostring(tkey) }
+  end
+  return nil
 end
 
 local function build_state_json(actual)
@@ -348,24 +490,52 @@ local function build_state_json(actual)
   parts[#parts + 1] = '"state_name":' .. jstr(state_str)
   parts[#parts + 1] = '"actual":' .. (actual and jmap(actual) or "null")
 
-  local can_cash_out = false
-  if G.STATE and G.STATES and (G.STATE == G.STATES.ROUND_EVAL or G.STATE == G.STATES.HAND_PLAYED) and G.round_eval and not G.cashing_out then
-    if find_uie_by_id('cash_out_button') then
-      can_cash_out = true
-    end
-  end
+  local now = (love.timer and love.timer.getTime()) or os.clock()
+  local eval_elapsed = _G._round_eval_enter_time and (now - _G._round_eval_enter_time) or 0
+  local can_cash_out = (find_cash_out_button() ~= nil) or (G.STATE == G.STATES.ROUND_EVAL and eval_elapsed >= 1.2)
   parts[#parts + 1] = '"can_cash_out":' .. (can_cash_out and "true" or "false")
 
   local can_toggle_shop = false
   if G.STATE and G.STATES and G.STATE == G.STATES.SHOP and G.shop then
     if find_next_round_button() then
-      can_toggle_shop = true
+      local shop_cards_count = (G.shop_jokers and G.shop_jokers.cards and #G.shop_jokers.cards) or 0
+      local shop_boosters_count = (G.shop_booster and G.shop_booster.cards and #G.shop_booster.cards) or 0
+      local now = (love.timer and love.timer.getTime()) or os.clock()
+      if not _G._shop_enter_time then _G._shop_enter_time = now end
+      if (shop_cards_count > 0 or shop_boosters_count > 0 or (now - _G._shop_enter_time >= 0.8)) then
+        can_toggle_shop = true
+      end
+    else
+      _G._shop_enter_time = nil
     end
+  else
+    _G._shop_enter_time = nil
   end
   parts[#parts + 1] = '"can_toggle_shop":' .. (can_toggle_shop and "true" or "false")
 
   local can_select_blind = not not (find_select_blind_button())
   parts[#parts + 1] = '"can_select_blind":' .. (can_select_blind and "true" or "false")
+
+  local can_skip_blind = not not (find_skip_blind_button())
+  parts[#parts + 1] = '"can_skip_blind":' .. (can_skip_blind and "true" or "false")
+
+  local tag_info = get_blind_tag_info()
+  if tag_info then
+    parts[#parts + 1] = '"blind_tag":{"name":' .. jstr(tag_info.name) .. ',"key":' .. jstr(tag_info.key) .. '}'
+  else
+    parts[#parts + 1] = '"blind_tag":null'
+  end
+
+  local is_pack_state = false
+  if G.STATE and G.STATES then
+    is_pack_state = (G.STATE == G.STATES.TAROT_PACK or G.STATE == G.STATES.PLANET_PACK or 
+                     G.STATE == G.STATES.SPECTRAL_PACK or G.STATE == G.STATES.STANDARD_PACK or 
+                     G.STATE == G.STATES.BUFFOON_PACK)
+  end
+  local pack_cards = is_pack_state and area_cards(G.pack_cards) or {}
+  parts[#parts + 1] = '"pack_cards":' .. jtable(map(pack_cards, shop_card_json))
+  local can_skip_booster = not not (is_pack_state and (find_uie_by_id('skip_booster') or (G.FUNCS and G.FUNCS.can_skip_booster)))
+  parts[#parts + 1] = '"can_skip_booster":' .. (can_skip_booster and "true" or "false")
 
   local won = (G.GAME and G.GAME.won) or false
   parts[#parts + 1] = '"won":' .. (won and "true" or "false")
@@ -378,6 +548,7 @@ local LAST_HAND_SIG = ""
 local LAST_SHOP_SIG = ""
 local LAST_BLIND_SIG = ""
 local LAST_EVAL_SIG = ""
+local LAST_PACK_SIG = ""
 
 local function check_and_emit_state()
   if not G or not G.STATE or not G.STATES then return end
@@ -430,6 +601,7 @@ local function check_and_emit_state()
       end
     end
   elseif G.STATE == G.STATES.SHOP then
+    G.cashing_out = false
     local shop_cards = (G.shop_jokers and G.shop_jokers.cards) or {}
     local booster_cards = (G.shop_booster and G.shop_booster.cards) or {}
     local voucher_cards = (G.shop_vouchers and G.shop_vouchers.cards) or {}
@@ -449,6 +621,8 @@ local function check_and_emit_state()
       end
     end
   elseif G.STATE == G.STATES.BLIND_SELECT then
+    G.toggling_shop = false
+    G.cashing_out = false
     local btn_ready = (find_select_blind_button() ~= nil)
     local deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or ""
     local facing = (G.GAME and G.GAME.facing_blind) and "1" or "0"
@@ -463,11 +637,45 @@ local function check_and_emit_state()
       end
     end
   elseif G.STATE == G.STATES.ROUND_EVAL then
-    local can_cash = (find_uie_by_id('cash_out_button') ~= nil)
-    local cashing = G.cashing_out and "1" or "0"
-    local eval_sig = (can_cash and "1" or "0") .. ":" .. cashing
+    local now = (love.timer and love.timer.getTime()) or os.clock()
+    if not _G._round_eval_enter_time then _G._round_eval_enter_time = now end
+    if state_changed then
+      G.cashing_out = false
+      _G._round_eval_enter_time = now
+    end
+    if G.cashing_out and _G._last_cash_out_time and (now - _G._last_cash_out_time > 1.5) then
+      G.cashing_out = false
+    end
+    if not G.round_eval or G.round_eval.REMOVED then
+      if now - _G._round_eval_enter_time > 1.0 then
+        force_advance_to_shop()
+      end
+    elseif now - _G._round_eval_enter_time > 3.0 then
+      force_advance_to_shop()
+    end
+    local can_cash = (find_cash_out_button() ~= nil) or (_G._round_eval_enter_time and (now - _G._round_eval_enter_time > 1.2))
+    local eval_sig = can_cash and "1" or "0"
     if eval_sig ~= LAST_EVAL_SIG or state_changed then
       LAST_EVAL_SIG = eval_sig
+      local ok, json = pcall(build_state_json, nil)
+      if ok and json then
+        print("[DECIDEX_STATE] " .. json)
+      else
+        print("[DecideX State Build Error]: " .. tostring(json))
+      end
+    end
+  elseif G.STATE == G.STATES.TAROT_PACK or G.STATE == G.STATES.PLANET_PACK or 
+         G.STATE == G.STATES.SPECTRAL_PACK or G.STATE == G.STATES.STANDARD_PACK or 
+         G.STATE == G.STATES.BUFFOON_PACK then
+    local p_cards = (G.pack_cards and G.pack_cards.cards) or {}
+    local pack_sig_parts = { tostring(#p_cards) }
+    for i, c in ipairs(p_cards) do
+      local cname = (c.ability and c.ability.name) or ""
+      pack_sig_parts[#pack_sig_parts + 1] = i .. ":" .. cname
+    end
+    local cur_pack_sig = table.concat(pack_sig_parts, "|")
+    if cur_pack_sig ~= LAST_PACK_SIG or state_changed then
+      LAST_PACK_SIG = cur_pack_sig
       local ok, json = pcall(build_state_json, nil)
       if ok and json then
         print("[DECIDEX_STATE] " .. json)
@@ -486,15 +694,25 @@ local function check_and_emit_state()
 end
 
 -- Programmatic execution of actions
-local function decidex_execute(action, args)
+local function decidex_execute_inner(action, args)
   if not G then return false, "no G" end
   args = args or {}
 
   if action == "play" or action == "discard" then
-    if G.STATES and G.STATE ~= G.STATES.SELECTING_HAND then
+    if not (G and G.STATES and G.STATE == G.STATES.SELECTING_HAND) then
       return false, "not in SELECTING_HAND"
     end
-    if not (G.hand and G.hand.cards) then return false, "no hand" end
+    if G.play and G.play.cards and #G.play.cards > 0 then
+      return false, "cards already in play"
+    end
+    if not (G.hand and G.hand.cards and #G.hand.cards > 0) then
+      return false, "no hand cards"
+    end
+
+    local now = (love.timer and love.timer.getTime()) or os.clock()
+    if _G._last_hand_action_time and (now - _G._last_hand_action_time < 0.25) then
+      return false, "hand action debounced"
+    end
 
     -- Select specified cards if provided
     if args.indices then
@@ -515,17 +733,47 @@ local function decidex_execute(action, args)
           end
         end
       end
+      if G.hand.parse_highlighted then
+        pcall(function() G.hand:parse_highlighted() end)
+      end
+    end
+
+    local num_hl = (G.hand and G.hand.highlighted and #G.hand.highlighted) or 0
+    if num_hl <= 0 then
+      return false, "no cards highlighted"
+    end
+    if num_hl > 5 then
+      return false, "too many cards highlighted"
     end
 
     if action == "play" then
+      if G.GAME and G.GAME.blind and G.GAME.blind.block_play then
+        return false, "blind blocks play"
+      end
+      if G.GAME and G.GAME.current_round and G.GAME.current_round.hands_left and G.GAME.current_round.hands_left <= 0 then
+        return false, "no hands left"
+      end
       if G.FUNCS and G.FUNCS.play_cards_from_highlighted then
-        G.FUNCS.play_cards_from_highlighted()
-        return true, "played"
+        _G._last_hand_action_time = now
+        local ok, err = pcall(G.FUNCS.play_cards_from_highlighted, {})
+        if ok then
+          return true, "played"
+        else
+          return false, "play error: " .. tostring(err)
+        end
       end
     elseif action == "discard" then
+      if G.GAME and G.GAME.current_round and G.GAME.current_round.discards_left and G.GAME.current_round.discards_left <= 0 then
+        return false, "no discards left"
+      end
       if G.FUNCS and G.FUNCS.discard_cards_from_highlighted then
-        G.FUNCS.discard_cards_from_highlighted()
-        return true, "discarded"
+        _G._last_hand_action_time = now
+        local ok, err = pcall(G.FUNCS.discard_cards_from_highlighted, {})
+        if ok then
+          return true, "discarded"
+        else
+          return false, "discard error: " .. tostring(err)
+        end
       end
     end
     return false, "action failed"
@@ -548,25 +796,50 @@ local function decidex_execute(action, args)
   end
 
   if action == "select_blind" then
-    if G.STATES and G.STATE ~= G.STATES.BLIND_SELECT then
+    if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then
       return false, "not in BLIND_SELECT"
     end
     if G.GAME and G.GAME.facing_blind then
       return false, "blind already selected (animating)"
     end
+    local now = (love.timer and love.timer.getTime()) or os.clock()
+    if _G._last_select_blind_time and (now - _G._last_select_blind_time < 0.8) then
+      return false, "select_blind debounced"
+    end
     local btn, on_deck = find_select_blind_button()
     if not btn then
       return false, "blind_select UI not ready"
     end
-    -- Defensive pop_out guard for blind_prompt_box to guarantee select_blind never crashes
-    if G.blind_prompt_box and G.blind_prompt_box.get_UIE_by_ID then
-      for _, dt_id in ipairs({'prompt_dynatext1', 'prompt_dynatext2'}) do
-        local uie = G.blind_prompt_box:get_UIE_by_ID(dt_id)
-        if uie and uie.config and not uie.config.object then
-          uie.config.object = { pop_delay = 0, pop_out = function() end }
+    _G._last_select_blind_time = now
+
+    -- Ensure blind_prompt_box and blind_select are fully crash-proof for G.E_MANAGER animations
+    if G.blind_prompt_box then
+      if not G.blind_prompt_box.alignment then
+        G.blind_prompt_box.alignment = { offset = { y = 0, x = 0 } }
+      elseif not G.blind_prompt_box.alignment.offset then
+        G.blind_prompt_box.alignment.offset = { y = 0, x = 0 }
+      end
+      if G.blind_prompt_box.get_UIE_by_ID then
+        local orig_get_uie = G.blind_prompt_box.get_UIE_by_ID
+        G.blind_prompt_box.get_UIE_by_ID = function(self, id)
+          local uie = orig_get_uie(self, id)
+          if not uie then
+            uie = { config = { object = { pop_delay = 0, pop_out = function() end } } }
+          elseif uie.config and not uie.config.object then
+            uie.config.object = { pop_delay = 0, pop_out = function() end }
+          end
+          return uie
         end
       end
     end
+    if G.blind_select then
+      if not G.blind_select.alignment then
+        G.blind_select.alignment = { offset = { y = 0, x = 0 } }
+      elseif not G.blind_select.alignment.offset then
+        G.blind_select.alignment.offset = { y = 0, x = 0 }
+      end
+    end
+
     if G.FUNCS and G.FUNCS.select_blind then
       local prev_facing = G.GAME and G.GAME.facing_blind
       local ok, err = pcall(G.FUNCS.select_blind, btn)
@@ -577,6 +850,27 @@ local function decidex_execute(action, args)
       return true, "selected blind " .. tostring(on_deck)
     end
     return false, "no select_blind function"
+  end
+
+  if action == "skip_blind" then
+    if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then
+      return false, "not in BLIND_SELECT"
+    end
+    if G.GAME and G.GAME.facing_blind then
+      return false, "blind already selected (animating)"
+    end
+    local btn, on_deck = find_skip_blind_button()
+    if not btn then
+      return false, "skip_blind button not found (boss or not ready)"
+    end
+    if G.FUNCS and G.FUNCS.skip_blind then
+      local ok, err = pcall(G.FUNCS.skip_blind, btn)
+      if not ok then
+        return false, "skip_blind error: " .. tostring(err)
+      end
+      return true, "skipped blind " .. tostring(on_deck)
+    end
+    return false, "no skip_blind function"
   end
 
   if action == "buy_card" or action == "buy_from_shop" then
@@ -617,13 +911,37 @@ local function decidex_execute(action, args)
 
   if action == "toggle_shop" then
     if G.STATES and G.STATE ~= G.STATES.SHOP then
+      if G.STATES and G.STATE == G.STATES.BLIND_SELECT then
+        return true, "already in BLIND_SELECT"
+      end
       return false, "not in SHOP"
     end
-    if G.CONTROLLER and G.CONTROLLER.locks and G.CONTROLLER.locks.toggle_shop then
-      return false, "toggle_shop locked"
+    if not (G and G.shop and not G.shop.REMOVED) then
+      G.STATE = G.STATES.BLIND_SELECT
+      G.STATE_COMPLETE = false
+      if G.CONTROLLER and G.CONTROLLER.locks then
+        G.CONTROLLER.locks.toggle_shop = nil
+      end
+      return true, "shop already removed, transitioned to BLIND_SELECT"
     end
+    local now = (love.timer and love.timer.getTime()) or os.clock()
+    if G.CONTROLLER and G.CONTROLLER.locks and G.CONTROLLER.locks.toggle_shop then
+      if not _G._toggle_shop_lock_time then _G._toggle_shop_lock_time = now end
+      if (now - _G._toggle_shop_lock_time > 2.0) then
+        G.CONTROLLER.locks.toggle_shop = nil
+        _G._toggle_shop_lock_time = nil
+      else
+        return false, "toggle_shop locked"
+      end
+    else
+      _G._toggle_shop_lock_time = nil
+    end
+    if _G._last_toggle_shop_time and (now - _G._last_toggle_shop_time < 0.6) then
+      return false, "toggle_shop debounced"
+    end
+    local btn = find_next_round_button() or { config = { button = 'toggle_shop' } }
     if G.FUNCS and G.FUNCS.toggle_shop then
-      local btn = find_next_round_button() or find_uie_by_id('next_round_button') or { config = { button = 'toggle_shop' } }
+      _G._last_toggle_shop_time = now
       local ok, err = pcall(G.FUNCS.toggle_shop, btn)
       return ok, tostring(err or "toggled shop")
     end
@@ -634,16 +952,46 @@ local function decidex_execute(action, args)
     if G.STATES and G.STATE ~= G.STATES.ROUND_EVAL and G.STATE ~= G.STATES.HAND_PLAYED then
       return false, "not in ROUND_EVAL"
     end
-    if G.cashing_out then
-      return false, "cash_out already in progress"
+    local now = (love.timer and love.timer.getTime()) or os.clock()
+    if G.cashing_out and _G._last_cash_out_time and (now - _G._last_cash_out_time > 1.5) then
+      G.cashing_out = false
     end
-    if G.FUNCS and G.FUNCS.cash_out then
-      local btn = find_uie_by_id('cash_out_button') or { config = {} }
+    if _G._last_cash_out_time and (now - _G._last_cash_out_time < 0.3) then
+      return false, "cash_out debounced"
+    end
+    _G._last_cash_out_time = now
+    local btn = find_cash_out_button() or { config = { button = 'cash_out' } }
+    if G.FUNCS and G.FUNCS.cash_out and G.round_eval and not G.round_eval.REMOVED then
       G.cashing_out = true
       local ok, err = pcall(G.FUNCS.cash_out, btn)
-      return ok, tostring(err or "cashed out")
+      if ok then return true, "cashed out via G.FUNCS.cash_out" end
     end
-    return false, "no cash_out func"
+    -- Fallback: force advance to shop immediately
+    force_advance_to_shop()
+    return true, "force advanced to shop"
+  end
+
+  if action == "skip_booster" then
+    if G.FUNCS and G.FUNCS.skip_booster then
+      local btn = find_uie_by_id('skip_booster') or { config = { button = 'skip_booster' } }
+      local ok, err = pcall(G.FUNCS.skip_booster, btn)
+      return ok, tostring(err or "skipped booster")
+    end
+    return false, "no skip_booster func"
+  end
+
+  if action == "select_pack_card" then
+    if not (G.pack_cards and G.pack_cards.cards) then
+      return false, "no pack_cards"
+    end
+    local idx = tonumber(args.index) or 1
+    local c = G.pack_cards.cards[idx]
+    if not c then return false, "pack card not found at index " .. tostring(idx) end
+    if G.FUNCS and G.FUNCS.use_card then
+      local ok, err = pcall(G.FUNCS.use_card, {config = {ref_table = c}})
+      return ok, tostring(err or "selected pack card")
+    end
+    return false, "no use_card func for pack card"
   end
 
   if action == "use_card" or action == "sell_card" then
@@ -651,6 +999,8 @@ local function decidex_execute(action, args)
     local area = G.consumeables
     if area_name == "jokers" or area_name == "joker" then
       area = G.jokers
+    elseif area_name == "pack_cards" or area_name == "pack" then
+      area = G.pack_cards
     elseif G[area_name] then
       area = G[area_name]
     end
@@ -659,11 +1009,20 @@ local function decidex_execute(action, args)
     local c = area.cards[idx]
     if not c then return false, "card not found at index " .. tostring(idx) end
     if action == "use_card" and G.FUNCS and G.FUNCS.use_card then
-      G.FUNCS.use_card({config = {ref_table = c}})
-      return true, "used card"
+      if args.target_indices and G.hand and G.hand.cards then
+        if G.hand.unhighlight_all then G.hand:unhighlight_all() end
+        for _, t_idx in ipairs(args.target_indices) do
+          local tc = G.hand.cards[t_idx]
+          if tc then
+            if G.hand.add_to_highlighted then G.hand:add_to_highlighted(tc, true) else tc.highlighted = true end
+          end
+        end
+      end
+      local ok, err = pcall(G.FUNCS.use_card, {config = {ref_table = c}})
+      return ok, tostring(err or "used card")
     elseif action == "sell_card" and G.FUNCS and G.FUNCS.sell_card then
-      G.FUNCS.sell_card({config = {ref_table = c}})
-      return true, "sold card"
+      local ok, err = pcall(G.FUNCS.sell_card, {config = {ref_table = c}})
+      return ok, tostring(err or "sold card")
     end
     return false, "no use/sell card func"
   end
@@ -732,6 +1091,12 @@ local function decidex_execute(action, args)
   return false, "unknown action: " .. tostring(action)
 end
 
+local function decidex_execute(action, args)
+  local ok, info = decidex_execute_inner(action, args)
+  print(string.format("[DECIDEX_ACTION_RESULT] action=%s ok=%s info=%s", tostring(action), tostring(ok), tostring(info)))
+  return ok, info
+end
+
 _G.DECIDEX_EXECUTE = decidex_execute
 rawset(_G, "DECIDEX_EXECUTE", decidex_execute)
 
@@ -784,6 +1149,35 @@ local function decidex_step(dt)
       end
       if G.SETTINGS then G.SETTINGS.paused = false end
     end
+  end
+
+  -- Defensive cycle & depth guard for UIBox traversal in WASM
+  if not _G._uibox_guard_installed and UIBox and UIBox.get_UIE_by_ID then
+    _G._uibox_guard_installed = true
+    local orig_get_uie = UIBox.get_UIE_by_ID
+    local function safe_get_uie(self, id, node, depth, visited)
+      depth = depth or 0
+      if depth > 10 then return nil end
+      visited = visited or {}
+      node = node or self.UIRoot
+      if not node or visited[node] then return nil end
+      visited[node] = true
+      if node.config and node.config.id == id then return node end
+      if node.children then
+        for _, v in pairs(node.children) do
+          local res = safe_get_uie(self, id, v, depth + 1, visited)
+          if res then return res end
+          if v.config and v.config.object and v.config.object.get_UIE_by_ID and not visited[v.config.object] then
+            visited[v.config.object] = true
+            res = safe_get_uie(v.config.object, id, nil, depth + 1, visited)
+            if res then return res end
+          end
+        end
+      end
+      return nil
+    end
+    UIBox.get_UIE_by_ID = safe_get_uie
+    print("[DecideX Web] UIBox:get_UIE_by_ID cycle/depth guard installed")
   end
 
   if not _G._decidex_step_logged then

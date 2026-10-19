@@ -29,6 +29,10 @@ data/
 .browser_cache/
 *.jpg
 *.jpeg
+*.png
 *.love
 *.love.zip
 *.wasm.bin
+test_evidence/
+test_browser_profile/
+tools/balatro_wasm/test_browser_profile/

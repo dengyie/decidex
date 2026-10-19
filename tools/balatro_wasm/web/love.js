@@ -5272,21 +5272,8 @@ var Love = (function() {
         destroyContext: function(canvas, useWebGL, setInModule) {},
         
         requestFullscreen: function(target) {
-          // already in full-screen?
-          if (Browser.getFullscreenElement()) {
-            return;
-          }
-
-          if (!target)
-            target = canvas;
-          if (target.requestFullscreen)
-            return target.requestFullscreen({ navigationUI: 'hide' });
-          else if (target.webkitRequestFullscreen)
-            return target.webkitRequestFullscreen(Element.ALLOW_KEYBOARD_INPUT);
-          else if (target.mozRequestFullscreen)
-            return target.mozRequestFullscreen();
-          else if (target.msRequestFullscreen)
-            return target.msRequestFullscreen();
+          // Permanently disabled: keep game in windowed layout to preserve DecideX HUD and coordinate precision
+          return;
         },
         
         exitFullscreen: function() {
@@ -8984,15 +8971,9 @@ var Love = (function() {
       }
 
 
-      // TODO: requests full screen mode explicitly
+      // TODO: requests full screen mode explicitly (disabled to preserve DecideX HUD and coordinates)
       function _JSEvents_requestFullscreen(target, strategy) {
-        if (strategy.scaleMode != 0 || strategy.canvasResolutionScaleMode != 0)
-          Browser.resizeForFullscreen(target, strategy)
-        if (!Browser.requestFullscreen(target, strategy)) {
-          var fullscreen = Browser.isFullscreenEnabled();
-          return (fullscreen) ? -3 : -1;
-        }
-        return 0
+        return -1;
       }
 
       function _emscripten_exit_fullscreen() {
@@ -10505,49 +10486,9 @@ var Love = (function() {
         HEAPU8.copyWithin(dest, src, src + num)
       }
 
-      // Triggered when requesting a full-screen change from Lua
+      // Triggered when requesting a full-screen change from Lua (disabled to preserve DecideX HUD and coordinates)
       function _emscripten_request_fullscreen_strategy(target, deferUntilInEventHandler, fullscreenStrategy) {
-        var strategy = {
-          scaleMode: HEAP32[fullscreenStrategy >> 2],
-          canvasResolutionScaleMode: HEAP32[fullscreenStrategy + 4 >> 2],
-          filteringMode: HEAP32[fullscreenStrategy + 8 >> 2],
-          deferUntilInEventHandler: deferUntilInEventHandler,
-          canvasResizedCallback: HEAP32[fullscreenStrategy + 12 >> 2],
-          canvasResizedCallbackUserData: HEAP32[fullscreenStrategy + 16 >> 2]
-        };
-        
-        if (!Browser.isFullscreenEnabled())
-          return -1;
-        target = Browser.findTarget(target);
-        if (!target)
-          return -4;
-
-        if (!target.requestFullscreen &&
-          !target.mozRequestFullscreen &&
-          !target.webkitRequestFullscreen &&
-          !target.msRequestFullscreen) {
-          return -3
-        }
-
-
-        var canPerformRequests = JSEvents.canPerformEventHandlerRequests();
-        if (!canPerformRequests) {
-          if (deferUntilInEventHandler) {
-            JSEvents.deferCall(_JSEvents_requestFullscreen, 1, [target, strategy]);
-            return 1
-          } else {
-            return -2
-          }
-        }
-        return _JSEvents_requestFullscreen(target, strategy)
-        
-/*
-        Browser.fullscreen_strategy = strategy;
-        // no need to defer, as this is a synchronous call
-        if (!Browser.requestFullscreen(target))
-          return 0;
-        return 1
-        */
+        return -1;
       }
 
       function _emscripten_request_pointerlock(target, deferUntilInEventHandler) {
@@ -10822,27 +10763,28 @@ var Love = (function() {
             scaleY: 1
           };
         }
-        var imageRatio = targetW / targetH;
-        var elementRatio = rect.width / rect.height;
-        var renderedWidth = rect.width;
-        var renderedHeight = rect.height;
+        var bufferAspect = targetW / targetH;
+        var domAspect = rect.width / rect.height;
+        var renderW = rect.width;
+        var renderH = rect.height;
         var offsetX = 0;
         var offsetY = 0;
-        if (elementRatio > imageRatio) {
-          renderedHeight = rect.height;
-          renderedWidth = renderedHeight * imageRatio;
-          offsetX = (rect.width - renderedWidth) / 2;
-        } else if (elementRatio < imageRatio) {
-          renderedWidth = rect.width;
-          renderedHeight = renderedWidth / imageRatio;
-          offsetY = (rect.height - renderedHeight) / 2;
+
+        if (domAspect > bufferAspect + 0.001) {
+          renderW = rect.height * bufferAspect;
+          offsetX = (rect.width - renderW) / 2;
+        } else if (domAspect < bufferAspect - 0.001) {
+          renderH = rect.width / bufferAspect;
+          offsetY = (rect.height - renderH) / 2;
         }
-        var relX = clientX - rect.left - offsetX;
-        var relY = clientY - rect.top - offsetY;
-        var scaleX = targetW / renderedWidth;
-        var scaleY = targetH / renderedHeight;
-        var targetX = Math.round(relX * scaleX);
-        var targetY = Math.round(relY * scaleY);
+
+        var scaleX = targetW / renderW;
+        var scaleY = targetH / renderH;
+        var localX = clientX - rect.left - offsetX;
+        var localY = clientY - rect.top - offsetY;
+
+        var targetX = Math.round(localX * scaleX);
+        var targetY = Math.round(localY * scaleY);
         targetX = Math.max(0, Math.min(targetW - 1, targetX));
         targetY = Math.max(0, Math.min(targetH - 1, targetY));
         return {

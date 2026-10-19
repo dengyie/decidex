@@ -69,6 +69,19 @@ def baseline_greedy_solver(state: BalatroState) -> ActionCandidateOutcome:
     if not actions:
         return ActionCandidateOutcome(candidate_id="pass", action_type="pass", description="Pass", score=0)
 
+    # In BLIND_SELECT, baseline greedily takes any shiny skip tag regardless of ante or surviving chances
+    if getattr(state, "state_name", "") == "BLIND_SELECT":
+        skip_acts = [a for a in actions if a.metadata.get("action_type") == "skip_blind"]
+        if skip_acts:
+            chosen = skip_acts[0]
+            return ActionCandidateOutcome(
+                candidate_id=chosen.candidate_id,
+                action_type="skip_blind",
+                description=chosen.description,
+                score=chosen.heuristic_score,
+                metadata=chosen.metadata,
+            )
+
     # If in shop, baseline greedily buys whatever is in stock without checking interest
     shop_buys = [a for a in actions if a.metadata.get("action_type") == "buy_joker"]
     if shop_buys:
@@ -86,7 +99,7 @@ def baseline_greedy_solver(state: BalatroState) -> ActionCandidateOutcome:
     pure_plays = [a for a in actions if a.metadata.get("action_type") == "play" and not a.metadata.get("is_filtering_play", False)]
     plays = pure_plays if pure_plays else [a for a in actions if a.metadata.get("action_type") == "play"]
     if plays:
-        best_play = max(plays, key=lambda p: p.metadata.get("score", 0))
+        best_play = max(plays, key=lambda p: (p.metadata.get("score", 0), -len(p.metadata.get("cards", []))))
         return ActionCandidateOutcome(
             candidate_id=best_play.candidate_id,
             action_type="play",
@@ -341,6 +354,68 @@ class BalatroABBenchmark:
         )
         scenarios.append(s6)
 
+        # -------------------------------------------------------------
+        # Scenario 7: Ante 1 零小丑跳过大盲注自杀门禁防御
+        # -------------------------------------------------------------
+        # Ante 1 Big Blind offers a tempting Rare Tag (worth a free rare joker in next shop).
+        # However, player has ZERO jokers. Skipping straight to Boss Blind (600-900 chips)
+        # with zero jokers is a near-certain suicide trap.
+        # Baseline greedily takes the tag.
+        # DecideX v2 triggers the Ante 1 suicide prevention gate, selecting Big Blind to survive.
+        s7 = Scenario(
+            id="scen_07_ante1_blind_skip_suicide_trap",
+            title="Ante 1 零小丑跳过大盲注暴毙门禁",
+            description="Ante 1 大盲注提供诱人的 Rare Tag，测试策略能否识破零小丑直面 Boss 暴毙陷阱，坚决进大盲注保命",
+            category="blind_clear",
+            state=BalatroState(
+                hand=[],
+                ante=1,
+                round=2,
+                state_name="BLIND_SELECT",
+                blind=Blind(name="Big Blind", type="big", chips=450, scored=0),
+                jokers=[],
+                money=4,
+                hands_left=4,
+                discards_left=3,
+                can_skip_blind=True,
+                blind_tag={"key": "tag_rare", "name": "Rare Tag"},
+            ),
+        )
+        scenarios.append(s7)
+
+        # -------------------------------------------------------------
+        # Scenario 8: 出牌附带弃牌之留手卡牌保护 (钢铁牌/黄金牌防误弃)
+        # -------------------------------------------------------------
+        # Hand contains: Pair of Aces [A♠, A♥], an unenhanced 4♠, a Steel 2♦ (x1.5 in hand),
+        # and a Gold 3♣ ($3 in hand).
+        # 0 discards left, player needs to clean hand.
+        # Baseline naively burns the Steel card.
+        # DecideX v2 safely pads the Pair with the unenhanced 4♠, protecting Steel and Gold in hand.
+        hand_s8 = [
+            Card(rank="A", suit="S"),
+            Card(rank="A", suit="H"),
+            Card(rank="2", suit="D", enhancement="steel"),
+            Card(rank="3", suit="C", enhancement="gold"),
+            Card(rank="4", suit="S"),
+        ]
+        s8 = Scenario(
+            id="scen_08_pseudo_discard_held_card_protection",
+            title="出牌附带杂牌之留手卡牌保护 (钢铁/黄金防误弃)",
+            description="手牌包含一对A、一张普通杂牌4♠以及留手增益的钢铁牌与黄金牌，测试附带弃牌能否严格保护留手卡牌",
+            category="constraints",
+            state=BalatroState(
+                hand=hand_s8,
+                jokers=[Joker(name="Joker", mult=4)],
+                blind=Blind(name="Small Blind", chips=600, scored=0),
+                hands_left=3,
+                discards_left=0,
+                money=12,
+                ante=2,
+                round=4,
+            ),
+        )
+        scenarios.append(s8)
+
         return scenarios
 
     async def run_scenario(self, scenario: Scenario, variant: PolicyVariant) -> ScenarioOutcome:
@@ -364,6 +439,12 @@ class BalatroABBenchmark:
                     violated = True
                 if constraints.is_the_psychic and len(res.metadata.get("indices", [])) < 5:
                     violated = True
+                if scenario.id == "scen_08_pseudo_discard_held_card_protection":
+                    played = res.metadata.get("cards", [])
+                    if any("2♦" in str(c) or "3♣" in str(c) for c in played):
+                        violated = True
+            elif act_type == "skip_blind" and scenario.id == "scen_07_ante1_blind_skip_suicide_trap":
+                violated = True
 
             # Evaluate interest preservation
             interest_preserved = True
@@ -383,7 +464,12 @@ class BalatroABBenchmark:
             synergy_score = round(sum(synergy.radar_scores.values()) / max(1, len(synergy.radar_scores)), 1)
 
             target = st.blind.chips - st.blind.scored
-            cleared = (score >= target) if act_type == "play" else False
+            if scenario.id == "scen_07_ante1_blind_skip_suicide_trap":
+                cleared = (act_type == "select_blind")
+            elif scenario.id == "scen_08_pseudo_discard_held_card_protection":
+                cleared = (act_type == "play" and not violated)
+            else:
+                cleared = (score >= target) if act_type == "play" else False
 
             return ScenarioOutcome(
                 scenario_id=scenario.id,
@@ -426,7 +512,13 @@ class BalatroABBenchmark:
                         violated = True
                     if constraints.is_the_psychic and len(meta.get("indices", [])) < 5:
                         violated = True
+                    if scenario.id == "scen_08_pseudo_discard_held_card_protection":
+                        played = meta.get("cards", [])
+                        if any("2♦" in str(c) or "3♣" in str(c) for c in played):
+                            violated = True
             elif rec.action_type == "discard" and (constraints.has_green_joker or constraints.is_the_water):
+                violated = True
+            elif rec.action_type == "skip_blind" and scenario.id == "scen_07_ante1_blind_skip_suicide_trap":
                 violated = True
 
             # Evaluate interest preservation
@@ -449,7 +541,12 @@ class BalatroABBenchmark:
 
             synergy = analyze_synergy(st.jokers, st.ante)
             target = st.blind.chips - st.blind.scored
-            cleared = bool(rec.clears_blind)
+            if scenario.id == "scen_07_ante1_blind_skip_suicide_trap":
+                cleared = (rec.action_type == "select_blind")
+            elif scenario.id == "scen_08_pseudo_discard_held_card_protection":
+                cleared = (rec.action_type == "play" and not violated)
+            else:
+                cleared = bool(rec.clears_blind)
 
             return ScenarioOutcome(
                 scenario_id=scenario.id,
@@ -493,7 +590,13 @@ class BalatroABBenchmark:
                         violated = True
                     if constraints.is_the_psychic and len(meta.get("indices", [])) < 5:
                         violated = True
+                    if scenario.id == "scen_08_pseudo_discard_held_card_protection":
+                        played = meta.get("cards", [])
+                        if any("2♦" in str(c) or "3♣" in str(c) for c in played):
+                            violated = True
             elif rec.action_type == "discard" and (constraints.has_green_joker or constraints.is_the_water):
+                violated = True
+            elif rec.action_type == "skip_blind" and scenario.id == "scen_07_ante1_blind_skip_suicide_trap":
                 violated = True
 
             interest_preserved = True
@@ -511,7 +614,13 @@ class BalatroABBenchmark:
                 joker_ordered = not needs_reorder
 
             synergy = analyze_synergy(st.jokers, st.ante)
-            cleared = bool(rec.clears_blind)
+            target = st.blind.chips - st.blind.scored
+            if scenario.id == "scen_07_ante1_blind_skip_suicide_trap":
+                cleared = (rec.action_type == "select_blind")
+            elif scenario.id == "scen_08_pseudo_discard_held_card_protection":
+                cleared = (rec.action_type == "play" and not violated)
+            else:
+                cleared = bool(rec.clears_blind)
 
             return ScenarioOutcome(
                 scenario_id=scenario.id,
@@ -551,7 +660,7 @@ class BalatroABBenchmark:
         lines = []
         lines.append("# DecideX Balatro 策略体系 A/B 测试对比与量化基准报告\n")
         lines.append("## 一、 评测概述")
-        lines.append("- **测试场景数**: 6 大核心战局维度（被动小丑破戒、25元利息守则、小丑从左到右排序、四角大厦木桶短板、弃牌惩罚规避、Boss Blind 限制与手牌过滤）")
+        lines.append("- **测试场景数**: 8 大核心战局维度（被动小丑破戒规避、25元黄金利息线、小丑位置数学排序、四角大厦木桶短板修补、弃牌惩罚规避、The Psychic 出牌限制与杂牌过滤、Ante 1 零小丑跳盲自杀门禁、出牌附带杂牌之留手卡牌保护）")
         lines.append("- **对比组**: Baseline 基础贪心策略 vs DecideX Heuristic v2 vs DecideX Model-Augmented v2\n")
 
         lines.append("## 二、 核心指标对比汇总表\n")
@@ -593,7 +702,11 @@ class BalatroABBenchmark:
             oh = next(o for o in results[PolicyVariant.DECIDEX_HEURISTIC_V2] if o.scenario_id == s.id)
             
             # Check success condition per category
-            if s.category == "constraints":
+            if s.id == "scen_07_ante1_blind_skip_suicide_trap":
+                success = (oh.action_type == "select_blind")
+            elif s.id == "scen_08_pseudo_discard_held_card_protection":
+                success = not oh.violated_constraint and ("4♠" in oh.description or "4" in str(oh.chosen_candidate_id))
+            elif s.category == "constraints":
                 success = not oh.violated_constraint
             elif s.category == "economy":
                 success = oh.interest_preserved

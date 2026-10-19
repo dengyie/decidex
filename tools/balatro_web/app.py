@@ -880,6 +880,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": f"file not found: {target.name}"}, 404)
         stat = target.stat()
         file_size = stat.st_size
+        etag = f'"{file_size}-{int(stat.st_mtime)}"'
+
+        # Check for conditional GET (If-None-Match / ETag)
+        if_none_match = self.headers.get("If-None-Match")
+        if if_none_match and (if_none_match == etag or if_none_match == f'W/{etag}' or if_none_match == "*"):
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            if cache_seconds > 0:
+                is_immutable = target.suffix in (".wasm", ".love", ".zip", ".bin") or ".wasm." in target.name or ".love." in target.name
+                cache_val = f"public, max-age={cache_seconds}, immutable" if is_immutable else f"public, max-age={cache_seconds}"
+                self.send_header("Cache-Control", cache_val)
+            self.end_headers()
+            return
 
         # Check for HTTP Range header
         range_header = self.headers.get("Range")
@@ -922,11 +935,14 @@ class Handler(BaseHTTPRequestHandler):
 
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(content_length))
+        self.send_header("ETag", etag)
         self.send_header("Accept-Ranges", "bytes")
         if cache_seconds > 0:
-            self.send_header("Cache-Control", f"public, max-age={cache_seconds}")
+            is_immutable = target.suffix in (".wasm", ".love", ".zip", ".bin") or ".wasm." in target.name or ".love." in target.name
+            cache_val = f"public, max-age={cache_seconds}, immutable" if is_immutable else f"public, max-age={cache_seconds}"
+            self.send_header("Cache-Control", cache_val)
         else:
-            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Cache-Control", "no-cache, must-revalidate")
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
         self.end_headers()
@@ -937,7 +953,7 @@ class Handler(BaseHTTPRequestHandler):
                     if start > 0:
                         f.seek(start)
                     remaining = content_length
-                    bufsize = 64 * 1024
+                    bufsize = 512 * 1024
                     while remaining > 0:
                         chunk = f.read(min(remaining, bufsize))
                         if not chunk:
@@ -968,7 +984,12 @@ class Handler(BaseHTTPRequestHandler):
             fname = path.lstrip("/")
             wasm_target, ctype = self._resolve_wasm_file(fname)
             if wasm_target:
-                cache_sec = 604800 if fname.endswith((".wasm", ".wasm.bin", ".love", ".love.zip", ".bin", ".zip")) else 86400
+                if fname.endswith((".wasm", ".wasm.bin", ".love", ".love.zip", ".bin", ".zip")):
+                    cache_sec = 604800
+                elif fname.endswith((".js", ".lua", ".json", ".html")):
+                    cache_sec = 0
+                else:
+                    cache_sec = 86400
                 return self._send_file(wasm_target, ctype, cache_seconds=cache_sec, is_head=True)
             self.send_response(200)
             self.send_header("Content-Length", "0")
@@ -1014,7 +1035,12 @@ class Handler(BaseHTTPRequestHandler):
             fname = path.lstrip("/")
             wasm_target, ctype = self._resolve_wasm_file(fname)
             if wasm_target:
-                cache_sec = 604800 if fname.endswith((".wasm", ".wasm.bin", ".love", ".love.zip", ".bin", ".zip")) else 86400
+                if fname.endswith((".wasm", ".wasm.bin", ".love", ".love.zip", ".bin", ".zip")):
+                    cache_sec = 604800
+                elif fname.endswith((".js", ".lua", ".json", ".html")):
+                    cache_sec = 0
+                else:
+                    cache_sec = 86400
                 return self._send_file(wasm_target, ctype, cache_seconds=cache_sec)
             if path in ("/login", "/login.html"):
                 balatro_tok, sso_tok = _cookie_tokens(self.headers.get("Cookie"))
@@ -1197,6 +1223,12 @@ def _frame_worker() -> None:
     on disk so /api/frame.jpg can serve the real game feed. One persistent
     client, auto-reconnect on failure. Frames are captured full-size to
     FRAME_RAW_PATH and then shrunk into FRAME_PATH before serving."""
+    if not VNC_TARGET or VNC_TARGET.lower() in ("none", "disabled", "off", "0"):
+        logging.getLogger().info("live feed: VNC capturing disabled by configuration")
+        return
+
+    last_log_time = 0.0
+    backoff = 3.0
     while True:
         client = None
         try:
@@ -1204,19 +1236,24 @@ def _frame_worker() -> None:
             client = api.connect(VNC_TARGET, password=VNC_PASSWORD or None,
                                  timeout=VNC_TIMEOUT)
             logging.getLogger().info("live feed: connected to %s", VNC_TARGET)
+            backoff = 3.0
             while True:
                 client.captureScreen(str(FRAME_RAW_PATH))
                 if FRAME_RAW_PATH.exists():
                     _shrink_frame()
                 time.sleep(FRAME_INTERVAL)
         except Exception as e:  # noqa: BLE001 - keep the feed alive forever
-            logging.getLogger().warning("live feed: %s; reconnecting", e)
+            now = time.time()
+            if now - last_log_time > 60.0:
+                logging.getLogger().warning("live feed: %s; reconnecting in %.0fs (muted for 60s)", e, backoff)
+                last_log_time = now
             try:
                 if client is not None:
                     client.disconnect()
             except Exception:  # noqa: BLE001
                 pass
-            time.sleep(2.0)
+            time.sleep(backoff)
+            backoff = min(backoff * 1.5, 30.0)
 
 
 def _check_input_token(req_token: str) -> bool:

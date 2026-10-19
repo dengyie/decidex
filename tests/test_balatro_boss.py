@@ -188,3 +188,59 @@ def test_build_evidence_injects_boss_information():
     assert boss_info["requires_5_cards"] is True
     assert "必须打出 5 张牌" in boss_info["description"]
     assert "附带低价值杂牌补足 5 张牌" in boss_info["strategic_directive"]
+
+
+def test_upcoming_boss_shop_adaptation_plant():
+    """Upcoming boss is The Plant: Scary Face (face cards) should be penalized in shop."""
+    from decidex.balatro.synergy import analyze_synergy, score_joker_candidate
+
+    profile = analyze_synergy([])
+    # Under normal circumstances, Scary Face (A-tier chips) is recommended
+    adv_normal = score_joker_candidate("Scary Face", profile, cost=4, current_money=15, has_slot=True, ante=1)
+    assert adv_normal.recommendation in ("强烈推荐", "值得考虑")
+    assert adv_normal.score >= 60
+
+    # With upcoming The Plant, Scary Face is heavily penalized
+    adv_plant = score_joker_candidate("Scary Face", profile, cost=4, current_money=15, has_slot=True, ante=1, upcoming_boss="The Plant")
+    assert adv_plant.score < adv_normal.score
+    assert adv_plant.recommendation == "暂不推荐"
+    assert "The Plant" in adv_plant.reason
+
+
+def test_upcoming_boss_shop_adaptation_suit_debuff():
+    """Upcoming boss is The Head (Hearts debuffed): Lusty Joker (Hearts) is penalized."""
+    from decidex.balatro.synergy import analyze_synergy, score_joker_candidate
+
+    profile = analyze_synergy([])
+    adv_head = score_joker_candidate("Lusty Joker", profile, cost=4, current_money=15, has_slot=True, ante=1, upcoming_boss="The Head")
+    assert "The Head" in adv_head.reason
+    assert "红桃" in adv_head.reason
+    assert adv_head.recommendation == "暂不推荐"
+
+
+def test_upcoming_boss_shop_adaptation_needle():
+    """Upcoming boss is The Needle (1 hand only): Burglar (+hands) & Ice Cream (+chips) receive priority boost."""
+    from decidex.balatro.synergy import analyze_synergy, score_joker_candidate
+
+    profile = analyze_synergy([])
+    adv_burglar = score_joker_candidate("Burglar", profile, cost=5, current_money=20, has_slot=True, ante=2, upcoming_boss="The Needle")
+    assert "The Needle" in adv_burglar.reason
+    assert adv_burglar.score > 60
+
+    adv_icecream = score_joker_candidate("Ice Cream", profile, cost=5, current_money=20, has_slot=True, ante=2, upcoming_boss="The Needle")
+    assert "The Needle" in adv_icecream.reason
+    assert adv_icecream.recommendation == "强烈推荐"
+
+
+def test_upcoming_boss_in_evidence():
+    """build_evidence exposes upcoming_boss from blind for predictive planning."""
+    st = BalatroState(
+        hand=[_card("A", "S")],
+        blind=Blind(name="Small Blind", chips=300, upcoming_boss="The Water"),
+        money=20,
+        ante=2,
+    )
+    evidence = build_evidence(st, 5)
+    assert evidence["blind"]["upcoming_boss"] == "The Water"
+    assert evidence["boss_blind"]["upcoming_boss"] == "The Water"
+

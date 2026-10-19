@@ -251,8 +251,9 @@ def score_joker_candidate(
     current_money: int,
     has_slot: bool,
     ante: int = 1,
+    upcoming_boss: Optional[str] = None,
 ) -> PurchaseAdvice:
-    """Evaluates whether to purchase a shop joker based on build deficiency and cost."""
+    """Evaluates whether to purchase a shop joker based on build deficiency, cost, and upcoming Boss Blind."""
     meta = JOKER_CATALOG.get(card_name)
     primary = meta.primary_pillar if meta else PillarType.UTILITY
     base_tier = meta.base_tier if meta else "B"
@@ -289,6 +290,42 @@ def score_joker_candidate(
         synergy_mult *= 0.65
         reasons.append("当前基础倍率已饱和，边际收益递减")
 
+    # 1.5 Upcoming Boss Blind adaptation
+    if upcoming_boss:
+        # The Plant: All face cards debuffed
+        face_jokers = {"Scary Face", "Smiley Face", "Photograph", "Baron", "Sock and Buskin", "Pareidolia", "Business Card"}
+        if upcoming_boss == "The Plant" and card_name in face_jokers:
+            synergy_mult *= 0.25
+            reasons.append(f"⚠️ 即将面临 The Plant (人头牌全封印)，严禁选购依赖人头牌的小丑")
+
+        # Suit debuffing Bosses
+        suit_boss_map = {
+            "The Head": ({"Lusty Joker", "Bloodstone"}, "红桃"),
+            "The Window": ({"Greedy Joker", "Rough Gem"}, "方块"),
+            "The Goad": ({"Wrathful Joker", "Arrowhead"}, "黑桃"),
+            "The Club": ({"Gluttonous Joker", "Onyx Agate"}, "梅花"),
+        }
+        if upcoming_boss in suit_boss_map:
+            target_jokers, suit_name = suit_boss_map[upcoming_boss]
+            if card_name in target_jokers:
+                synergy_mult *= 0.35
+                reasons.append(f"⚠️ 即将面临 {upcoming_boss} ({suit_name}全封印)，避免选购受限花色小丑")
+
+        # The Needle: Only 1 hand
+        if upcoming_boss == "The Needle":
+            if card_name in ("Burglar", "Grabber", "Nacho Tong"):
+                synergy_mult *= 1.8
+                reasons.append("⚡ 迎战 The Needle (仅1手)：增加出牌次数提供关键容错")
+            elif card_name in ("Ice Cream", "Bull", "Cavendish"):
+                synergy_mult *= 1.3
+                reasons.append("⚡ 迎战 The Needle：提升单发一击必杀爆发力")
+
+        # The Water: 0 discards
+        if upcoming_boss == "The Water":
+            if card_name in ("Mail-In Rebate", "Castle"):
+                synergy_mult *= 0.4
+                reasons.append("⚠️ 即将面临 The Water (0次弃牌)，弃牌增益小丑暂时失效")
+
     score *= synergy_mult
 
     # 2. Universal S+ god jokers (Blueprint, Brainstorm, Cavendish, Trading Card)
@@ -322,3 +359,30 @@ def score_joker_candidate(
         target_pillar=primary,
         synergy_multiplier=round(synergy_mult, 2),
     )
+
+
+def score_owned_joker(joker: Joker, profile: SynergyProfile) -> float:
+    """Scores an owned joker to determine replacement priority when slots are full."""
+    meta = JOKER_CATALOG.get(joker.name)
+    tier = meta.base_tier if meta else "B"
+    tier_scores = {"S+": 95, "S": 82, "A": 70, "B": 55, "C": 38}
+    base = float(tier_scores.get(tier, 50))
+
+    # Scaling jokers gain extra value
+    if meta and meta.scaling:
+        base += 15.0
+
+    # Depleted decaying jokers (Ice Cream, Popcorn, etc.)
+    if joker.name == "Ice Cream" and joker.chips <= 20:
+        base = 25.0
+    elif joker.name == "Popcorn" and joker.mult <= 4:
+        base = 25.0
+    elif joker.name == "Gros Michel":
+        base = 45.0  # Can go extinct, replaceable if S-tier appears
+
+    # Redundancy penalty: excess flat mult when already saturated
+    if meta and meta.primary_pillar == PillarType.FLAT_MULT and profile.flat_mult_power >= 35:
+        if tier in ("B", "C"):
+            base *= 0.75
+
+    return round(base, 1)

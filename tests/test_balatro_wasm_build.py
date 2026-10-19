@@ -231,7 +231,7 @@ def test_frontend_arbitration_and_autopilot():
 
     assert "arbitrateAction" in js_content
     assert "AutoPilot" in js_content
-    assert re.search(r"balatro-asset-cache-v\d+", js_content) is not None
+    assert re.search(r"(?:decidex-balatro-core-|balatro-asset-cache-)v\d+", js_content) is not None
     assert "executePlayAction" in js_content
     assert "executeDiscardAction" in js_content
 

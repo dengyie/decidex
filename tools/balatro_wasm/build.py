@@ -47,10 +47,12 @@ def patch_globals(content: str) -> str:
     without triggering pthread / thread blocking errors in WASM.
     Disable F_NO_SAVING and enable F_SKIP_TUTORIAL to eliminate blocking
     synchronous file deflate serialization and modal tutorial popups in browser.
+    Force screenmode = 'Windowed' to completely disable fullscreen.
     """
     content = content.replace("self.F_SOUND_THREAD = true", "self.F_SOUND_THREAD = false")
     content = content.replace("self.F_SKIP_TUTORIAL = false", "self.F_SKIP_TUTORIAL = true")
     content = content.replace("self.F_NO_SAVING = false", "self.F_NO_SAVING = true")
+    content = content.replace("screenmode = 'Borderless',", "screenmode = 'Windowed',")
     return content
 
 
@@ -94,18 +96,278 @@ def patch_main(content: str) -> str:
         "if os == 'OS X' or os == 'Windows' then",
         "if false and (os == 'OS X' or os == 'Windows') then"
     )
+
+    # Wrap love.run's inner per-frame loop in xpcall so Emscripten main loop never aborts on Lua errors
+    orig_run_pattern = (
+        "\t-- Main loop time.\n"
+        "\treturn function()\n"
+        "\t\trun_time = love.timer.getTime()\n"
+    )
+    new_run_step = (
+        "\t-- Main loop time.\n"
+        "\tlocal __main_step = function()\n"
+        "\t\trun_time = love.timer.getTime()\n"
+    )
+    if orig_run_pattern in content:
+        content = content.replace(orig_run_pattern, new_run_step)
+        orig_end = (
+            "\t\trun_time = math.min(love.timer.getTime() - run_time, 0.1)\n"
+            "\t\tG.FPS_CAP = G.FPS_CAP or 500\n"
+            "\t\tif run_time < 1./G.FPS_CAP then love.timer.sleep(1./G.FPS_CAP - run_time) end\n"
+            "\tend\n"
+            "end\n"
+        )
+        new_end = (
+            "\t\trun_time = math.min(love.timer.getTime() - run_time, 0.1)\n"
+            "\t\tG.FPS_CAP = G.FPS_CAP or 500\n"
+            "\t\tif run_time < 1./G.FPS_CAP then love.timer.sleep(1./G.FPS_CAP - run_time) end\n"
+            "\tend\n"
+            "\treturn function()\n"
+            "\t\txpcall(__main_step, function(msg)\n"
+            "\t\t\tprint('[BALATRO FRAME ERROR]: ' .. tostring(msg))\n"
+            "\t\t\tprint(debug.traceback())\n"
+            "\t\tend)\n"
+            "\tend\n"
+            "end\n"
+        )
+        content = content.replace(orig_end, new_end)
+
+    # Patch love.errhand to avoid infinite-loop freezing browser on uncaught Lua errors
+    errhand_pattern = r'function love\.errhand\(msg\).*?\nend\n'
+    errhand_replacement = (
+        'function love.errhand(msg)\n'
+        '    local err_msg = tostring(msg)\n'
+        '    local trace = debug.traceback()\n'
+        '    print("[BALATRO CRITICAL ERROR]: " .. err_msg)\n'
+        '    print(trace)\n'
+        '    if G and G.FILE_HANDLER then G.FILE_HANDLER.update_queued = false end\n'
+        '    return\n'
+        'end\n'
+    )
+    content = re.sub(errhand_pattern, errhand_replacement, content, flags=re.DOTALL)
     return content
 
 
 def patch_conf(content: str) -> str:
     """
     Set t.window.usedpiscale = false for consistent touch/mouse coordinates.
+    Ensure fullscreen is explicitly disabled in window configuration.
     """
     if "t.window.usedpiscale" not in content:
         content = content.replace(
             "t.window.minheight = 100",
-            "t.window.minheight = 100\n    t.window.usedpiscale = false"
+            "t.window.minheight = 100\n    t.window.usedpiscale = false\n    t.window.fullscreen = false"
         )
+    return content
+
+
+def patch_common_events(content: str) -> str:
+    """
+    Ensure asynchronous scoring animation events in add_round_eval_row
+    do not crash when cash_out has already cleaned up G.round_eval.
+    """
+    content = content.replace(
+        "function add_round_eval_row(config)",
+        "function add_round_eval_row(config)\n    if not (G and G.round_eval and not G.round_eval.REMOVED) then return end"
+    )
+    content = content.replace(
+        "func = function() \n                        local spacer =",
+        "func = function() \n                        if not (G and G.round_eval and not G.round_eval.REMOVED) then return true end\n                        local spacer ="
+    )
+    content = content.replace(
+        "func = function()\n                --Add the far left text and context first:",
+        "func = function()\n                if not (G and G.round_eval and not G.round_eval.REMOVED) then return true end\n                --Add the far left text and context first:"
+    )
+    content = content.replace(
+        "func = function()\n                    G.round_eval:add_child(",
+        "func = function()\n                    if not (G and G.round_eval and not G.round_eval.REMOVED) then return true end\n                    G.round_eval:add_child("
+    )
+    content = content.replace(
+        "func = function()\n                        if i%30 == 1 then",
+        "func = function()\n                        if not (G and G.round_eval and not G.round_eval.REMOVED) then return true end\n                        if i%30 == 1 then"
+    )
+    return content
+
+
+def patch_game(content: str) -> str:
+    """
+    Ensure G.shop, G.round_eval, and UI elements do not trigger nil-indexing crashes
+    during rapid transitions or delayed animations.
+    """
+    content = content.replace(
+        "G.shop.alignment.offset.y = -5.3",
+        "if G.shop and G.shop.alignment and G.shop.alignment.offset then G.shop.alignment.offset.y = -5.3 end"
+    )
+    content = content.replace(
+        "G.shop.alignment.offset.x = 0",
+        "if G.shop and G.shop.alignment and G.shop.alignment.offset then G.shop.alignment.offset.x = 0 end"
+    )
+    content = content.replace(
+        "if math.abs(G.shop.T.y - G.shop.VT.y) < 3 then",
+        "if not (G and G.shop and not G.shop.REMOVED and G.shop.T and G.shop.VT) then return true end\n                            if math.abs(G.shop.T.y - G.shop.VT.y) < 3 then"
+    )
+    content = content.replace(
+        "if G.round_eval.alignment.offset.y ~= -7.8 then",
+        "if not (G and G.round_eval and not G.round_eval.REMOVED and G.round_eval.alignment and G.round_eval.alignment.offset) then return true end\n                        if G.round_eval.alignment.offset.y ~= -7.8 then"
+    )
+    content = content.replace(
+        "if math.abs(G.round_eval.T.y - G.round_eval.VT.y) < 3 then",
+        "if not (G and G.round_eval and not G.round_eval.REMOVED and G.round_eval.T and G.round_eval.VT) then return true end\n                            if math.abs(G.round_eval.T.y - G.round_eval.VT.y) < 3 then"
+    )
+    return content
+
+
+def patch_button_callbacks(content: str) -> str:
+    """
+    Safeguard G.shop and G.SHOP_SIGN during toggle_shop and card consumption.
+    Thoroughly prevents nil indexing crashes on G.shop:remove() (line 2489)
+    and eliminates re-entrancy race conditions during shop transitions.
+    """
+    old_toggle_shop_func = (
+        "  G.FUNCS.toggle_shop = function(e)\n"
+        "    stop_use()\n"
+        "    G.CONTROLLER.locks.toggle_shop = true\n"
+        "    if G.shop then \n"
+        "      for i = 1, #G.jokers.cards do\n"
+        "        G.jokers.cards[i]:calculate_joker({ending_shop = true})\n"
+        "      end\n"
+        "      G.E_MANAGER:add_event(Event({\n"
+        "        trigger = 'immediate',\n"
+        "        func = function()\n"
+        "          G.shop.alignment.offset.y = G.ROOM.T.y + 29\n"
+        "          G.SHOP_SIGN.alignment.offset.y = -15\n"
+        "          return true\n"
+        "        end\n"
+        "      })) \n"
+        "      G.E_MANAGER:add_event(Event({\n"
+        "        trigger = 'after',\n"
+        "        delay = 0.5,\n"
+        "        func = function()\n"
+        "          G.shop:remove()\n"
+        "          G.shop = nil\n"
+        "          G.SHOP_SIGN:remove()\n"
+        "          G.SHOP_SIGN = nil\n"
+        "          G.STATE_COMPLETE = false\n"
+        "          G.STATE = G.STATES.BLIND_SELECT\n"
+        "          G.CONTROLLER.locks.toggle_shop = nil\n"
+        "          return true\n"
+        "        end\n"
+        "      }))\n"
+        "    end\n"
+        "  end"
+    )
+    new_toggle_shop_func = (
+        "  G.FUNCS.toggle_shop = function(e)\n"
+        "    if G.toggling_shop or (G.CONTROLLER and G.CONTROLLER.locks and G.CONTROLLER.locks.toggle_shop) then\n"
+        "      return\n"
+        "    end\n"
+        "    G.toggling_shop = true\n"
+        "    stop_use()\n"
+        "    if G.CONTROLLER and G.CONTROLLER.locks then\n"
+        "      G.CONTROLLER.locks.toggle_shop = true\n"
+        "    end\n"
+        "    if G.shop and not G.shop.REMOVED then\n"
+        "      if G.jokers and G.jokers.cards then\n"
+        "        for i = 1, #G.jokers.cards do\n"
+        "          if G.jokers.cards[i] and G.jokers.cards[i].calculate_joker then\n"
+        "            G.jokers.cards[i]:calculate_joker({ending_shop = true})\n"
+        "          end\n"
+        "        end\n"
+        "      end\n"
+        "      G.E_MANAGER:add_event(Event({\n"
+        "        trigger = 'immediate',\n"
+        "        func = function()\n"
+        "          if G.shop and G.shop.alignment and G.shop.alignment.offset then\n"
+        "            G.shop.alignment.offset.y = G.ROOM.T.y + 29\n"
+        "          end\n"
+        "          if G.SHOP_SIGN and G.SHOP_SIGN.alignment and G.SHOP_SIGN.alignment.offset then\n"
+        "            G.SHOP_SIGN.alignment.offset.y = -15\n"
+        "          end\n"
+        "          return true\n"
+        "        end\n"
+        "      }))\n"
+        "      G.E_MANAGER:add_event(Event({\n"
+        "        trigger = 'after',\n"
+        "        delay = 0.5,\n"
+        "        func = function()\n"
+        "          if G.shop then\n"
+        "            pcall(function() G.shop:remove() end)\n"
+        "          end\n"
+        "          G.shop = nil\n"
+        "          if G.SHOP_SIGN then\n"
+        "            pcall(function() G.SHOP_SIGN:remove() end)\n"
+        "          end\n"
+        "          G.SHOP_SIGN = nil\n"
+        "          G.STATE_COMPLETE = false\n"
+        "          G.STATE = G.STATES.BLIND_SELECT\n"
+        "          G.toggling_shop = nil\n"
+        "          if G.CONTROLLER and G.CONTROLLER.locks then\n"
+        "            G.CONTROLLER.locks.toggle_shop = nil\n"
+        "          end\n"
+        "          return true\n"
+        "        end\n"
+        "      }))\n"
+        "    else\n"
+        "      G.shop = nil\n"
+        "      G.SHOP_SIGN = nil\n"
+        "      G.STATE_COMPLETE = false\n"
+        "      G.STATE = G.STATES.BLIND_SELECT\n"
+        "      G.toggling_shop = nil\n"
+        "      if G.CONTROLLER and G.CONTROLLER.locks then\n"
+        "        G.CONTROLLER.locks.toggle_shop = nil\n"
+        "      end\n"
+        "    end\n"
+        "  end"
+    )
+    if old_toggle_shop_func in content:
+        content = content.replace(old_toggle_shop_func, new_toggle_shop_func)
+    else:
+        # Fallback to granular replacement if whitespace varies
+        old_clean = (
+            "          G.shop:remove()\n"
+            "          G.shop = nil\n"
+            "          G.SHOP_SIGN:remove()\n"
+            "          G.SHOP_SIGN = nil"
+        )
+        new_clean = (
+            "          if G.shop then pcall(function() G.shop:remove() end) end\n"
+            "          G.shop = nil\n"
+            "          if G.SHOP_SIGN then pcall(function() G.SHOP_SIGN:remove() end) end\n"
+            "          G.SHOP_SIGN = nil"
+        )
+        content = content.replace(old_clean, new_clean)
+
+    old_snap = "G.CONTROLLER:snap_to({node = G.shop:get_UIE_by_ID('next_round_button')})"
+    new_snap = "if G.shop then G.CONTROLLER:snap_to({node = G.shop:get_UIE_by_ID('next_round_button')}) end"
+    content = content.replace(old_snap, new_snap)
+
+    old_consume = (
+        "                  if G.shop then \n"
+        "                    G.shop.alignment.offset.y = G.shop.alignment.offset.py\n"
+        "                    G.shop.alignment.offset.py = nil\n"
+        "                  end"
+    )
+    new_consume = (
+        "                  if G.shop and G.shop.alignment and G.shop.alignment.offset and G.shop.alignment.offset.py then \n"
+        "                    G.shop.alignment.offset.y = G.shop.alignment.offset.py\n"
+        "                    G.shop.alignment.offset.py = nil\n"
+        "                  end"
+    )
+    content = content.replace(old_consume, new_consume)
+
+    # Force Windowed mode and forbid fullscreen in apply_window_changes
+    content = content.replace(
+        "{fullscreen = G.SETTINGS.WINDOW.screenmode ~= 'Windowed',",
+        "{fullscreen = false,"
+    )
+    content = content.replace(
+        "fullscreentype = (G.SETTINGS.WINDOW.screenmode == 'Borderless' and 'desktop') or (G.SETTINGS.WINDOW.screenmode == 'Fullscreen' and 'exclusive') or nil,",
+        "fullscreentype = nil,"
+    )
+    content = content.replace(
+        "G.SETTINGS.WINDOW.screenmode = (G.SETTINGS.QUEUED_CHANGE and G.SETTINGS.QUEUED_CHANGE.screenmode) or G.SETTINGS.WINDOW.screenmode or 'Windowed'",
+        "G.SETTINGS.WINDOW.screenmode = 'Windowed'"
+    )
     return content
 
 
@@ -177,6 +439,21 @@ def build_balatro_love(
                 elif item.filename == "conf.lua":
                     text = extracted_data.decode("utf-8", errors="ignore")
                     patched = patch_conf(text)
+                    extracted_data = patched.encode("utf-8")
+                    stats["files_patched"] += 1
+                elif item.filename == "functions/common_events.lua":
+                    text = extracted_data.decode("utf-8", errors="ignore")
+                    patched = patch_common_events(text)
+                    extracted_data = patched.encode("utf-8")
+                    stats["files_patched"] += 1
+                elif item.filename == "game.lua":
+                    text = extracted_data.decode("utf-8", errors="ignore")
+                    patched = patch_game(text)
+                    extracted_data = patched.encode("utf-8")
+                    stats["files_patched"] += 1
+                elif item.filename == "functions/button_callbacks.lua":
+                    text = extracted_data.decode("utf-8", errors="ignore")
+                    patched = patch_button_callbacks(text)
                     extracted_data = patched.encode("utf-8")
                     stats["files_patched"] += 1
 

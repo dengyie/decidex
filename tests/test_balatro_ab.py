@@ -3,6 +3,8 @@ A/B Benchmark test suite for Balatro decision policies.
 Compares Baseline Greedy vs DecideX Heuristic v2 vs DecideX Model-Augmented v2.
 """
 
+from pathlib import Path
+
 import pytest
 
 from decidex.balatro.benchmark import BalatroABBenchmark, PolicyVariant
@@ -11,12 +13,13 @@ from decidex.balatro.benchmark import BalatroABBenchmark, PolicyVariant
 @pytest.mark.asyncio
 async def test_benchmark_scenario_generation():
     bench = BalatroABBenchmark()
-    assert len(bench.scenarios) == 6
+    assert len(bench.scenarios) == 8
     categories = {s.category for s in bench.scenarios}
     assert "constraints" in categories
     assert "economy" in categories
     assert "joker_order" in categories
     assert "synergy" in categories
+    assert "blind_clear" in categories
 
 
 @pytest.mark.asyncio
@@ -84,14 +87,49 @@ async def test_ab_benchmark_the_psychic_and_junk_filtering():
 
 
 @pytest.mark.asyncio
+async def test_ab_benchmark_ante1_blind_skip_suicide_trap():
+    bench = BalatroABBenchmark()
+    s7 = next(s for s in bench.scenarios if s.id == "scen_07_ante1_blind_skip_suicide_trap")
+
+    # Baseline greedily skips Big Blind for the Rare Tag and lands on Boss Blind with 0 Jokers -> Dead
+    base_res = await bench.run_scenario(s7, PolicyVariant.BASELINE_GREEDY)
+    assert base_res.action_type == "skip_blind"
+    assert base_res.violated_constraint is True
+
+    # DecideX v2 evaluates EV with survival gating, strictly recommending select_blind
+    decidex_res = await bench.run_scenario(s7, PolicyVariant.DECIDEX_HEURISTIC_V2)
+    assert decidex_res.action_type == "select_blind"
+    assert decidex_res.violated_constraint is False
+    assert decidex_res.cleared_target is True
+
+
+@pytest.mark.asyncio
+async def test_ab_benchmark_held_card_protection():
+    bench = BalatroABBenchmark()
+    s8 = next(s for s in bench.scenarios if s.id == "scen_08_pseudo_discard_held_card_protection")
+
+    # Baseline naively plays bare 2 cards without cycling trash
+    base_res = await bench.run_scenario(s8, PolicyVariant.BASELINE_GREEDY)
+    assert len(base_res.chosen_candidate_id.split(":")[1].split("-")) == 2
+
+    # DecideX v2 pads Pair with unenhanced 4♠, cycling trash while strictly preserving Steel & Gold in hand
+    decidex_res = await bench.run_scenario(s8, PolicyVariant.DECIDEX_HEURISTIC_V2)
+    assert decidex_res.action_type == "play"
+    assert decidex_res.violated_constraint is False
+    assert len(decidex_res.chosen_candidate_id.split(":")[1].split("-")) == 3
+    assert "4♠" in decidex_res.description or "4" in str(decidex_res.chosen_candidate_id)
+    assert decidex_res.score > base_res.score
+
+
+@pytest.mark.asyncio
 async def test_ab_benchmark_full_suite_and_report():
     bench = BalatroABBenchmark()
     results = await bench.run_all()
 
-    # Verify each variant has 6 scenario outcomes
-    assert len(results[PolicyVariant.BASELINE_GREEDY]) == 6
-    assert len(results[PolicyVariant.DECIDEX_HEURISTIC_V2]) == 6
-    assert len(results[PolicyVariant.DECIDEX_MODEL_V2]) == 6
+    # Verify each variant has 8 scenario outcomes
+    assert len(results[PolicyVariant.BASELINE_GREEDY]) == 8
+    assert len(results[PolicyVariant.DECIDEX_HEURISTIC_V2]) == 8
+    assert len(results[PolicyVariant.DECIDEX_MODEL_V2]) == 8
 
     # Check constraint violation rates: Baseline has violations; DecideX has 0%
     base_violations = sum(1 for o in results[PolicyVariant.BASELINE_GREEDY] if o.violated_constraint)
@@ -102,11 +140,15 @@ async def test_ab_benchmark_full_suite_and_report():
     assert decidex_violations == 0
     assert model_violations == 0
 
-    # Generate Markdown report
+    # Generate Markdown report and update documentation
     report = bench.generate_markdown_report(results)
     assert "DecideX Balatro 策略体系 A/B 测试对比与量化基准报告" in report
     assert "被动破戒发生率" in report
     assert "利息与安全预算守则合规率" in report
+
+    report_path = Path(__file__).resolve().parents[1] / "docs" / "balatro_ab_benchmark_report.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(report, encoding="utf-8")
 
     # Print report for review
     print("\n" + report)

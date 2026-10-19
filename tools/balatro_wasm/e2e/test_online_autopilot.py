@@ -46,12 +46,12 @@ async def run():
         print("[Online Test] Navigating to https://balatro.mangoqwq.com ...", flush=True)
         await page.goto("https://balatro.mangoqwq.com", wait_until="domcontentloaded", timeout=45000)
 
-        # Clear any old CacheStorage except v24
+        # Clear any old CacheStorage except v26
         await page.evaluate("""async () => {
             if (window.caches) {
                 const keys = await caches.keys();
                 for (const k of keys) {
-                    if (k !== 'balatro-asset-cache-v24') {
+                    if (k !== 'balatro-asset-cache-v26') {
                         await caches.delete(k);
                     }
                 }

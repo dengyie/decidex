@@ -21,7 +21,9 @@ from decidex.pruner import CandidatePruner
 from decidex.providers.base import BaseInferenceProvider
 from decidex.types import ActionCandidate, PrimitiveType, QuestionSpec, TurnPhase
 
+from .blind_eval import evaluate_blind_choice
 from .constraints import detect_active_constraints
+from .deck_odds import analyze_hand_draw_potential, compute_remaining_deck
 from .economy import calculate_economy_status
 from .joker_order import compute_optimal_joker_order, estimate_ordering_gain
 from .rules import choose_safe_default, enumerate_legal_actions
@@ -47,12 +49,21 @@ def build_evidence(state: BalatroState, n_candidates: int) -> Dict[str, Any]:
     )
     opt_order, needs_reorder, order_reason = compute_optimal_joker_order(state.jokers)
     order_gain = estimate_ordering_gain(state.jokers)
+    deck_profile = compute_remaining_deck(
+        state.hand,
+        discards=getattr(state, "discards", None),
+        deck_cards=getattr(state, "deck_cards", None),
+        total_deck_size=getattr(state, "deck_count", 52),
+    )
+    draw_potential = analyze_hand_draw_potential(state.hand, deck_profile, state.discards_left)
+    blind_choice = evaluate_blind_choice(state)
 
     return {
         "blind": {
             "name": state.blind.name, "type": state.blind.type,
             "target": state.blind.chips, "scored": state.blind.scored,
             "remaining": state.blind.remaining,
+            "upcoming_boss": getattr(state.blind, "upcoming_boss", None),
         },
         "resources": {
             "hands_left": state.hands_left,
@@ -64,12 +75,18 @@ def build_evidence(state: BalatroState, n_candidates: int) -> Dict[str, Any]:
                  + (f"<{c.edition}>" if c.edition else "") for c in state.hand],
         "jokers": [j.name for j in state.jokers],
         "consumables": [c.name for c in state.consumables],
+        "pack_cards": [c.get("name", "") for c in getattr(state, "pack_cards", [])],
+        "can_skip_booster": getattr(state, "can_skip_booster", False),
         "n_legal_actions": n_candidates,
+        "deck_odds": draw_potential,
+        "deck_remaining": deck_profile.total_remaining,
+        "blind_evaluation": blind_choice.to_dict(),
 
         # Boss Blind first-class model context
         "boss_blind": {
             "name": constraints.boss_name,
             "has_boss": bool(constraints.boss_rule),
+            "upcoming_boss": getattr(state.blind, "upcoming_boss", None),
             "description": constraints.boss_rule.description if constraints.boss_rule else "普通盲注 (无特殊限制)",
             "strategic_directive": constraints.strategic_directive or "正常构筑高倍率或高筹码牌型斩杀",
             "requires_5_cards": constraints.is_the_psychic,
@@ -93,6 +110,11 @@ def build_evidence(state: BalatroState, n_candidates: int) -> Dict[str, Any]:
                 "optimal_indices": opt_order,
                 "ordering_gain": order_gain,
                 "reason": order_reason,
+            },
+            "deck_profile": {
+                "total_remaining": deck_profile.total_remaining,
+                "face_cards": deck_profile.face_card_count,
+                "suit_counts": deck_profile.suit_counts,
             },
         },
     }

@@ -22,44 +22,61 @@ from .state import Joker
 from .synergy import JOKER_CATALOG, PillarType
 
 
-def _classify_joker_position_tier(joker: Joker) -> int:
+def _classify_joker_position_tier(joker: Joker) -> float:
     """
     Assigns an ordering tier (lower numbers go leftmost, higher go rightmost).
     0: Economy / Inactive utility
     1: Flat Chips (+Chips)
     2: Flat Mult (+Mult)
+    2.8: Flat Mult with Polychrome (triggers flat mult, then x1.5 mult)
     3: Triggered / Retrigger hooks (e.g. Hanging Chad, Hack)
     4: Copy Jokers (Blueprint / Brainstorm) when copying X-Mult
-    5: X-Mult (x2, x3 mult) - MUST BE RIGIDLY ON THE RIGHTMOST SLOTS!
+    5: X-Mult (x2, x3 mult) or non-mult Polychrome - MUST BE RIGIDLY ON THE RIGHTMOST SLOTS!
     """
     meta = JOKER_CATALOG.get(joker.name)
     name = joker.name
+    edition = str(getattr(joker, "edition", None) or "").lower()
 
     # Blueprint and Brainstorm are dynamic
     if name in ("Blueprint", "Brainstorm"):
-        return 4
+        return 4.0
 
+    tier = 2.0
     if meta:
         if meta.primary_pillar == PillarType.CHIPS:
-            return 1
-        if meta.primary_pillar == PillarType.FLAT_MULT:
-            return 2
-        if meta.primary_pillar == PillarType.X_MULT:
-            return 5
-        if meta.primary_pillar == PillarType.ECONOMY:
-            return 0
-        if meta.primary_pillar == PillarType.UTILITY:
-            return 3
+            tier = 1.0
+        elif meta.primary_pillar == PillarType.FLAT_MULT:
+            tier = 2.0
+        elif meta.primary_pillar == PillarType.X_MULT:
+            tier = 5.0
+        elif meta.primary_pillar == PillarType.ECONOMY:
+            tier = 0.0
+        elif meta.primary_pillar == PillarType.UTILITY:
+            tier = 3.0
+    else:
+        if (joker.xmult or 1.0) > 1.0:
+            tier = 5.0
+        elif (joker.mult or 0) > 0:
+            tier = 2.0
+        elif (joker.chips or 0) > 0:
+            tier = 1.0
 
-    # Fallback to reported properties
-    if (joker.xmult or 1.0) > 1.0:
-        return 5
-    if (joker.mult or 0) > 0:
-        return 2
-    if (joker.chips or 0) > 0:
-        return 1
+    # Edition weighting adjustments:
+    # Polychrome grants x1.5 Mult.
+    # If the joker has flat mult, place it right after pure flat mults (tier 2.8)
+    # so its flat mult is added, then magnified together with earlier flat mults.
+    # If the joker is chips, economy or utility, it has no flat mult, so place it in X-mult block (tier 5.0).
+    if edition == "polychrome":
+        if tier == 2.0:
+            tier = 2.8
+        elif tier < 5.0:
+            tier = 5.0
+    elif edition in ("holo", "holographic"):
+        # Holographic grants +10 Flat Mult
+        if tier < 2.0:
+            tier = 2.0
 
-    return 2
+    return tier
 
 
 def compute_optimal_joker_order(
@@ -88,6 +105,7 @@ def compute_optimal_joker_order(
         i for i, j in enumerate(jokers)
         if (JOKER_CATALOG.get(j.name) and JOKER_CATALOG[j.name].primary_pillar == PillarType.X_MULT)
         or (j.xmult or 1.0) > 1.0
+        or str(getattr(j, "edition", None) or "").lower() == "polychrome"
     ]
 
     # In shop/cash_out phase, prioritize duplicating economy jokers
@@ -128,8 +146,8 @@ def compute_optimal_joker_order(
 
     # Check if any X-Mult is currently sitting to the left of a Flat Mult
     has_inverted_xmult = False
-    max_flat_pos = max((i for i, t in enumerate(tiers) if t == 2), default=-1)
-    min_xmult_pos = min((i for i, t in enumerate(tiers) if t == 5), default=999)
+    max_flat_pos = max((i for i, t in enumerate(tiers) if 2.0 <= t < 4.0), default=-1)
+    min_xmult_pos = min((i for i, t in enumerate(tiers) if t >= 4.8), default=999)
     if min_xmult_pos < max_flat_pos:
         has_inverted_xmult = True
 
@@ -150,21 +168,28 @@ def compute_optimal_joker_order(
     optimal_order = sorted(indexed, key=sort_key)
 
     # Special handling: If Brainstorm is present, place the best copied card at slot 0
+    # Crucial Balatro ordering rule: Slot 0 triggers first. If flat mult/chips exist,
+    # Brainstorm should duplicate flat mult/chips first so that subsequent X-Mult jokers
+    # on the right multiply the enlarged base mult!
     if brainstorm_idx is not None:
-        # Find best card for Brainstorm to copy (X-mult > Flat Mult > Chips)
         candidates = [i for i in range(n) if jokers[i].name not in ("Brainstorm", "Blueprint")]
         if candidates:
-            best_target = max(candidates, key=lambda i: (tiers[i], jokers[i].xmult or 1.0, jokers[i].mult or 0))
-            # Move best_target to 0, Brainstorm right after or in utility slot
+            flat_or_chips = [i for i in candidates if tiers[i] < 4.0]
+            if flat_or_chips:
+                best_target = max(flat_or_chips, key=lambda i: (tiers[i], jokers[i].mult or 0, jokers[i].chips or 0))
+            else:
+                best_target = max(candidates, key=lambda i: (jokers[i].xmult or 1.0))
             optimal_order.remove(best_target)
             optimal_order.insert(0, best_target)
 
     # Special handling: Ensure Blueprint is directly before the best X-mult
     if blueprint_idx is not None and xmult_indices:
-        best_x = max(xmult_indices, key=lambda i: jokers[i].xmult or 1.0)
-        optimal_order.remove(blueprint_idx)
-        x_pos = optimal_order.index(best_x)
-        optimal_order.insert(x_pos, blueprint_idx)
+        valid_x = [i for i in xmult_indices if optimal_order.index(i) > 0]
+        if valid_x:
+            best_x = max(valid_x, key=lambda i: jokers[i].xmult or 1.0)
+            optimal_order.remove(blueprint_idx)
+            x_pos = optimal_order.index(best_x)
+            optimal_order.insert(x_pos, blueprint_idx)
 
     current_order = list(range(n))
     needs_reorder = (optimal_order != current_order)
@@ -201,8 +226,13 @@ def estimate_ordering_gain(jokers: List[Joker]) -> float:
             meta = JOKER_CATALOG.get(j.name)
             add_m = max(j.mult or 0, meta.base_mult if meta else 0)
             xm = max(j.xmult or 1.0, meta.base_xmult if meta else 1.0)
+            edition = str(getattr(j, "edition", None) or "").lower()
+            if edition in ("holo", "holographic"):
+                add_m += 10.0
             m += add_m
             m *= xm
+            if edition == "polychrome":
+                m *= 1.5
         return m
 
     current_score = score_mult(list(range(len(jokers))))

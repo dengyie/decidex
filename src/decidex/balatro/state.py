@@ -97,13 +97,20 @@ class Blind:
     type: str = "small"            # small | big | boss
     chips: int = 300               # target score
     scored: int = 0                # chips already banked this blind
+    upcoming_boss: Optional[str] = None
 
     @property
     def remaining(self) -> int:
         return max(0, self.chips - self.scored)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"name": self.name, "type": self.type, "chips": self.chips, "scored": self.scored}
+        return {
+            "name": self.name,
+            "type": self.type,
+            "chips": self.chips,
+            "scored": self.scored,
+            "upcoming_boss": self.upcoming_boss,
+        }
 
 
 @dataclass
@@ -129,7 +136,11 @@ class BalatroState:
     can_cash_out: bool = False
     can_toggle_shop: bool = False
     can_select_blind: bool = False
+    can_skip_blind: bool = False
+    blind_tag: Optional[Dict[str, Any]] = None
     won: bool = False
+    pack_cards: List[Dict[str, Any]] = field(default_factory=list)
+    can_skip_booster: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -146,7 +157,11 @@ class BalatroState:
             "can_cash_out": self.can_cash_out,
             "can_toggle_shop": self.can_toggle_shop,
             "can_select_blind": self.can_select_blind,
+            "can_skip_blind": self.can_skip_blind,
+            "blind_tag": self.blind_tag,
             "won": self.won,
+            "pack_cards": self.pack_cards,
+            "can_skip_booster": self.can_skip_booster,
             "actual": self.actual,
         }
 
@@ -171,6 +186,7 @@ class BalatroState:
                 type=blind.get("type") or "small",
                 chips=b_chips,
                 scored=int(blind.get("scored", 0) or 0),
+                upcoming_boss=blind.get("upcoming_boss"),
             ),
             jokers=[Joker(
                 name=j.get("name", "?"),
@@ -181,7 +197,7 @@ class BalatroState:
                 extra=j.get("extra") or {},
             ) for j in d.get("jokers", [])],
             consumables=[Consumable(name=c.get("name", "?"), type=c.get("type", "tarot"))
-                         for c in d.get("consumables", [])],
+                for c in d.get("consumables", [])],
             hands_left=int(d.get("hands_left", 4)),
             discards_left=int(d.get("discards_left", 3)),
             hand_size=int(d.get("hand_size", 8)),
@@ -195,7 +211,11 @@ class BalatroState:
             can_cash_out=bool(d.get("can_cash_out", False)),
             can_toggle_shop=bool(d.get("can_toggle_shop", False)),
             can_select_blind=bool(d.get("can_select_blind", False)),
+            can_skip_blind=bool(d.get("can_skip_blind", False)),
+            blind_tag=d.get("blind_tag"),
             won=bool(d.get("won", False)),
+            pack_cards=d.get("pack_cards") or [],
+            can_skip_booster=bool(d.get("can_skip_booster", False)),
         )
 
 
