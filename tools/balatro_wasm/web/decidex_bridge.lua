@@ -1297,17 +1297,12 @@ end
 local function write_action_ack(sequence, ok, info)
   if not sequence then return end
   local safe_info = tostring(info or ""):gsub("[\r\n|]", " ")
-  local f = io.open("/tmp/balatro_eval_ack.txt.tmp", "w")
-  if not f then
+  local f = io.open("/tmp/balatro_eval_ack.txt", "w")
+  if f then
+    f:write(tostring(sequence), "|", ok and "ok" or "error", "|", safe_info)
+    f:close()
+  else
     print("[DecideX Ack Error]: unable to open acknowledgement file")
-    return
-  end
-  f:write(tostring(sequence), "|", ok and "ok" or "error", "|", safe_info)
-  f:close()
-  local renamed, rename_err = os.rename("/tmp/balatro_eval_ack.txt.tmp", "/tmp/balatro_eval_ack.txt")
-  if not renamed then
-    os.remove("/tmp/balatro_eval_ack.txt.tmp")
-    print("[DecideX Ack Error]: " .. tostring(rename_err))
   end
 end
 
@@ -1405,13 +1400,17 @@ local function decidex_step(dt)
     local code = f:read("*a")
     f:close()
     os.remove("/tmp/balatro_eval.lua")
-    local sequence, body = code and code:match("^%-%- DECIDEX_SEQ:(%d+)%s*\n?(.*)$")
-    if not sequence then
-      write_action_ack(nil, false, "missing sequence header")
-    elseif body == "" then
-      write_action_ack(sequence, false, "empty command")
+    if not code or code == "" then
+      -- empty file ignored
     else
-      local chunk, err = loadstring(body)
+      local sequence = code:match("^%-%- DECIDEX_SEQ:(%d+)")
+      local body = code:gsub("^%-%- DECIDEX_SEQ:%d+%s*\n?", "")
+      if not sequence then
+        write_action_ack(nil, false, "missing sequence header")
+      elseif not body or body == "" then
+        write_action_ack(sequence, false, "empty command")
+      else
+        local chunk, err = loadstring(body or "")
       if not chunk then
         print("[DecideX Bridge Parse Error]: " .. tostring(err))
         write_action_ack(sequence, false, "parse error: " .. tostring(err))
@@ -1432,6 +1431,7 @@ local function decidex_step(dt)
         end
       end
     end
+  end
   end
 
   -- 2. Emit state if changed

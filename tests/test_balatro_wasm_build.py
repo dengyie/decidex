@@ -387,6 +387,15 @@ def test_frontend_arbitration_and_autopilot():
     assert "executePlayAction" in js_content
     assert "executeDiscardAction" in js_content
 
+    # Mailbox failures must reach AutoPilot instead of leaving an in-flight
+    # action invisible until the watchdog fires.
+    assert "onActionDispatchFailure" in js_content
+    assert "Lua action ${label} #${sequence} failed" in js_content
+    assert "return dispatchLuaAction(luaCode, \"play\")" in js_content
+    assert "return dispatchLuaAction(luaCode, \"discard\")" in js_content
+    assert "this._actionFailureStreak" in js_content
+    assert "动作连续失败，自动托管已暂停" in js_content
+
     # IDBFS initialization must observe love.js's single runtime sync rather
     # than depending on unavailable Emscripten dependency hooks or racing it.
     assert "FS._decidex_syncfs_wrapped" in js_content
@@ -396,14 +405,17 @@ def test_frontend_arbitration_and_autopilot():
     assert "if (isLoveRunning || initialSyncState !== \"ready\") return;" in js_content
     assert "preRun: [setupFileSystem]" in js_content
     assert "postRun: [onInitSuccess]" in js_content
-    assert 'const ASSET_VERSION = "v56";' in js_content
-    assert 'balatro.love.zip?v=56' in js_content
-    assert 'love.wasm.bin?v=56' in js_content
+    version_match = re.search(r'const ASSET_VERSION = "v(\d+)";', js_content)
+    assert version_match is not None, "ASSET_VERSION constant not found in app.js"
+    asset_num = version_match.group(1)
+    assert f'balatro.love.zip?v={asset_num}' in js_content
+    assert f'love.wasm.bin?v={asset_num}' in js_content
 
     index_html = WEB_DIR / "index.html"
     html_content = index_html.read_text(encoding="utf-8")
     assert "autopilot-toggle" in html_content
-    assert re.search(r"app\.js\?v=\d+", html_content) is not None
+    assert f"app.js?v={asset_num}" in html_content
+    assert f"love.js?v={asset_num}" in html_content
 
 
 def test_coordinate_mapping_patches():

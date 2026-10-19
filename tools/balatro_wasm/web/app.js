@@ -400,13 +400,15 @@ end
   window.addEventListener("beforeunload", syncSaveFileSystem);
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
-  // Cache key: balatro-asset-cache-v56 / decidex-balatro-core-v56
-  const ASSET_VERSION = "v56";
+  // Cache key: balatro-asset-cache-v61 / decidex-balatro-core-v61
+  const EXPECTED_LOVE_SIZE = 56338470;
+  const EXPECTED_WASM_SIZE = 4720510;
+  const ASSET_VERSION = "v61";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_" + ASSET_VERSION;
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=56";
-  const ASSET_WASM_URL = "love.wasm.bin?v=56";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=61";
+  const ASSET_WASM_URL = "love.wasm.bin?v=61";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -524,8 +526,18 @@ end
         if (wasmBuf) putToIDB("love.wasm", wasmBuf); // auto-migrate to IDB
       }
 
+      // Validate cache size integrity
+      if (loveBuf && loveBuf.byteLength !== EXPECTED_LOVE_SIZE) {
+        console.warn(`[DecideX Cache] Stale or invalid balatro.love size (${loveBuf.byteLength} != ${EXPECTED_LOVE_SIZE}), purging cache.`);
+        loveBuf = null;
+      }
+      if (wasmBuf && wasmBuf.byteLength !== EXPECTED_WASM_SIZE) {
+        console.warn(`[DecideX Cache] Stale or invalid love.wasm size (${wasmBuf.byteLength} != ${EXPECTED_WASM_SIZE}), purging cache.`);
+        wasmBuf = null;
+      }
+
       // If both assets hit local persistent cache: instant load, 0 network transfer!
-      if (loveBuf && wasmBuf && loveBuf.byteLength > 10 * 1024 * 1024) {
+      if (loveBuf && wasmBuf) {
         console.log(`[DecideX Cache] Instant hit! Loaded balatro.love (${(loveBuf.byteLength / 1048576).toFixed(1)}MB) and love.wasm (${(wasmBuf.byteLength / 1048576).toFixed(1)}MB) from local offline store.`);
         statusText.textContent = "已从本地离线持久缓存秒开就绪！";
         progressBar.style.width = "100%";
@@ -601,7 +613,7 @@ end
         return fullBuffer.buffer;
       }
 
-      lovePackageBuffer = await fetchWithResume(ASSET_LOVE_URL, 56336069, (loaded, total) => {
+      lovePackageBuffer = await fetchWithResume(ASSET_LOVE_URL, EXPECTED_LOVE_SIZE, (loaded, total) => {
         const pct = Math.min(85, Math.round((loaded / total) * 85));
         progressBar.style.width = pct + "%";
         statusText.textContent = `下载游戏包 (1/2): ${(loaded / (1024 * 1024)).toFixed(1)} MB / ${(total / (1024 * 1024)).toFixed(1)} MB (${pct}%)`;
@@ -610,7 +622,7 @@ end
       // Tier 4: Download love.wasm (85% -> 98%) with Range resume
       statusText.textContent = "正在下载 WebAssembly 运行核心 (love.wasm 4.7MB)...";
       progressBar.style.width = "88%";
-      wasmBuf = await fetchWithResume(ASSET_WASM_URL, 4720510, (loaded, total) => {
+      wasmBuf = await fetchWithResume(ASSET_WASM_URL, EXPECTED_WASM_SIZE, (loaded, total) => {
         const pct = 85 + Math.min(13, Math.round((loaded / total) * 13));
         progressBar.style.width = pct + "%";
         statusText.textContent = `下载运行核心 (2/2): ${(loaded / (1024 * 1024)).toFixed(1)} MB / ${(total / (1024 * 1024)).toFixed(1)} MB (${pct}%)`;
@@ -670,6 +682,10 @@ end
 
   // Launch LÖVE runtime
   btnLaunch.addEventListener("click", () => {
+    if (!lovePackageBuffer) {
+      console.warn("[DecideX] Game assets not loaded yet, ignoring launch click.");
+      return;
+    }
     if (initialSyncState === "failed") {
       window.retryInitialFileSystemSync();
       return;
@@ -692,7 +708,7 @@ end
       } else {
         console.log("[DecideX] Loading love.js dynamically...");
         const script = document.createElement("script");
-        script.src = "love.js?v=56";
+        script.src = "love.js?v=61";
         script.onload = () => {
           if (typeof Love === "function") {
             try {
@@ -2640,13 +2656,18 @@ end
   let luaActionSequence = 0;
   function dispatchLuaAction(luaCode, label = "action") {
     const sequence = ++luaActionSequence;
+    if (window.AutoPilot && typeof window.AutoPilot.onActionDispatch === "function") {
+      window.AutoPilot.onActionDispatch(label, sequence);
+    }
     const actionPromise = luaActionQueue.catch(() => {}).then(() => new Promise((resolve, reject) => {
       const FS = window.Module && window.Module.FS;
       if (!FS) return reject(new Error("游戏引擎尚未就绪"));
       const ackPath = "/tmp/balatro_eval_ack.txt";
+      const evalPath = "/tmp/balatro_eval.lua";
       try { FS.unlink(ackPath); } catch (_) {}
-      FS.writeFile("/tmp/balatro_eval.lua", `-- DECIDEX_SEQ:${sequence}\n${luaCode}`);
-      const deadline = Date.now() + 5000;
+      FS.writeFile(evalPath, `-- DECIDEX_SEQ:${sequence}\n${luaCode}`);
+      const deadline = Date.now() + 2500;
+      let evalConsumedTime = null;
       const poll = () => {
         try {
           const ack = FS.readFile(ackPath, { encoding: "utf8" }).trim();
@@ -2656,167 +2677,167 @@ end
             return reject(new Error(`Lua ${label} failed: ${parts.slice(2).join("|") || "unknown error"}`));
           }
         } catch (_) {}
-        if (Date.now() >= deadline) return reject(new Error(`Lua ${label} acknowledgement timed out`));
-        setTimeout(poll, 50);
+
+        // Check if Lua has consumed and unlinked /tmp/balatro_eval.lua
+        let evalExists = true;
+        try {
+          evalExists = FS.analyzePath(evalPath).exists;
+        } catch (_) {}
+        if (!evalExists) {
+          if (!evalConsumedTime) {
+            evalConsumedTime = Date.now();
+          } else if (Date.now() - evalConsumedTime >= 80) {
+            return resolve(sequence);
+          }
+        }
+
+        if (Date.now() >= deadline) {
+          if (!evalExists || evalConsumedTime) return resolve(sequence);
+          return reject(new Error(`Lua ${label} acknowledgement timed out`));
+        }
+        setTimeout(poll, 40);
       };
       poll();
     }));
-    luaActionQueue = actionPromise;
-    luaActionQueue.catch(error => console.error("[DecideX] Lua action failed:", error));
+    luaActionQueue = actionPromise.catch(error => {
+      console.error(`[DecideX] Lua action ${label} #${sequence} failed:`, error);
+      if (window.AutoPilot && typeof window.AutoPilot.onActionDispatchFailure === "function") {
+        window.AutoPilot.onActionDispatchFailure(label, error, sequence);
+      }
+      return false;
+    });
     return luaActionQueue;
+  }
+
+  function reportActionDispatchFailure(action, error, sequence) {
+    if (window.AutoPilot && typeof window.AutoPilot.onActionDispatchFailure === "function") {
+      window.AutoPilot.onActionDispatchFailure(action, error, sequence);
+    }
+  }
+
+  function unavailableAction(action) {
+    const error = new Error("游戏引擎尚未就绪");
+    console.warn(`[DecideX] Cannot dispatch ${action}:`, error.message);
+    reportActionDispatchFailure(action, error, null);
+    return Promise.resolve(false);
   }
 
   // Programmatic execution via serialized Emscripten virtual FS mailbox
   window.executePlayAction = function (cards) {
-    if (!window.Module || !window.Module.FS) {
-      console.warn("游戏引擎尚未就绪");
-      return;
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("play");
     const indices = (cards || []).map(c => c.index).filter(x => x !== undefined);
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("play", {indices = {${indices.join(",")}}}) end`;
-    dispatchLuaAction(luaCode, "play");
     console.log("[DecideX] Queued play action:", luaCode);
+    return dispatchLuaAction(luaCode, "play");
   };
 
   window.executeDiscardAction = function (cards) {
-    if (!window.Module || !window.Module.FS) {
-      console.warn("游戏引擎尚未就绪");
-      return;
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("discard");
     const indices = (cards || []).map(c => c.index).filter(x => x !== undefined);
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("discard", {indices = {${indices.join(",")}}}) end`;
-    dispatchLuaAction(luaCode);
     console.log("[DecideX] Dispatched discard action:", luaCode);
+    return dispatchLuaAction(luaCode, "discard");
   };
 
   window.executeBuyAction = function (index, area) {
-    if (!window.Module || !window.Module.FS) {
-      console.warn("游戏引擎尚未就绪");
-      return;
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("buy_card");
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("buy_card", {index = ${index}, area = "${area || 'shop_jokers'}"}) end`;
-    dispatchLuaAction(luaCode);
     console.log("[DecideX] Dispatched buy action:", luaCode);
+    return dispatchLuaAction(luaCode, "buy_card");
   };
 
   window.executeSellCard = function (index, area) {
-    if (!window.Module || !window.Module.FS) {
-      console.warn("游戏引擎尚未就绪");
-      return;
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("sell_card");
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("sell_card", {index = ${index}, area = "${area || 'jokers'}"}) end`;
-    dispatchLuaAction(luaCode);
-    console.log("[DecideX] Dispatched sell_card action:", luaCode);
+    console.log("[DecideX] Dispatched sell action:", luaCode);
+    return dispatchLuaAction(luaCode, "sell_card");
   };
 
   window.executeRerollShop = function () {
-    if (!window.Module || !window.Module.FS) {
-      console.warn("游戏引擎尚未就绪");
-      return;
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("reroll_shop");
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("reroll_shop") end`;
-    dispatchLuaAction(luaCode);
     console.log("[DecideX] Dispatched reroll_shop action");
+    return dispatchLuaAction(luaCode, "reroll_shop");
   };
 
   window.executeToggleShop = function () {
-    if (!window.Module || !window.Module.FS) {
-      console.warn("游戏引擎尚未就绪");
-      return;
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("toggle_shop");
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("toggle_shop") end`;
-    dispatchLuaAction(luaCode);
     console.log("[DecideX] Dispatched toggle_shop action");
+    return dispatchLuaAction(luaCode, "toggle_shop");
   };
 
   window.executeReorderJokers = function (order) {
-    if (!window.Module || !window.Module.FS) {
-      console.warn("游戏引擎尚未就绪");
-      return;
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("reorder_jokers");
     const orderStr = (order || []).join(", ");
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("reorder_jokers", {order = {${orderStr}}}) end`;
-    dispatchLuaAction(luaCode);
     console.log("[DecideX] Dispatched reorder_jokers action:", orderStr);
+    return dispatchLuaAction(luaCode, "reorder_jokers");
   };
 
   window.executeUseCard = function (index, targetIndices, area) {
-    if (!window.Module || !window.Module.FS) {
-      console.warn("游戏引擎尚未就绪");
-      return;
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("use_card");
     const tIndices = (targetIndices && targetIndices.length > 0) ? `{${targetIndices.join(",")}}` : "nil";
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("use_card", {index = ${index}, area = "${area || 'consumeables'}", target_indices = ${tIndices}}) end`;
-    dispatchLuaAction(luaCode);
-    console.log("[DecideX] Dispatched use_card action:", luaCode);
+    console.log("[DecideX] Dispatched use_card action");
+    return dispatchLuaAction(luaCode, "use_card");
   };
 
   window.executeSkipBooster = function () {
-    if (!window.Module || !window.Module.FS) {
-      console.warn("游戏引擎尚未就绪");
-      return;
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("skip_booster");
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("skip_booster") end`;
-    dispatchLuaAction(luaCode);
     console.log("[DecideX] Dispatched skip_booster action");
+    return dispatchLuaAction(luaCode, "skip_booster");
   };
 
   window.executeSelectPackCard = function (index) {
-    if (!window.Module || !window.Module.FS) {
-      console.warn("游戏引擎尚未就绪");
-      return;
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("select_pack_card");
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("select_pack_card", {index = ${index}}) end`;
-    dispatchLuaAction(luaCode);
     console.log("[DecideX] Dispatched select_pack_card action:", index);
+    return dispatchLuaAction(luaCode, "select_pack_card");
   };
+
 
   // Utilities
   window.decidexSelectBlind = function () {
-    if (window.Module && window.Module.FS) {
-      dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("select_blind") end');
-      console.log("[DecideX] Dispatched select_blind action");
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("select_blind");
+    console.log("[DecideX] Dispatched select_blind action");
+    return dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("select_blind") end', "select_blind");
   };
 
   window.decidexSkipBlind = function () {
-    if (window.Module && window.Module.FS) {
-      dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("skip_blind") end');
-      console.log("[DecideX] Dispatched skip_blind action");
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("skip_blind");
+    console.log("[DecideX] Dispatched skip_blind action");
+    return dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("skip_blind") end', "skip_blind");
   };
 
   window.decidexCashOut = function () {
-    if (window.Module && window.Module.FS) {
-      dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("cash_out") end');
-      console.log("[DecideX] Dispatched cash_out action");
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("cash_out");
+    console.log("[DecideX] Dispatched cash_out action");
+    return dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("cash_out") end', "cash_out");
   };
 
   window.decidexSortRank = function () {
-    if (window.Module && window.Module.FS) {
-      dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("sort_rank") end');
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("sort_rank");
+    return dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("sort_rank") end', "sort_rank");
   };
 
   window.decidexSortSuit = function () {
-    if (window.Module && window.Module.FS) {
-      dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("sort_suit") end');
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("sort_suit");
+    return dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("sort_suit") end', "sort_suit");
   };
 
   window.decidexReEvaluate = function () {
-    if (window.Module && window.Module.FS) {
-      dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("force_state_dump") end');
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("force_state_dump");
+    return dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("force_state_dump") end', "force_state_dump");
   };
 
   window.decidexStartRun = function () {
-    if (window.Module && window.Module.FS) {
-      dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("start_run") end');
-      console.log("[DecideX] Dispatched start_run action");
-    }
+    if (!window.Module || !window.Module.FS) return unavailableAction("start_run");
+    console.log("[AutoPilot] Dispatched start_run action");
+    return dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("start_run") end', "start_run");
   };
+
 
   // Save Export / Import
   window.decidexExportSave = function () {
@@ -2942,6 +2963,13 @@ end
       return 250;
     },
 
+    onActionDispatch(action, sequence) {
+      if (!this.enabled) return;
+      this._actionInFlight = action;
+      this._actionSequence = sequence;
+      this._busyTimestamp = Date.now();
+    },
+
     onActionResult(resultStr) {
       if (!this.enabled) return;
       const mAction = resultStr.match(/action=([^\s]+)/);
@@ -2953,19 +2981,37 @@ end
 
       if (action) {
         if (!ok) {
+          // The sequenced ack/timeout path owns failure recovery. Keeping this
+          // log-only avoids counting the same failed action twice.
           console.warn(`[AutoPilot] Action ${action} rejected by Lua: ${info}`);
-          // Clear locks immediately so AutoPilot can retry without waiting for watchdog timeout
-          if (this._actionInFlight === action || this.busy) {
-            this._actionInFlight = null;
-            this.busy = false;
-            this._busyTimestamp = null;
-            this.scheduleNextAction(250);
-          }
         } else {
           console.log(`[AutoPilot] Action ${action} confirmed by Lua: ${info}`);
+          this._actionFailureStreak = 0;
           this._lastProgressTimestamp = Date.now();
         }
       }
+    },
+
+    onActionDispatchFailure(action, error, sequence) {
+      if (!this.enabled) return;
+      const current = this._actionInFlight;
+      if (current && current !== action) return;
+
+      this._actionFailureStreak = (this._actionFailureStreak || 0) + 1;
+      this._actionInFlight = null;
+      this._busyTimestamp = null;
+      this.pendingState = null;
+      this.busy = false;
+      this._lastProgressTimestamp = Date.now();
+      console.warn(`[AutoPilot] Dispatch failed for ${action}${sequence ? ` #${sequence}` : ""}; cleared action lock`, error);
+
+      if (this._actionFailureStreak >= 6) {
+        this.updateStatus("动作连续失败，自动托管已暂停", false);
+        this.toggle(false);
+        return;
+      }
+      this.updateStatus("动作失败，正在重试...", false);
+      this.scheduleNextAction(600);
     },
 
     onStateUpdated(state) {
@@ -2989,6 +3035,7 @@ end
         this.busy = false;
         this._actionInFlight = null;
         this.pendingState = null;
+        this._actionFailureStreak = 0;
         this._lastHandsLeft = handsLeft;
         this._lastDiscardsLeft = discardsLeft;
         this._lastHandLen = handLen;

@@ -42,6 +42,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import sys
 import subprocess
 import threading
@@ -1412,6 +1413,21 @@ class _Server(ThreadingHTTPServer):
     # kernel RSTs them, which cloudflared reports as "http2: stream closed".
     allow_reuse_address = True
     request_queue_size = 128
+
+    def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
+        host, port = server_address
+        if host in ("0.0.0.0", "::", "") and getattr(socket, "has_ipv6", False):
+            self.address_family = socket.AF_INET6
+            server_address = ("::", port)
+        super().__init__(server_address, RequestHandlerClass, bind_and_activate)
+
+    def server_bind(self):
+        if getattr(self, "address_family", None) == socket.AF_INET6:
+            try:
+                self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            except (AttributeError, OSError):
+                pass
+        super().server_bind()
 
 
 def main():
