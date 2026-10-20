@@ -803,7 +803,35 @@ local function check_and_emit_state()
   if G.STATE == G.STATES.HAND_PLAYED then
     _G._hand_play_saw_hand_played = true
     _G._draw_to_hand_enter_time = nil
-  elseif G.STATE == G.STATES.DRAW_TO_HAND then
+    if not _G._hand_played_enter_time then _G._hand_played_enter_time = now end
+    if now - _G._hand_played_enter_time > 5.0 then
+      print("[DecideX Bridge] Watchdog: advancing stuck HAND_PLAYED")
+      if G.FUNCS and G.FUNCS.draw_from_play_to_discard then
+        pcall(G.FUNCS.draw_from_play_to_discard)
+      end
+      if G.play and G.play.cards and #G.play.cards > 0 and G.discard then
+        for i = #G.play.cards, 1, -1 do
+          local c = G.play.cards[i]
+          if c then
+            pcall(function()
+              G.play:remove_card(c)
+              G.discard:emplace(c)
+            end)
+          end
+        end
+      end
+      G.STATE_COMPLETE = false
+      if G.GAME and G.GAME.chips and G.GAME.blind and (G.GAME.chips >= G.GAME.blind.chips or (G.GAME.current_round and G.GAME.current_round.hands_left and G.GAME.current_round.hands_left < 1)) then
+        G.STATE = G.STATES.NEW_ROUND
+      else
+        G.STATE = G.STATES.DRAW_TO_HAND
+      end
+      _G._hand_played_enter_time = now
+    end
+  else
+    _G._hand_played_enter_time = nil
+  end
+  if G.STATE == G.STATES.DRAW_TO_HAND then
     _G._hand_discard_saw_draw = true
     if not _G._draw_to_hand_enter_time then _G._draw_to_hand_enter_time = now end
     if now - _G._draw_to_hand_enter_time > 4.5 then
@@ -1037,7 +1065,23 @@ local function decidex_execute_inner(action, args)
       return false, "not in SELECTING_HAND"
     end
     if G.play and G.play.cards and #G.play.cards > 0 then
-      return false, "cards already in play"
+      if G.FUNCS and G.FUNCS.draw_from_play_to_discard then
+        pcall(G.FUNCS.draw_from_play_to_discard)
+      end
+      if G.play.cards and #G.play.cards > 0 and G.discard then
+        for i = #G.play.cards, 1, -1 do
+          local c = G.play.cards[i]
+          if c then
+            pcall(function()
+              G.play:remove_card(c)
+              G.discard:emplace(c)
+            end)
+          end
+        end
+      end
+      if G.play.cards and #G.play.cards > 0 then
+        return false, "cards already in play"
+      end
     end
     if not (G.hand and G.hand.cards and #G.hand.cards > 0) then
       return false, "no hand cards"
