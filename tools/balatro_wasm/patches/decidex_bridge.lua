@@ -372,18 +372,10 @@ end
 
 local function find_next_round_button()
   if not (G and G.shop and not G.shop.REMOVED) then return nil end
-  if G.CONTROLLER and G.CONTROLLER.locks and G.CONTROLLER.locks.toggle_shop then
-    local now = (love.timer and love.timer.getTime()) or os.clock()
-    if not _G._toggle_shop_lock_time then _G._toggle_shop_lock_time = now end
-    if (now - _G._toggle_shop_lock_time > 2.5) then
-      G.CONTROLLER.locks.toggle_shop = nil
-      _G._toggle_shop_lock_time = nil
-    else
-      return nil
-    end
-  else
-    _G._toggle_shop_lock_time = nil
+  if G.CONTROLLER and G.CONTROLLER.locks then
+    G.CONTROLLER.locks.toggle_shop = nil
   end
+  _G._toggle_shop_lock_time = nil
   if G.shop.get_UIE_by_ID then
     local btn = nil
     pcall(function() btn = G.shop:get_UIE_by_ID('next_round_button') end)
@@ -395,7 +387,13 @@ end
 
 local function find_select_blind_button()
   if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then return nil end
-  if G.GAME and G.GAME.facing_blind then return nil end
+
+  local now = (love.timer and love.timer.getTime()) or os.clock()
+  if _G._last_select_blind_time and (now - _G._last_select_blind_time < 2.0) and not (G.blind_select and not G.blind_select.REMOVED) then
+    return nil -- Still animating previous select
+  end
+
+  if G.GAME then G.GAME.facing_blind = nil end
 
   -- Self-healing: if in BLIND_SELECT without blind_select UIBox, force-create it
   if not (G.blind_select and not G.blind_select.REMOVED) then
@@ -1009,11 +1007,11 @@ local function decidex_execute_inner(action, args)
     if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then
       return false, "not in BLIND_SELECT"
     end
-    if G.GAME and G.GAME.facing_blind then
+    local now = (love.timer and love.timer.getTime()) or os.clock()
+    if _G._last_select_blind_time and (now - _G._last_select_blind_time < 2.0) and not (G.blind_select and not G.blind_select.REMOVED) then
       return true, "blind already selected (animating)"
     end
-    local now = (love.timer and love.timer.getTime()) or os.clock()
-    if _G._last_select_blind_time and (now - _G._last_select_blind_time < 0.8) then
+    if _G._last_select_blind_time and (now - _G._last_select_blind_time < 0.6) then
       return true, "select_blind debounced"
     end
     local btn, on_deck = find_select_blind_button()
@@ -1021,6 +1019,7 @@ local function decidex_execute_inner(action, args)
       return false, "blind_select UI not ready"
     end
     _G._last_select_blind_time = now
+    if G.GAME then G.GAME.facing_blind = nil end
 
     -- Ensure blind_prompt_box and blind_select are fully crash-proof for G.E_MANAGER animations
     if G.blind_prompt_box then
