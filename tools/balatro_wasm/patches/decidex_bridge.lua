@@ -17,6 +17,39 @@ if love and love.window then
   end
 end
 
+-- Bulletproof EventManager crash guard:
+-- Prevents any buggy animation event (e.g. nil screenwipe, deleted UI box, missing particles)
+-- from deadlocking G.E_MANAGER.queues.base and halting game progression.
+local function install_emanager_crash_guard()
+  if Event and not _G._decidex_event_handle_guarded then
+    _G._decidex_event_handle_guarded = true
+    local orig_event_handle = Event.handle
+    Event.handle = function(self, results)
+      local orig_func = self.func
+      if orig_func and not self._guarded_func then
+        self._guarded_func = true
+        self.func = function(...)
+          local ok, ret = pcall(orig_func, ...)
+          if not ok then
+            print("[DecideX Event Guard] Dropping crashed event: " .. tostring(ret))
+            return true
+          end
+          return ret
+        end
+      end
+      local ok, err = pcall(function() orig_event_handle(self, results) end)
+      if not ok then
+        print("[DecideX Event Guard] Event.handle error caught: " .. tostring(err))
+        results.completed = true
+        results.time_done = true
+        self.complete = true
+      end
+    end
+    print("[DecideX Event Guard] Event.handle crash guard installed")
+  end
+end
+pcall(install_emanager_crash_guard)
+
 local SUIT_MAP = { Spades = "S", Hearts = "H", Diamonds = "D", Clubs = "C" }
 local RANK_MAP = {
   [11] = "J", [12] = "Q", [13] = "K", [14] = "A",
@@ -363,7 +396,18 @@ end
 local function find_select_blind_button()
   if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then return nil end
   if G.GAME and G.GAME.facing_blind then return nil end
-  if not (G.blind_select and not G.blind_select.REMOVED) then return nil end
+
+  -- Self-healing: if in BLIND_SELECT without blind_select UIBox, force-create it
+  if not (G.blind_select and not G.blind_select.REMOVED) then
+    pcall(function()
+      if create_UIBox_blind_select then
+        G.blind_select = UIBox{
+          definition = create_UIBox_blind_select(),
+          config = {align="bmi", offset = {x=0,y=G.ROOM.T.y + 29},major = G.hand, bond = 'Weak'}
+        }
+      end
+    end)
+  end
 
   local on_deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or "Small"
   local opt = G.blind_select_opts and G.blind_select_opts[string.lower(on_deck)]
@@ -1424,6 +1468,10 @@ local function decidex_step(dt)
     end
     UIBox.get_UIE_by_ID = safe_get_uie
     print("[DecideX Web] UIBox:get_UIE_by_ID cycle/depth guard installed")
+  end
+
+  if not _G._decidex_event_handle_guarded and Event then
+    pcall(install_emanager_crash_guard)
   end
 
   if not _G._decidex_step_logged then

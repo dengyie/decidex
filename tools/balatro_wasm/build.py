@@ -368,6 +368,143 @@ def patch_button_callbacks(content: str) -> str:
         "G.SETTINGS.WINDOW.screenmode = (G.SETTINGS.QUEUED_CHANGE and G.SETTINGS.QUEUED_CHANGE.screenmode) or G.SETTINGS.WINDOW.screenmode or 'Windowed'",
         "G.SETTINGS.WINDOW.screenmode = 'Windowed'"
     )
+
+    # Bulletproof G.FUNCS.wipe_off against nil G.screenwipe crashes
+    old_wipe_off_pattern = (
+        "G.FUNCS.wipe_off = function()\n"
+        "  G.E_MANAGER:add_event(Event({\n"
+        "    no_delete = true,\n"
+        "    func = function()\n"
+        "      delay(0.3)\n"
+        "      G.screenwipe.children.particles.max = 0"
+    )
+    new_wipe_off = (
+        "G.FUNCS.wipe_off = function()\n"
+        "  G.E_MANAGER:add_event(Event({\n"
+        "    no_delete = true,\n"
+        "    func = function()\n"
+        "      delay(0.3)\n"
+        "      if G.screenwipe and G.screenwipe.children and G.screenwipe.children.particles then\n"
+        "        G.screenwipe.children.particles.max = 0\n"
+        "      end\n"
+        "      if G.screenwipe and G.screenwipe.colours and G.screenwipe.colours.black then\n"
+        "        G.E_MANAGER:add_event(Event({\n"
+        "            trigger = 'ease',\n"
+        "            no_delete = true,\n"
+        "            blockable = false,\n"
+        "            blocking = false,\n"
+        "            timer = 'REAL',\n"
+        "            ref_table = G.screenwipe.colours.black,\n"
+        "            ref_value = 4,\n"
+        "            ease_to = 0,\n"
+        "            delay =  0.3,\n"
+        "            func = (function(t) return t end)\n"
+        "        }))\n"
+        "      end\n"
+        "      if G.screenwipe and G.screenwipe.colours and G.screenwipe.colours.white then\n"
+        "        G.E_MANAGER:add_event(Event({\n"
+        "          trigger = 'ease',\n"
+        "          no_delete = true,\n"
+        "          blockable = false,\n"
+        "          blocking = false,\n"
+        "          timer = 'REAL',\n"
+        "          ref_table = G.screenwipe.colours.white,\n"
+        "          ref_value = 4,\n"
+        "          ease_to = 0,\n"
+        "          delay =  0.3,\n"
+        "          func = (function(t) return t end)\n"
+        "        }))\n"
+        "      end\n"
+        "      return true\n"
+        "    end\n"
+        "  }))\n"
+        "  G.E_MANAGER:add_event(Event({\n"
+        "    trigger = 'after',\n"
+        "    delay = 0.55,\n"
+        "    no_delete = true,\n"
+        "    blocking = false,\n"
+        "    timer = 'REAL',\n"
+        "    func = function()\n"
+        "      if G.screenwipecard then G.screenwipecard:start_dissolve({G.C.BLACK, G.C.ORANGE,G.C.GOLD, G.C.RED}) end\n"
+        "      if G.screenwipe and G.screenwipe.get_UIE_by_ID and G.screenwipe:get_UIE_by_ID('text') then\n"
+        "        local txt = G.screenwipe:get_UIE_by_ID('text')\n"
+        "        if txt and txt.children then\n"
+        "          for k, v in ipairs(txt.children) do\n"
+        "            if v and v.children and v.children[1] and v.children[1].config and v.children[1].config.object then\n"
+        "              v.children[1].config.object:pop_out(4)\n"
+        "            end\n"
+        "          end\n"
+        "        end\n"
+        "      end\n"
+        "      return true\n"
+        "    end\n"
+        "  }))\n"
+        "  G.E_MANAGER:add_event(Event({\n"
+        "    trigger = 'after',\n"
+        "    delay = 1.1,\n"
+        "    no_delete = true,\n"
+        "    blocking = false,\n"
+        "    timer = 'REAL',\n"
+        "    func = function()\n"
+        "      if G.screenwipe then\n"
+        "        if G.screenwipe.children and G.screenwipe.children.particles then\n"
+        "          pcall(function() G.screenwipe.children.particles:remove() end)\n"
+        "          G.screenwipe.children.particles = nil\n"
+        "        end\n"
+        "        pcall(function() G.screenwipe:remove() end)\n"
+        "        G.screenwipe = nil\n"
+        "      end\n"
+        "      G.screenwipecard = nil\n"
+        "      return true\n"
+        "    end\n"
+        "  }))\n"
+        "  G.E_MANAGER:add_event(Event({\n"
+        "    trigger = 'after',\n"
+        "    delay = 1.2,\n"
+        "    no_delete = true,\n"
+        "    blocking = true,\n"
+        "    timer = 'REAL',\n"
+        "    func = function()\n"
+        "      return true\n"
+        "    end\n"
+        "  }))\n"
+        "end\n"
+    )
+    if old_wipe_off_pattern in content:
+        # Replace the whole wipe_off block safely
+        start_idx = content.find(old_wipe_off_pattern)
+        end_idx = content.find("end\n", start_idx + 400) + 4
+        content = content[:start_idx] + new_wipe_off + content[end_idx:]
+
+    return content
+
+
+def patch_event(content: str) -> str:
+    """
+    Wrap Event:handle and EventManager:update so any crashing event
+    is caught safely via pcall and completed/dropped instead of deadlocking G.E_MANAGER.
+    """
+    old_handle = (
+        "function Event:handle(_results)\n"
+        "    _results.blocking, _results.completed = self.blocking, self.complete"
+    )
+    new_handle = (
+        "function Event:handle(_results)\n"
+        "    local orig_func = self.func\n"
+        "    if orig_func and not self._guarded_func then\n"
+        "        self._guarded_func = true\n"
+        "        self.func = function(...)\n"
+        "            local ok, ret = pcall(orig_func, ...)\n"
+        "            if not ok then\n"
+        "                print('[BALATRO EVENT CRASH TRAPPED]: ' .. tostring(ret))\n"
+        "                return true\n"
+        "            end\n"
+        "            return ret\n"
+        "        end\n"
+        "    end\n"
+        "    _results.blocking, _results.completed = self.blocking, self.complete"
+    )
+    content = content.replace(old_handle, new_handle)
     return content
 
 
@@ -454,6 +591,11 @@ def build_balatro_love(
                 elif item.filename == "functions/button_callbacks.lua":
                     text = extracted_data.decode("utf-8", errors="ignore")
                     patched = patch_button_callbacks(text)
+                    extracted_data = patched.encode("utf-8")
+                    stats["files_patched"] += 1
+                elif item.filename == "engine/event.lua":
+                    text = extracted_data.decode("utf-8", errors="ignore")
+                    patched = patch_event(text)
                     extracted_data = patched.encode("utf-8")
                     stats["files_patched"] += 1
 
