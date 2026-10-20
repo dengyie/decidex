@@ -452,14 +452,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v68 / decidex-balatro-core-v68
-  const EXPECTED_LOVE_SIZE = 56340291;
+  const EXPECTED_LOVE_SIZE = 56340648;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v70";
+  const ASSET_VERSION = "v71";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_" + ASSET_VERSION;
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=70";
-  const ASSET_WASM_URL = "love.wasm.bin?v=70";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=71";
+  const ASSET_WASM_URL = "love.wasm.bin?v=71";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3453,8 +3453,12 @@ end
             executedAction = true;
             unlockCooldownMs = 600;
           } else if (state.can_select_blind) {
-            // Debounce repeated blind selection in the same transition window
-            if (now - (this.lastBlindSelectTime || 0) > 800) {
+            // Suppress re-dispatch if select_blind or skip_blind is already actively in-flight
+            if (this._actionInFlight === "select_blind" || this._actionInFlight === "skip_blind") {
+              this.updateStatus("等待盲注转场动画...", true);
+              executedAction = false;
+              unlockCooldownMs = 300;
+            } else if (now - (this.lastBlindSelectTime || 0) > 1200) {
               this.lastBlindSelectTime = now;
               this._lastProgressTimestamp = now;
               const choice = evaluateBlindChoice(state);
@@ -3470,13 +3474,13 @@ end
                 window.decidexSelectBlind();
               }
               executedAction = true;
-              unlockCooldownMs = 900;
+              unlockCooldownMs = 1500;
             } else {
               this.updateStatus("盲注确认中...", true);
               executedAction = false;
               unlockCooldownMs = 200;
             }
-          } else if (timeInBlindSelect > 3000) {
+          } else if (timeInBlindSelect > 3500 && !this._actionInFlight) {
             // Watchdog fallback after 3s (never stall for 18s!)
             if (now - (this.lastBlindSelectTime || 0) > 1200) {
               this.lastBlindSelectTime = now;
@@ -3740,6 +3744,7 @@ end
         } else if (["TAROT_PACK", "PLANET_PACK", "SPECTRAL_PACK", "STANDARD_PACK", "BUFFOON_PACK"].includes(sname)) {
           const packCards = state.pack_cards || [];
           if (packCards.length > 0) {
+            this._packEnterTime = null;
             let bestCard = null;
             if (sname === "PLANET_PACK") {
               const priorityPlanets = ["Jupiter", "Earth", "Saturn", "Mercury", "Uranus", "Mars", "Venus", "Pluto", "Planet X", "Ceres", "Eris"];
@@ -3874,11 +3879,23 @@ end
               unlockCooldownMs = 200;
             }
           } else {
-            this.updateStatus("跳过补充包...", true);
-            console.log("[AutoPilot] Skipping empty booster pack");
-            window.executeSkipBooster();
-            executedAction = true;
-            unlockCooldownMs = 400;
+            if (!this._packEnterTime) this._packEnterTime = now;
+            const timeInPack = now - this._packEnterTime;
+            if (timeInPack < 3500) {
+              this.updateStatus("等待补充包卡牌生成...", true);
+              executedAction = false;
+              unlockCooldownMs = 350;
+            } else if (state.can_skip_booster) {
+              this.updateStatus("补充包超时无卡，跳过...", true);
+              console.log("[AutoPilot] Skipping empty booster pack after timeout");
+              window.executeSkipBooster();
+              executedAction = true;
+              unlockCooldownMs = 600;
+            } else {
+              this.updateStatus("等待补充包卡牌...", false);
+              executedAction = false;
+              unlockCooldownMs = 250;
+            }
           }
         } else if (sname === "GAME_WON" || state.won) {
           this.updateStatus("🎉 达成通关胜利！5秒后自动继续新对局...", true);

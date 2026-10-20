@@ -206,6 +206,19 @@ local function shop_card_json(c, idx)
     end
   end
 
+  local r = (c.base and c.base.value) or (c.ability and c.ability.value) or nil
+  local s = (c.base and c.base.suit) or (c.ability and c.ability.suit) or nil
+  local enh = nil
+  if c.ability and c.ability.name and ENHANCEMENT_MAP[c.ability.name] then
+    enh = ENHANCEMENT_MAP[c.ability.name]
+  elseif c.config and c.config.center and ENHANCEMENT_MAP[c.config.center.key] then
+    enh = ENHANCEMENT_MAP[c.config.center.key]
+  end
+  local seal = nil
+  if c.seal then
+    seal = SEAL_MAP[c.seal] or tostring(c.seal):lower()
+  end
+
   local parts = {
     '"name":' .. jstr(name),
     '"type":' .. jstr(set:lower()),
@@ -215,6 +228,10 @@ local function shop_card_json(c, idx)
     '"xmult":' .. jstr(x_mult),
     '"chips":' .. jstr(chips),
     '"edition":' .. jstr(edition),
+    '"rank":' .. jstr(r),
+    '"suit":' .. jstr(s),
+    '"enhancement":' .. jstr(enh),
+    '"seal":' .. jstr(seal),
     '"extra":' .. serialize_extra(c.ability and c.ability.extra),
     '"index":' .. jstr(idx)
   }
@@ -227,7 +244,22 @@ local function consumable_json(c, idx)
   local can_use = true
   if c.can_use_consumeable then
     local ok, res = pcall(function() return c:can_use_consumeable() end)
-    can_use = not (ok and res == false)
+    if ok and res == false then
+      -- If it returned false solely because hand cards are not currently highlighted,
+      -- check if it is a targeted card that can be used once hand cards are highlighted
+      if c.ability and c.ability.consumeable and c.ability.consumeable.max_highlighted then
+        local min_needed = c.ability.consumeable.min_highlighted or 1
+        local hand_count = (G.hand and G.hand.cards and #G.hand.cards) or 0
+        local valid_state = (G.STATE == G.STATES.SELECTING_HAND or G.STATE == G.STATES.TAROT_PACK or G.STATE == G.STATES.SPECTRAL_PACK or G.STATE == G.STATES.PLANET_PACK)
+        if valid_state and hand_count >= min_needed then
+          can_use = true
+        else
+          can_use = false
+        end
+      else
+        can_use = false
+      end
+    end
   end
   local parts = {
     '"name":' .. jstr(name),
@@ -389,22 +421,25 @@ local function find_select_blind_button()
   if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then return nil end
 
   local now = (love.timer and love.timer.getTime()) or os.clock()
-  if _G._last_select_blind_time and (now - _G._last_select_blind_time < 2.0) and not (G.blind_select and not G.blind_select.REMOVED) then
+
+  -- If select_blind is actively in-flight, suppress button detection to prevent double-firing
+  if _G._select_blind_in_flight then
+    if _G._last_select_blind_time and (now - _G._last_select_blind_time < 3.5) then
+      return nil
+    else
+      _G._select_blind_in_flight = nil
+    end
+  end
+
+  if _G._last_select_blind_time and (now - _G._last_select_blind_time < 1.5) and not (G.blind_select and not G.blind_select.REMOVED) then
     return nil -- Still animating previous select
   end
 
   if G.GAME then G.GAME.facing_blind = nil end
 
-  -- Self-healing: if in BLIND_SELECT without blind_select UIBox, force-create it
+  -- Pure read-only check: never recreate UIBox here as that interrupts Balatro's native state machine!
   if not (G.blind_select and not G.blind_select.REMOVED) then
-    pcall(function()
-      if create_UIBox_blind_select then
-        G.blind_select = UIBox{
-          definition = create_UIBox_blind_select(),
-          config = {align="bmi", offset = {x=0,y=G.ROOM.T.y + 29},major = G.hand, bond = 'Weak'}
-        }
-      end
-    end)
+    return nil
   end
 
   local on_deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or "Small"
@@ -699,6 +734,10 @@ local function build_state_json(actual)
     _G._shop_enter_time = nil
   end
   parts[#parts + 1] = '"can_toggle_shop":' .. (can_toggle_shop and "true" or "false")
+
+  if not (G.STATE and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then
+    _G._select_blind_in_flight = nil
+  end
 
   local can_select_blind = not not (find_select_blind_button())
   parts[#parts + 1] = '"can_select_blind":' .. (can_select_blind and "true" or "false")
@@ -1008,10 +1047,10 @@ local function decidex_execute_inner(action, args)
       return false, "not in BLIND_SELECT"
     end
     local now = (love.timer and love.timer.getTime()) or os.clock()
-    if _G._last_select_blind_time and (now - _G._last_select_blind_time < 2.0) and not (G.blind_select and not G.blind_select.REMOVED) then
+    if _G._select_blind_in_flight and _G._last_select_blind_time and (now - _G._last_select_blind_time < 3.5) then
       return true, "blind already selected (animating)"
     end
-    if _G._last_select_blind_time and (now - _G._last_select_blind_time < 0.6) then
+    if _G._last_select_blind_time and (now - _G._last_select_blind_time < 1.0) then
       return true, "select_blind debounced"
     end
     local btn, on_deck = find_select_blind_button()
@@ -1019,6 +1058,7 @@ local function decidex_execute_inner(action, args)
       return false, "blind_select UI not ready"
     end
     _G._last_select_blind_time = now
+    _G._select_blind_in_flight = true
     if G.GAME then G.GAME.facing_blind = nil end
 
     -- Ensure blind_prompt_box and blind_select are fully crash-proof for G.E_MANAGER animations
@@ -1106,10 +1146,10 @@ local function decidex_execute_inner(action, args)
       if c.cost and c.cost > 0 and c.cost > available_money then
         return false, "cannot afford booster pack: cost=" .. tostring(c.cost) .. ", available=" .. tostring(available_money)
       end
-      local btn = (c.children and c.children.buy_button and c.children.buy_button.definition) or { config = { ref_table = c } }
+      local btn = { config = { ref_table = c, button = 'use_card' } }
       if G.FUNCS and G.FUNCS.use_card then
         local ok, err = pcall(G.FUNCS.use_card, btn)
-        if ok then return true, "opened booster pack" end
+        if ok then return true, "opened booster pack via use_card" end
       end
       if c.open then
         local ok, err = pcall(function() c:open() end)
@@ -1124,10 +1164,10 @@ local function decidex_execute_inner(action, args)
       if c.cost and c.cost > 0 and c.cost > available_money then
         return false, "cannot afford voucher: cost=" .. tostring(c.cost) .. ", available=" .. tostring(available_money)
       end
-      local btn = (c.children and c.children.buy_button and c.children.buy_button.definition) or { config = { ref_table = c } }
+      local btn = { config = { ref_table = c, button = 'use_card' } }
       if G.FUNCS and G.FUNCS.use_card then
         local ok, err = pcall(G.FUNCS.use_card, btn)
-        if ok then return true, "redeemed voucher" end
+        if ok then return true, "redeemed voucher via use_card" end
       end
       if c.redeem then
         local ok, err = pcall(function() c:redeem() end)
@@ -1138,7 +1178,7 @@ local function decidex_execute_inner(action, args)
 
     -- Standard card / joker / consumable purchase
     if G.FUNCS and G.FUNCS.buy_from_shop then
-      local btn = (c.children and c.children.buy_button and c.children.buy_button.definition) or { config = { ref_table = c } }
+      local btn = { config = { ref_table = c, id = 'buy_button' } }
       local ok, err = pcall(G.FUNCS.buy_from_shop, btn)
       if ok then return true, "bought card" end
       return false, tostring(err or "buy_from_shop failed")
@@ -1245,9 +1285,13 @@ local function decidex_execute_inner(action, args)
     if G.FUNCS and G.FUNCS.skip_booster then
       local btn = find_uie_by_id('skip_booster') or { config = { button = 'skip_booster' } }
       local ok, err = pcall(G.FUNCS.skip_booster, btn)
-      return ok, tostring(err or "skipped booster")
+      if ok then return true, "skipped booster via G.FUNCS.skip_booster" end
     end
-    return false, "no skip_booster func"
+    if G.FUNCS and G.FUNCS.end_consumeable then
+      local ok, err = pcall(G.FUNCS.end_consumeable)
+      if ok then return true, "skipped booster via G.FUNCS.end_consumeable" end
+    end
+    return false, "no skip_booster or end_consumeable func"
   end
 
   local function prepare_and_highlight_targets(c, target_indices)
@@ -1316,8 +1360,9 @@ local function decidex_execute_inner(action, args)
     end
 
     if G.FUNCS and G.FUNCS.use_card then
-      local ok, err = pcall(G.FUNCS.use_card, {config = {ref_table = c}})
-      return ok, tostring(err or "selected pack card")
+      local ok, err = pcall(G.FUNCS.use_card, {config = {ref_table = c, button = 'use_card'}})
+      if ok then return true, "selected pack card: " .. tostring(c.ability and c.ability.name or idx) end
+      return false, "use_card failed: " .. tostring(err)
     end
     return false, "no use_card func for pack card"
   end
@@ -1340,10 +1385,10 @@ local function decidex_execute_inner(action, args)
       if args.target_indices then
         prepare_and_highlight_targets(c, args.target_indices)
       end
-      local ok, err = pcall(G.FUNCS.use_card, {config = {ref_table = c}})
+      local ok, err = pcall(G.FUNCS.use_card, {config = {ref_table = c, button = 'use_card'}})
       return ok, tostring(err or "used card")
     elseif action == "sell_card" and G.FUNCS and G.FUNCS.sell_card then
-      local ok, err = pcall(G.FUNCS.sell_card, {config = {ref_table = c}})
+      local ok, err = pcall(G.FUNCS.sell_card, {config = {ref_table = c, button = 'sell_card'}})
       return ok, tostring(err or "sold card")
     end
     return false, "no use/sell card func"
