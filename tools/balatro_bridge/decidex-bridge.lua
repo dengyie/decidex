@@ -1054,6 +1054,17 @@ local function decidex_execute_inner(action, args)
       return true, "select_blind debounced"
     end
     local btn, on_deck = find_select_blind_button()
+    if not btn and not (G.blind_select and not G.blind_select.REMOVED) then
+      if create_UIBox_blind_select and UIBox then
+        pcall(function()
+          G.blind_select = UIBox{
+            definition = create_UIBox_blind_select(),
+            config = {align="bmi", offset = {x=0,y=G.ROOM.T.y + 29},major = G.hand, bond = 'Weak'}
+          }
+        end)
+        btn, on_deck = find_select_blind_button()
+      end
+    end
     if not btn then
       return false, "blind_select UI not ready"
     end

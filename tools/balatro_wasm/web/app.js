@@ -452,14 +452,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v68 / decidex-balatro-core-v68
-  const EXPECTED_LOVE_SIZE = 56340648;
+  const EXPECTED_LOVE_SIZE = 56340765;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v71";
+  const ASSET_VERSION = "v72";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
-  const IDB_DB_NAME = "decidex_balatro_store_" + ASSET_VERSION;
+  const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=71";
-  const ASSET_WASM_URL = "love.wasm.bin?v=71";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=72";
+  const ASSET_WASM_URL = "love.wasm.bin?v=72";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3320,6 +3320,19 @@ end
         return;
       }
 
+      const errStr = String(error || "");
+      const isTransient = /not ready|animating|debounced|in progress|busy|locked|waiting/i.test(errStr);
+      if (isTransient) {
+        console.log(`[AutoPilot] Dispatch transient wait for ${action}: ${errStr}`);
+        this._actionInFlight = null;
+        this._busyTimestamp = null;
+        this.pendingState = null;
+        this.busy = false;
+        this.updateStatus("界面过渡中，等待就绪...", true);
+        this.scheduleNextAction(400);
+        return;
+      }
+
       this._actionFailureStreak = (this._actionFailureStreak || 0) + 1;
       this._actionInFlight = null;
       this._busyTimestamp = null;
@@ -3328,7 +3341,7 @@ end
       this._lastProgressTimestamp = Date.now();
       console.warn(`[AutoPilot] Dispatch failed for ${action}${sequence ? ` #${sequence}` : ""}; cleared action lock`, error);
 
-      if (this._actionFailureStreak >= 6) {
+      if (this._actionFailureStreak >= 12) {
         this.updateStatus("动作连续失败，自动托管已暂停", false);
         this.toggle(false);
         return;
@@ -3480,9 +3493,9 @@ end
               executedAction = false;
               unlockCooldownMs = 200;
             }
-          } else if (timeInBlindSelect > 3500 && !this._actionInFlight) {
-            // Watchdog fallback after 3s (never stall for 18s!)
-            if (now - (this.lastBlindSelectTime || 0) > 1200) {
+          } else if (timeInBlindSelect > 9000 && !this._actionInFlight) {
+            // Watchdog fallback after 9s of being stuck in BLIND_SELECT without can_select_blind
+            if (now - (this.lastBlindSelectTime || 0) > 1500) {
               this.lastBlindSelectTime = now;
               this._lastProgressTimestamp = now;
               this._actionInFlight = "select_blind";
@@ -3490,7 +3503,7 @@ end
               console.log(`[AutoPilot] In BLIND_SELECT, watchdog fallback selecting blind (time=${timeInBlindSelect}ms)`);
               window.decidexSelectBlind();
               executedAction = true;
-              unlockCooldownMs = 1000;
+              unlockCooldownMs = 1200;
             } else {
               this.updateStatus("盲注确认中...", true);
               executedAction = false;
@@ -3499,7 +3512,7 @@ end
           } else {
             this.updateStatus("等待盲注界面就绪...", false);
             executedAction = false;
-            unlockCooldownMs = 150;
+            unlockCooldownMs = 250;
           }
         } else if (sname === "SELECTING_HAND") {
           this.lastToggleShopTime = 0;
