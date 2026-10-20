@@ -1010,11 +1010,11 @@ local function decidex_execute_inner(action, args)
       return false, "not in BLIND_SELECT"
     end
     if G.GAME and G.GAME.facing_blind then
-      return false, "blind already selected (animating)"
+      return true, "blind already selected (animating)"
     end
     local now = (love.timer and love.timer.getTime()) or os.clock()
     if _G._last_select_blind_time and (now - _G._last_select_blind_time < 0.8) then
-      return false, "select_blind debounced"
+      return true, "select_blind debounced"
     end
     local btn, on_deck = find_select_blind_button()
     if not btn then
@@ -1166,28 +1166,35 @@ local function decidex_execute_inner(action, args)
       end
       return false, "not in SHOP"
     end
-    if not (G and G.shop and not G.shop.REMOVED) then
+    local now = (love.timer and love.timer.getTime()) or os.clock()
+    _G._shop_toggle_count = (_G._shop_toggle_count or 0) + 1
+
+    -- Self-healing: if toggle_shop is called repeatedly (>=3 times) or shop UI is already removed or stuck,
+    -- force transition to BLIND_SELECT immediately!
+    if not (G and G.shop and not G.shop.REMOVED) or _G._shop_toggle_count >= 3 then
+      pcall(function()
+        if G.shop then G.shop:remove(); G.shop = nil end
+        if G.SHOP_SIGN then G.SHOP_SIGN:remove(); G.SHOP_SIGN = nil end
+      end)
       G.STATE = G.STATES.BLIND_SELECT
       G.STATE_COMPLETE = false
+      G.toggling_shop = nil
       if G.CONTROLLER and G.CONTROLLER.locks then
         G.CONTROLLER.locks.toggle_shop = nil
       end
-      return true, "shop already removed, transitioned to BLIND_SELECT"
-    end
-    local now = (love.timer and love.timer.getTime()) or os.clock()
-    if G.CONTROLLER and G.CONTROLLER.locks and G.CONTROLLER.locks.toggle_shop then
-      if not _G._toggle_shop_lock_time then _G._toggle_shop_lock_time = now end
-      if (now - _G._toggle_shop_lock_time > 2.0) then
-        G.CONTROLLER.locks.toggle_shop = nil
-        _G._toggle_shop_lock_time = nil
-      else
-        return false, "toggle_shop locked"
-      end
-    else
+      _G._shop_toggle_count = 0
       _G._toggle_shop_lock_time = nil
+      return true, "force transitioned from SHOP to BLIND_SELECT"
     end
+
+    -- Always clear stale locks and toggling flags before calling toggle_shop
+    G.toggling_shop = nil
+    if G.CONTROLLER and G.CONTROLLER.locks then
+      G.CONTROLLER.locks.toggle_shop = nil
+    end
+
     if _G._last_toggle_shop_time and (now - _G._last_toggle_shop_time < 0.6) then
-      return false, "toggle_shop debounced"
+      return true, "toggle_shop debounced"
     end
     local btn = find_next_round_button() or { config = { button = 'toggle_shop' } }
     if G.FUNCS and G.FUNCS.toggle_shop then
@@ -1382,7 +1389,7 @@ local function decidex_execute_inner(action, args)
     end
     local now = (love.timer and love.timer.getTime()) or os.clock()
     if _G._last_start_run_time and (now - _G._last_start_run_time < 3.0) then
-      return false, "start_run already in progress"
+      return true, "start_run already in progress"
     end
     _G._last_start_run_time = now
 

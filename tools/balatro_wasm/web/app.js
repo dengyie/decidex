@@ -452,14 +452,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v68 / decidex-balatro-core-v68
-  const EXPECTED_LOVE_SIZE = 56340008;
+  const EXPECTED_LOVE_SIZE = 56340274;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v68";
+  const ASSET_VERSION = "v69";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_" + ASSET_VERSION;
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=68";
-  const ASSET_WASM_URL = "love.wasm.bin?v=68";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=69";
+  const ASSET_WASM_URL = "love.wasm.bin?v=69";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3293,6 +3293,22 @@ end
       if (!this.enabled) return;
       const current = this._actionInFlight;
       if (current && current !== action) return;
+
+      const errMsg = error ? String(error.message || error) : "";
+      if (
+        errMsg.includes("already selected") ||
+        errMsg.includes("already in progress") ||
+        errMsg.includes("debounced") ||
+        errMsg.includes("animating") ||
+        errMsg.includes("already in run")
+      ) {
+        console.log(`[AutoPilot] Benign notice for ${action}: ${errMsg}; not counting as failure streak.`);
+        this._actionInFlight = null;
+        this._busyTimestamp = null;
+        this.pendingState = null;
+        this.busy = false;
+        return;
+      }
 
       // When tab is hidden/backgrounded, Chrome pauses RAF/game loop; do not count this as an engine failure!
       if (typeof document !== "undefined" && document.hidden) {
