@@ -804,8 +804,8 @@ local function check_and_emit_state()
     _G._hand_play_saw_hand_played = true
     _G._draw_to_hand_enter_time = nil
     if not _G._hand_played_enter_time then _G._hand_played_enter_time = now end
-    if now - _G._hand_played_enter_time > 5.0 then
-      print("[DecideX Bridge] Watchdog: advancing stuck HAND_PLAYED")
+    if now - _G._hand_played_enter_time > 10.0 then
+      print("[DecideX Bridge] Watchdog: advancing stuck HAND_PLAYED after 10s")
       if G.FUNCS and G.FUNCS.draw_from_play_to_discard then
         pcall(G.FUNCS.draw_from_play_to_discard)
       end
@@ -831,12 +831,13 @@ local function check_and_emit_state()
   else
     _G._hand_played_enter_time = nil
   end
+
   if G.STATE == G.STATES.DRAW_TO_HAND then
     _G._hand_discard_saw_draw = true
     if not _G._draw_to_hand_enter_time then _G._draw_to_hand_enter_time = now end
-    if now - _G._draw_to_hand_enter_time > 4.5 then
+    if now - _G._draw_to_hand_enter_time > 10.0 then
       if G.hand and G.hand.cards and #G.hand.cards > 0 then
-        print("[DecideX Bridge] Watchdog: advancing stuck DRAW_TO_HAND to SELECTING_HAND")
+        print("[DecideX Bridge] Watchdog: advancing stuck DRAW_TO_HAND to SELECTING_HAND after 10s")
         G.STATE = G.STATES.SELECTING_HAND
         G.STATE_COMPLETE = false
         if G.GAME and G.GAME.blind and G.GAME.blind.drawn_to_hand then
@@ -846,34 +847,36 @@ local function check_and_emit_state()
       elseif G.deck and G.deck.cards and #G.deck.cards > 0 then
         print("[DecideX Bridge] Watchdog: re-triggering draw_from_deck_to_hand in DRAW_TO_HAND")
         pcall(function() G.FUNCS.draw_from_deck_to_hand(nil) end)
-        _G._draw_to_hand_enter_time = now - 2.0
+        _G._draw_to_hand_enter_time = now - 5.0
       end
     end
-  elseif G.STATE ~= G.STATES.SELECTING_HAND then
+  else
     _G._draw_to_hand_enter_time = nil
-    _G._hand_play_in_flight = nil
-    _G._hand_play_saw_hand_played = nil
-    _G._hand_discard_in_flight = nil
-    _G._hand_discard_saw_draw = nil
-  elseif _G._hand_play_saw_hand_played and G.STATE == G.STATES.SELECTING_HAND then
-    _G._draw_to_hand_enter_time = nil
+  end
+
+  -- Lifecycle reset rules: Only release in-flight combat locks when safely back in SELECTING_HAND
+  -- and play area is empty, or when exiting combat into a non-combat state.
+  if G.STATE == G.STATES.SELECTING_HAND then
     local play_has_cards = (G.play and G.play.cards and #G.play.cards > 0)
     if not play_has_cards then
       _G._hand_play_in_flight = nil
       _G._hand_play_saw_hand_played = nil
+      _G._hand_discard_in_flight = nil
+      _G._hand_discard_saw_draw = nil
     end
-  elseif _G._hand_discard_saw_draw and G.STATE == G.STATES.SELECTING_HAND then
-    _G._draw_to_hand_enter_time = nil
+  elseif G.STATE == G.STATES.NEW_ROUND or G.STATE == G.STATES.ROUND_EVAL or G.STATE == G.STATES.SHOP or G.STATE == G.STATES.BLIND_SELECT or G.STATE == G.STATES.GAME_OVER or G.STATE == G.STATES.GAME_WON then
+    _G._hand_play_in_flight = nil
+    _G._hand_play_saw_hand_played = nil
     _G._hand_discard_in_flight = nil
     _G._hand_discard_saw_draw = nil
   end
 
-  -- Watchdog fallback to prevent any permanent lock
-  if _G._hand_play_in_flight and _G._hand_play_start_time and (now - _G._hand_play_start_time > 8.0) then
+  -- Watchdog fallback to prevent any permanent lock (generous windows for animations)
+  if _G._hand_play_in_flight and _G._hand_play_start_time and (now - _G._hand_play_start_time > 12.0) then
     _G._hand_play_in_flight = nil
     _G._hand_play_saw_hand_played = nil
   end
-  if _G._hand_discard_in_flight and _G._hand_discard_start_time and (now - _G._hand_discard_start_time > 5.0) then
+  if _G._hand_discard_in_flight and _G._hand_discard_start_time and (now - _G._hand_discard_start_time > 8.0) then
     _G._hand_discard_in_flight = nil
     _G._hand_discard_saw_draw = nil
   end
@@ -1130,14 +1133,20 @@ local function decidex_execute_inner(action, args)
         for _, c in ipairs(G.hand.cards) do c.highlighted = false end
         G.hand.highlighted = {}
       end
+      local max_cards = #G.hand.cards
+      local valid_count = 0
       for _, idx in ipairs(args.indices) do
-        local c = G.hand.cards[idx]
-        if c then
-          if G.hand.add_to_highlighted then
-            G.hand:add_to_highlighted(c, true)
-          else
-            c.highlighted = true
-            table.insert(G.hand.highlighted, c)
+        local n_idx = tonumber(idx)
+        if n_idx and n_idx >= 1 and n_idx <= max_cards and valid_count < 5 then
+          local c = G.hand.cards[n_idx]
+          if c and not c.highlighted then
+            if G.hand.add_to_highlighted then
+              G.hand:add_to_highlighted(c, true)
+            else
+              c.highlighted = true
+              table.insert(G.hand.highlighted, c)
+            end
+            valid_count = valid_count + 1
           end
         end
       end

@@ -452,14 +452,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v68 / decidex-balatro-core-v68
-  const EXPECTED_LOVE_SIZE = 56341823;
+  const EXPECTED_LOVE_SIZE = 56342020;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v77";
+  const ASSET_VERSION = "v78";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=77";
-  const ASSET_WASM_URL = "love.wasm.bin?v=77";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=78";
+  const ASSET_WASM_URL = "love.wasm.bin?v=78";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3148,7 +3148,13 @@ end
   // Programmatic execution via serialized Emscripten virtual FS mailbox
   window.executePlayAction = function (cards) {
     if (!window.Module || !window.Module.FS) return unavailableAction("play");
-    const indices = (cards || []).map(c => c.index).filter(x => x !== undefined);
+    const st = currentGameState || window._lastDecidexState;
+    const maxHand = (st && Array.isArray(st.hand)) ? st.hand.length : 8;
+    const indices = (cards || [])
+      .map(c => Number(c && c.index !== undefined ? c.index : c))
+      .filter(x => Number.isInteger(x) && x >= 1 && x <= maxHand)
+      .slice(0, 5);
+    if (indices.length === 0) return unavailableAction("play");
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("play", {indices = {${indices.join(",")}}}) end`;
     console.log("[DecideX] Queued play action:", luaCode);
     return dispatchLuaAction(luaCode, "play");
@@ -3156,7 +3162,13 @@ end
 
   window.executeDiscardAction = function (cards) {
     if (!window.Module || !window.Module.FS) return unavailableAction("discard");
-    const indices = (cards || []).map(c => c.index).filter(x => x !== undefined);
+    const st = currentGameState || window._lastDecidexState;
+    const maxHand = (st && Array.isArray(st.hand)) ? st.hand.length : 8;
+    const indices = (cards || [])
+      .map(c => Number(c && c.index !== undefined ? c.index : c))
+      .filter(x => Number.isInteger(x) && x >= 1 && x <= maxHand)
+      .slice(0, 5);
+    if (indices.length === 0) return unavailableAction("discard");
     const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("discard", {indices = {${indices.join(",")}}}) end`;
     console.log("[DecideX] Dispatched discard action:", luaCode);
     return dispatchLuaAction(luaCode, "discard");
@@ -3342,23 +3354,28 @@ end
         if (!this.enabled) return;
         const now = Date.now();
 
-        // 1. Force-clear busy lock if held too long (max 4.5s for play, 3.0s for others)
-        const maxBusyTime = (this._actionInFlight === "play") ? 4500 : 3000;
+        // 1. Force-clear busy lock if held too long (max 8.0s for play, 5.0s for discard, 3.0s for others)
+        const maxBusyTime = (this._actionInFlight === "play") ? 8000 : ((this._actionInFlight === "discard") ? 5000 : 3000);
         if (this.busy && this._busyTimestamp && (now - this._busyTimestamp > maxBusyTime)) {
           console.warn(`[AutoPilot Watchdog] Busy lock held > ${maxBusyTime}ms for action ${this._actionInFlight}, auto-clearing busy lock`);
           this.busy = false;
-          if (this._actionInFlight !== "select_blind" && this._actionInFlight !== "skip_blind") {
+          if (this._actionInFlight !== "select_blind" && this._actionInFlight !== "skip_blind" && this._actionInFlight !== "play" && this._actionInFlight !== "discard") {
             this._actionInFlight = null;
           }
           this._busyTimestamp = null;
         }
 
-        // 2. Anti-hang: if stuck in an actionable state for > 3.8s without progress, force unlock
+        // 2. Anti-hang: if stuck in an actionable state for too long without progress, force unlock
         if (!this._lastProgressTimestamp) this._lastProgressTimestamp = now;
-        if (now - this._lastProgressTimestamp > 3800) {
+        const curState = currentGameState || window._lastDecidexState;
+        const curStateName = curState && curState.state_name;
+        // In animation states (HAND_PLAYED, DRAW_TO_HAND, NEW_ROUND), refresh progress timestamp so watchdog doesn't break in-flight combat locks!
+        if (["HAND_PLAYED", "DRAW_TO_HAND", "NEW_ROUND"].includes(curStateName)) {
+          this._lastProgressTimestamp = now;
+        }
+        const maxStuckTime = (this._actionInFlight === "play") ? 9000 : ((this._actionInFlight === "discard") ? 6000 : 3800);
+        if (now - this._lastProgressTimestamp > maxStuckTime) {
           if (this._actionInFlight) {
-            const curState = currentGameState || window._lastDecidexState;
-            const curStateName = curState && curState.state_name;
             if ((this._actionInFlight === "select_blind" || this._actionInFlight === "skip_blind") && curStateName === "BLIND_SELECT") {
               // Waiting for blind transition animation, keep in-flight lock active and refresh progress timestamp
               this._lastProgressTimestamp = now;
@@ -3449,9 +3466,6 @@ end
       const errMsg = error ? String(error.message || error) : "";
       if (
         errMsg.includes("already selected") ||
-        errMsg.includes("already in progress") ||
-        errMsg.includes("debounced") ||
-        errMsg.includes("animating") ||
         errMsg.includes("already in run")
       ) {
         console.log(`[AutoPilot] Benign notice for ${action}: ${errMsg}; not counting as failure streak.`);
@@ -3528,8 +3542,8 @@ end
           this._actionInFlight = null;
           this._playSawHandPlayed = false;
           this.busy = false;
-        } else if (now - (this._lastPlayActionTime || 0) > 8000) {
-          // Hard watchdog fallback
+        } else if (now - (this._lastPlayActionTime || 0) > 10000) {
+          // Hard watchdog fallback (10s)
           this._actionInFlight = null;
           this._playSawHandPlayed = false;
           this.busy = false;
@@ -3544,7 +3558,7 @@ end
           this._actionInFlight = null;
           this._discardSawDraw = false;
           this.busy = false;
-        } else if (now - (this._lastDiscardActionTime || 0) > 5000) {
+        } else if (now - (this._lastDiscardActionTime || 0) > 7000) {
           this._actionInFlight = null;
           this._discardSawDraw = false;
           this.busy = false;
@@ -3721,13 +3735,13 @@ end
             this.updateStatus("等待发牌...", false);
             executedAction = false;
             unlockCooldownMs = 200;
-          } else if (this._actionInFlight === "play" && (now - (this._lastPlayActionTime || 0) < 6000)) {
-            // A play was dispatched and is animating; wait up to 6.0s
+          } else if (this._actionInFlight === "play" && (now - (this._lastPlayActionTime || 0) < 8000)) {
+            // A play was dispatched and is animating; wait up to 8.0s
             this.updateStatus("出牌结算中...", true);
             executedAction = false;
             unlockCooldownMs = 400;
-          } else if (this._actionInFlight === "discard" && (now - (this._lastDiscardActionTime || 0) < 3000)) {
-            // A discard was dispatched and is drawing; wait up to 3.0s
+          } else if (this._actionInFlight === "discard" && (now - (this._lastDiscardActionTime || 0) < 5000)) {
+            // A discard was dispatched and is drawing; wait up to 5.0s
             this.updateStatus("弃牌处理中...", true);
             executedAction = false;
             unlockCooldownMs = 400;
@@ -4162,12 +4176,10 @@ end
           executedAction = true;
           unlockCooldownMs = 1000;
         } else if (sname === "HAND_PLAYED") {
-          this._actionInFlight = null;
           this.updateStatus("计分结算中...", true);
           executedAction = false;
           unlockCooldownMs = 400;
         } else if (sname === "DRAW_TO_HAND") {
-          this._actionInFlight = null;
           this.updateStatus("发牌动画中...", true);
           executedAction = false;
           unlockCooldownMs = 400;
