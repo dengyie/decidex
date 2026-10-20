@@ -1160,6 +1160,50 @@ local function decidex_execute_inner(action, args)
     return false, "no skip_booster func"
   end
 
+  local function prepare_and_highlight_targets(c, target_indices)
+    if not (target_indices and G.hand and G.hand.cards) then return true end
+    if G.hand.unhighlight_all then G.hand:unhighlight_all() end
+    local is_zero_based = false
+    for _, idx in ipairs(target_indices) do
+      if idx == 0 then is_zero_based = true break end
+    end
+    local selected_cards = {}
+    for _, t_idx in ipairs(target_indices) do
+      local lua_idx = is_zero_based and (t_idx + 1) or t_idx
+      local tc = G.hand.cards[lua_idx]
+      if tc then
+        table.insert(selected_cards, tc)
+      end
+    end
+
+    -- Guarantee for Death (Tarot: converts LEFT card into RIGHT card)
+    -- target_indices[1] is victim (to be overwritten), target_indices[2] is donor (to be cloned)
+    local card_name = (c.ability and c.ability.name) or c.name or ""
+    if (card_name == "Death" or (c.label and string.find(c.label, "Death"))) and #selected_cards == 2 then
+      local victim = selected_cards[1]
+      local donor = selected_cards[2]
+      local v_idx, d_idx
+      for k, card in ipairs(G.hand.cards) do
+        if card == victim then v_idx = k end
+        if card == donor then d_idx = k end
+      end
+      if v_idx and d_idx and v_idx > d_idx then
+        -- Swap them in G.hand.cards so victim is to the left of donor!
+        G.hand.cards[v_idx], G.hand.cards[d_idx] = G.hand.cards[d_idx], G.hand.cards[v_idx]
+        if G.hand.set_ranks then pcall(function() G.hand:set_ranks() end) end
+        if G.hand.align_cards then pcall(function() G.hand:align_cards() end) end
+        if victim.T and donor.T and victim.T.x >= donor.T.x then
+          victim.T.x, donor.T.x = donor.T.x - 0.1, donor.T.x
+        end
+      end
+    end
+
+    for _, tc in ipairs(selected_cards) do
+      if G.hand.add_to_highlighted then G.hand:add_to_highlighted(tc, true) else tc.highlighted = true end
+    end
+    return true
+  end
+
   if action == "select_pack_card" then
     if not (G.pack_cards and G.pack_cards.cards) then
       return false, "no pack_cards"
@@ -1167,6 +1211,20 @@ local function decidex_execute_inner(action, args)
     local idx = tonumber(args.index) or 1
     local c = G.pack_cards.cards[idx]
     if not c then return false, "pack card not found at index " .. tostring(idx) end
+
+    -- Check if card is a Joker and whether slots are available
+    if c.ability and c.ability.set == "Joker" and G.jokers and G.jokers.cards then
+      local max_jokers = (G.jokers.config and G.jokers.config.card_limit) or 5
+      if #G.jokers.cards >= max_jokers and not (c.edition and c.edition.negative) then
+        return false, "cannot select joker: joker slots full"
+      end
+    end
+
+    -- Target selection for targeted tarots/spectrals inside booster pack
+    if args.target_indices then
+      prepare_and_highlight_targets(c, args.target_indices)
+    end
+
     if G.FUNCS and G.FUNCS.use_card then
       local ok, err = pcall(G.FUNCS.use_card, {config = {ref_table = c}})
       return ok, tostring(err or "selected pack card")
@@ -1189,46 +1247,8 @@ local function decidex_execute_inner(action, args)
     local c = area.cards[idx]
     if not c then return false, "card not found at index " .. tostring(idx) end
     if action == "use_card" and G.FUNCS and G.FUNCS.use_card then
-      if args.target_indices and G.hand and G.hand.cards then
-        if G.hand.unhighlight_all then G.hand:unhighlight_all() end
-        local is_zero_based = false
-        for _, idx in ipairs(args.target_indices) do
-          if idx == 0 then is_zero_based = true break end
-        end
-        local selected_cards = {}
-        for _, t_idx in ipairs(args.target_indices) do
-          local lua_idx = is_zero_based and (t_idx + 1) or t_idx
-          local tc = G.hand.cards[lua_idx]
-          if tc then
-            table.insert(selected_cards, tc)
-          end
-        end
-
-        -- Guarantee for Death (Tarot: converts LEFT card into RIGHT card)
-        -- args.target_indices[1] is victim (to be overwritten), args.target_indices[2] is donor (to be cloned)
-        local card_name = (c.ability and c.ability.name) or c.name or ""
-        if (card_name == "Death" or (c.label and string.find(c.label, "Death"))) and #selected_cards == 2 then
-          local victim = selected_cards[1]
-          local donor = selected_cards[2]
-          local v_idx, d_idx
-          for k, card in ipairs(G.hand.cards) do
-            if card == victim then v_idx = k end
-            if card == donor then d_idx = k end
-          end
-          if v_idx and d_idx and v_idx > d_idx then
-            -- Swap them in G.hand.cards so victim is to the left of donor!
-            G.hand.cards[v_idx], G.hand.cards[d_idx] = G.hand.cards[d_idx], G.hand.cards[v_idx]
-            if G.hand.set_ranks then pcall(function() G.hand:set_ranks() end) end
-            if G.hand.align_cards then pcall(function() G.hand:align_cards() end) end
-            if victim.T and donor.T and victim.T.x >= donor.T.x then
-              victim.T.x, donor.T.x = donor.T.x - 0.1, donor.T.x
-            end
-          end
-        end
-
-        for _, tc in ipairs(selected_cards) do
-          if G.hand.add_to_highlighted then G.hand:add_to_highlighted(tc, true) else tc.highlighted = true end
-        end
+      if args.target_indices then
+        prepare_and_highlight_targets(c, args.target_indices)
       end
       local ok, err = pcall(G.FUNCS.use_card, {config = {ref_table = c}})
       return ok, tostring(err or "used card")

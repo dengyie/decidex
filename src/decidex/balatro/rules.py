@@ -266,6 +266,248 @@ def _heuristic_keep(cards):
     return sum(5 - min(5, c.chips // 4) for c in cards)
 
 
+def generate_consumable_actions(state: BalatroState, non_combat_only: bool = False) -> List[ActionCandidate]:
+    """
+    Generate legal and ranked consumable actions (use_consumable).
+    When non_combat_only is True (SHOP, BLIND_SELECT), filters out actions requiring hand targets.
+    """
+    candidates: List[ActionCandidate] = []
+    money = getattr(state, "money", 0)
+    consumables = getattr(state, "consumables", []) or []
+
+    for i, cons in enumerate(consumables):
+        cname = getattr(cons, "name", "")
+        ctype = getattr(cons, "type", "").lower() if getattr(cons, "type", None) else ""
+
+        # If non_combat_only, skip targeted consumables requiring hand cards, and combat-only spectrals
+        if non_combat_only:
+            if cname in TARGETED_CONSUMABLES or cname in ("Immolate", "Sigil", "Ouija"):
+                continue
+
+        # Resolve targets if targeted consumable
+        if cname in TARGETED_CONSUMABLES:
+            targets = select_consumable_targets(cname, state.hand, state.jokers)
+            target_labels = [state.hand[idx].label for idx in targets if idx < len(state.hand)]
+        else:
+            targets = []
+            target_labels = []
+
+        card_can_use = getattr(cons, "can_use", True)
+        if card_can_use is False:
+            h_score = 0.5
+            desc = f"使用消耗牌 [{cname}] (引擎限制当前不可用)"
+        elif cname in PLANET_CARD_MAP or ctype == "planet":
+            h_score = 5.8
+            hand_type = PLANET_CARD_MAP.get(cname, "指定手牌")
+            desc = f"使用星球牌 [{cname}] 永久升级 [{hand_type}] 等级" + (" (腾出消耗牌槽位)" if non_combat_only else "")
+        elif cname == "Black Hole":
+            h_score = 6.2
+            desc = "使用幻灵牌 [Black Hole] 全牌型等级统一 +1 级！"
+        elif cname == "The Hermit":
+            if money >= 10:
+                h_score = 5.6
+                desc = f"使用塔罗牌 [The Hermit] 金钱翻倍 (当前 ${money})"
+            elif money >= 5:
+                h_score = 4.2
+                desc = f"使用塔罗牌 [The Hermit] 金钱翻倍 (当前 ${money})"
+            else:
+                h_score = 2.5
+                desc = f"使用塔罗牌 [The Hermit] (建议留存至 $10+ 翻倍)"
+        elif cname == "Temperance":
+            sell_val = sum(getattr(j, "sell_value", 3) or 3 for j in state.jokers)
+            if sell_val >= 10:
+                h_score = 5.6
+            elif sell_val >= 5:
+                h_score = 5.0
+            else:
+                h_score = 3.2
+            desc = f"使用塔罗牌 [Temperance] 变现小丑价值 (+${sell_val})"
+        elif cname == "The Wheel of Fortune":
+            has_editionless = any(not getattr(j, "edition", None) for j in state.jokers)
+            h_score = 4.8 if has_editionless else 2.0
+            desc = f"使用塔罗牌 [The Wheel of Fortune] 尝试为小丑获取闪箔/全息/多彩特效"
+        elif cname in ("The Emperor", "The High Priestess"):
+            c_count = len(consumables)
+            c_max = getattr(state, "consumable_slots", 2)
+            has_room = c_count < c_max
+            h_score = 4.8 if has_room else 1.8
+            item_type = "塔罗牌" if cname == "The Emperor" else "星球牌"
+            desc = f"使用塔罗牌 [{cname}] 生成额外 2 张{item_type}" + ("" if has_room else " (槽位已满)")
+        elif cname == "The Fool":
+            h_score = 5.2
+            desc = "使用塔罗牌 [The Fool] 复制上一张使用的塔罗/星球牌"
+        elif cname == "Judgement":
+            jokers_count = getattr(state, "jokers_count", len(state.jokers))
+            joker_slots = getattr(state, "joker_slots", 5)
+            h_score = 5.2 if jokers_count < joker_slots else 1.5
+            desc = f"使用塔罗牌 [Judgement] 随机创造新小丑" + ("" if jokers_count < joker_slots else " (小丑槽已满)")
+        elif cname == "The Hanged Man":
+            h_score = 5.5 if len(targets) > 0 else 2.0
+            desc = f"使用塔罗牌 [The Hanged Man] 净化牌库：永久销毁废牌 [{' '.join(target_labels)}]"
+        elif cname == "Death":
+            if len(targets) >= 2:
+                left_lbl = state.hand[targets[0]].label
+                right_lbl = state.hand[targets[1]].label
+                h_score = 5.6
+                desc = f"使用塔罗牌 [Death] 复制强力卡牌：将废牌 [{left_lbl}] 转化为核心牌 [{right_lbl}]"
+            else:
+                h_score = 2.0
+                desc = "使用塔罗牌 [Death] 转换卡牌 (手牌数量不足)"
+        elif cname == "The Chariot":
+            if targets:
+                target_lbl = state.hand[targets[0]].label
+                h_score = 5.3
+                desc = f"使用塔罗牌 [The Chariot] 将卡牌 [{target_lbl}] 改造为钢铁牌 (+1.5x Mult 留手倍率)"
+            else:
+                h_score = 2.0
+                desc = "使用塔罗牌 [The Chariot] (无合适目标)"
+        elif cname == "Justice":
+            if targets:
+                target_lbl = state.hand[targets[0]].label
+                h_score = 5.1
+                desc = f"使用塔罗牌 [Justice] 将卡牌 [{target_lbl}] 改造为玻璃牌 (2x Mult)"
+            else:
+                h_score = 2.0
+                desc = "使用塔罗牌 [Justice] (无合适目标)"
+        elif cname == "The Devil":
+            if targets:
+                target_lbl = target_labels[0] if target_labels else ""
+                h_score = 5.0
+                desc = f"使用塔罗牌 [The Devil] 将卡牌 [{target_lbl}] 改造为黄金牌 (留手回合结算 $3)"
+            else:
+                h_score = 2.0
+                desc = "使用塔罗牌 [The Devil] (无合适目标)"
+        elif cname == "The Tower":
+            if targets:
+                target_lbl = target_labels[0] if target_labels else ""
+                h_score = 4.6
+                desc = f"使用塔罗牌 [The Tower] 将废牌 [{target_lbl}] 改造为石头牌 (+50 筹码消杂)"
+            else:
+                h_score = 2.0
+                desc = "使用塔罗牌 [The Tower] (无合适目标)"
+        elif cname in ("The Empress", "The Hierophant", "The Magician"):
+            if targets:
+                if cname == "The Empress":
+                    enh_name, h_score = "+4 Mult", 4.7
+                elif cname == "The Hierophant":
+                    enh_name, h_score = "+30 Chips", 4.7
+                else:
+                    enh_name, h_score = "幸运牌 (+20 Mult / $20 机率)", 4.6
+                desc = f"使用塔罗牌 [{cname}] 附魔卡牌 [{' '.join(target_labels)}] 为{enh_name}"
+            else:
+                h_score = 2.0
+                desc = f"使用塔罗牌 [{cname}] (无合适目标)"
+        elif cname == "The Lovers":
+            if targets:
+                target_lbl = target_labels[0] if target_labels else ""
+                h_score = 4.3
+                desc = f"使用塔罗牌 [The Lovers] 附魔万能牌 [{target_lbl}] (充当任意花色)"
+            else:
+                h_score = 2.0
+                desc = "使用塔罗牌 [The Lovers] (无合适目标)"
+        elif cname == "Strength":
+            if targets:
+                h_score = 4.5
+                desc = f"使用塔罗牌 [Strength] 将卡牌 [{' '.join(target_labels)}] 点数升级 (+1 Rank)"
+            else:
+                h_score = 2.0
+                desc = "使用塔罗牌 [Strength] (无合适目标)"
+        elif cname in ("The Moon", "The Sun", "The World", "The Star"):
+            suit_names = {
+                "The Moon": "梅花 (Clubs)",
+                "The Sun": "红桃 (Hearts)",
+                "The World": "黑桃 (Spades)",
+                "The Star": "方片 (Diamonds)",
+            }
+            target_suit_name = suit_names.get(cname, "目标花色")
+            if targets:
+                h_score = 5.0
+                desc = f"使用塔罗牌 [{cname}] 将杂牌 [{' '.join(target_labels)}] 转化为 {target_suit_name}"
+            else:
+                h_score = 2.0
+                desc = f"使用塔罗牌 [{cname}] (手牌已全为该花色)"
+        elif cname == "Cryptid":
+            if targets:
+                h_score = 6.0
+                desc = f"使用幻灵牌 [Cryptid] 双倍复制核心牌 [{target_labels[0]}]"
+            else:
+                h_score = 2.0
+                desc = "使用幻灵牌 [Cryptid] (手牌无目标)"
+        elif cname == "Aura":
+            if targets:
+                h_score = 5.2
+                desc = f"使用幻灵牌 [Aura] 为 [{target_labels[0]}] 赋予特殊版本词缀 (闪箔/全息/多彩)"
+            else:
+                h_score = 2.0
+                desc = "使用幻灵牌 [Aura] (无合适卡牌)"
+        elif cname == "Deja Vu":
+            if targets:
+                h_score = 5.4
+                desc = f"使用幻灵牌 [Deja Vu] 为核心牌 [{target_labels[0]}] 刻印红色封印 (重复触发)"
+            else:
+                h_score = 2.0
+                desc = "使用幻灵牌 [Deja Vu] (无合适卡牌)"
+        elif cname == "Trance":
+            if targets:
+                h_score = 5.3
+                desc = f"使用幻灵牌 [Trance] 为留手牌 [{target_labels[0]}] 刻印蓝色封印 (回合结束生成星球牌)"
+            else:
+                h_score = 2.0
+                desc = "使用幻灵牌 [Trance] (无合适卡牌)"
+        elif cname == "Talisman":
+            if targets:
+                h_score = 5.0
+                desc = f"使用幻灵牌 [Talisman] 为核心得分牌 [{target_labels[0]}] 刻印金色封印 (计分时奖励 $3)"
+            else:
+                h_score = 2.0
+                desc = "使用幻灵牌 [Talisman] (无合适卡牌)"
+        elif cname == "Medium":
+            if targets:
+                h_score = 5.1
+                desc = f"使用幻灵牌 [Medium] 为弃牌目标 [{target_labels[0]}] 刻印紫色封印 (弃牌生成塔罗牌)"
+            else:
+                h_score = 2.0
+                desc = "使用幻灵牌 [Medium] (无合适卡牌)"
+        elif cname == "Immolate":
+            h_score = 5.8
+            desc = "使用幻灵牌 [Immolate] 销毁 5 张手牌并立即获得 $20 现金"
+        elif cname == "Sigil":
+            h_score = 4.8
+            desc = "使用幻灵牌 [Sigil] 将全手牌转换为单一随机花色"
+        elif cname == "Ouija":
+            h_score = 4.5
+            desc = "使用幻灵牌 [Ouija] 将全手牌转换为单一同一点数 (-1 手牌上限)"
+        elif cname == "Ectoplasm":
+            h_score = 5.5 if len(state.jokers) >= 3 else 3.0
+            desc = "使用幻灵牌 [Ectoplasm] 赋予小丑负片属性 (+1 小丑槽位, -1 手牌上限)"
+        elif cname == "Hex":
+            h_score = 5.8 if len(state.jokers) == 1 else 1.5
+            desc = "使用幻灵牌 [Hex] 为小丑赋予多彩 (x1.5 Mult) (⚠️ 摧毁其余所有小丑)"
+        elif cname == "Ankh":
+            h_score = 5.8 if len(state.jokers) == 1 else 1.5
+            desc = "使用幻灵牌 [Ankh] 复制随机小丑 (⚠️ 摧毁其余所有小丑)"
+        elif cname == "Wraith":
+            h_score = 5.2 if money <= 4 else 2.0
+            desc = f"使用幻灵牌 [Wraith] 随机创造稀有小丑 (资金归零，当前 ${money})"
+        else:
+            h_score = 3.2
+            desc = f"先使用 {cons.name}({getattr(cons, 'type', 'consumable')})"
+
+        candidates.append(ActionCandidate(
+            candidate_id=f"use:{i}",
+            description=desc,
+            heuristic_score=round(h_score, 4),
+            metadata={
+                "action_type": "use_consumable",
+                "index": i,
+                "name": cons.name,
+                "target_indices": targets,
+            },
+        ))
+
+    return candidates
+
+
 def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
     """All legal plays/discards/uses/shop actions, ranked with high-tier synergy and constraint heuristics."""
     candidates: List[ActionCandidate] = []
@@ -292,6 +534,9 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
 
     # --- BLIND SELECT PHASE ACTIONS ---
     if state_name == "BLIND_SELECT" or (state_name not in ("SHOP", "SELECTING_HAND", "ROUND_EVAL", "GAME_OVER") and getattr(state, "can_select_blind", False)):
+        # Allow using non-combat consumables (Planets, Hermit, Temperance, Wheel) before entering blind
+        candidates.extend(generate_consumable_actions(state, non_combat_only=True))
+
         blind_choice = evaluate_blind_choice(state)
         candidates.append(ActionCandidate(
             candidate_id="select_blind",
@@ -329,14 +574,22 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
             card_idx = card.get("index", idx + 1)
             cname = card.get("name", "")
             cset = card.get("set", "") or card.get("type", "")
+            targets = []
+
+            # Targeted tarots / spectrals
+            if cname in TARGETED_CONSUMABLES:
+                targets = select_consumable_targets(cname, state.hand, state.jokers)
 
             if state_name == "BUFFOON_PACK" or cset == "Joker" or card.get("type") == "Joker":
+                has_slot = getattr(state, "jokers_count", len(state.jokers)) < getattr(state, "joker_slots", 5)
                 advice = score_joker_candidate(
                     cname, synergy, cost=0, current_money=econ.money,
-                    has_slot=getattr(state, "jokers_count", len(state.jokers)) < getattr(state, "joker_slots", 5),
+                    has_slot=has_slot,
                     ante=getattr(state, "ante", 1),
                 )
                 h_score = 3.5 + (advice.score / 25.0)
+                if not has_slot and card.get("edition") != "negative":
+                    h_score = 1.0
                 desc = f"选取小丑 [{cname}] - {advice.recommendation}: {advice.reason}"
             elif state_name == "PLANET_PACK" or cset == "Planet" or cname in PLANET_CARD_MAP:
                 hand_upgraded = PLANET_CARD_MAP.get(cname, "手牌")
@@ -352,13 +605,31 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
                     h_score = 5.8
                     desc = f"选取塔罗牌 [{cname}] 变现小丑总价值"
                 elif cname in ("The Wheel of Fortune", "The Emperor", "The High Priestess", "Judgement"):
-                    h_score = 5.5
+                    if cname == "Judgement":
+                        has_j_slot = getattr(state, "jokers_count", len(state.jokers)) < getattr(state, "joker_slots", 5)
+                        h_score = 5.5 if has_j_slot else 1.0
+                    elif cname in ("The Emperor", "The High Priestess"):
+                        has_c_slot = len(getattr(state, "consumables", []) or []) < getattr(state, "consumable_slots", 2)
+                        h_score = 5.5 if has_c_slot else 1.5
+                    elif cname == "The Wheel of Fortune":
+                        has_editionless = any(not getattr(j, "edition", None) for j in state.jokers)
+                        h_score = 5.5 if has_editionless else 2.0
+                    else:
+                        h_score = 5.5
                     desc = f"选取高价值塔罗牌 [{cname}]"
                 elif cname in ("Death", "The Hanged Man"):
-                    h_score = 5.4
+                    if cname == "Death" and len(state.hand) < 2:
+                        h_score = 1.0
+                    elif cname in TARGETED_CONSUMABLES and not targets:
+                        h_score = 1.5
+                    else:
+                        h_score = 5.4
                     desc = f"选取优化牌库塔罗牌 [{cname}]"
                 else:
-                    h_score = 4.5
+                    if cname in TARGETED_CONSUMABLES and not targets:
+                        h_score = 1.5
+                    else:
+                        h_score = 4.5
                     desc = f"选取强化塔罗牌 [{cname}]"
             elif state_name == "SPECTRAL_PACK" or cset == "Spectral":
                 # Spectral cards evaluation
@@ -370,19 +641,19 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
                     h_score = 6.8
                     desc = "选取幻灵牌 [Immolate] 摧毁5张手牌并获取暴利 $20"
                 elif cname == "Cryptid":
-                    h_score = 6.5
+                    h_score = 6.5 if targets else 1.5
                     desc = "选取幻灵牌 [Cryptid] 复制手牌核心卡牌2份"
                 elif cname == "DejaVu":
-                    h_score = 6.4
+                    h_score = 6.4 if targets else 1.5
                     desc = "选取幻灵牌 [DejaVu] 为手牌添加红封印 (触发2次)"
                 elif cname == "Trance":
-                    h_score = 6.2
+                    h_score = 6.2 if targets else 1.5
                     desc = "选取幻灵牌 [Trance] 为手牌添加蓝封印 (留手生成星球牌)"
                 elif cname in ("Talisman", "Medium"):
-                    h_score = 6.0
+                    h_score = 6.0 if targets else 1.5
                     desc = f"选取幻灵牌 [{cname}] 为手牌添加金/紫封印"
                 elif cname == "Aura":
-                    h_score = 5.8
+                    h_score = 5.8 if targets else 1.5
                     desc = "选取幻灵牌 [Aura] 为手牌附加闪箔/全息/多彩特效"
                 elif cname == "Ectoplasm":
                     h_score = 6.2 if getattr(state, "hand_size", 8) >= 7 else 3.2
@@ -458,6 +729,7 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
                     "index": card_idx,
                     "name": cname,
                     "set": cset,
+                    "target_indices": targets,
                 },
             ))
 
@@ -473,6 +745,10 @@ def enumerate_legal_actions(state: BalatroState) -> List[ActionCandidate]:
 
     # --- SHOP PHASE ACTIONS ---
     if state_name == "SHOP":
+        # Allow using non-combat consumables (Planets, Hermit, Temperance, Wheel) in shop
+        # to boost hand level, free consumable slots for buying, or generate cash!
+        candidates.extend(generate_consumable_actions(state, non_combat_only=True))
+
         shop = getattr(state, "shop", {}) or {}
         cards = shop.get("cards", [])
         jokers_count = getattr(state, "jokers_count", len(state.jokers))

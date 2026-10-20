@@ -2459,6 +2459,99 @@ end
     return null;
   }
 
+  // Non-combat consumable evaluation (SHOP, BLIND_SELECT)
+  function findBestNonCombatConsumableToUse(state) {
+    const cons = state.consumables || [];
+    if (cons.length === 0) return null;
+    const PLANET_NAMES = ["Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune", "Pluto", "Planet X", "Ceres", "Eris"];
+
+    for (let i = 0; i < cons.length; i++) {
+      const c = cons[i];
+      if (c.can_use === false) continue;
+      const name = c.name || "";
+      const idx = c.index !== undefined ? c.index : (i + 1);
+
+      // Black Hole: upgrades ALL poker hands +1 level!
+      if (name === "Black Hole") {
+        return { card: c, index: idx, targetIndices: null, reason: "全牌型等级统一 +1 级！" };
+      }
+      // Planet cards: permanently boost hand level and free consumable slot!
+      if (PLANET_NAMES.includes(name) || (c.set === "Planet")) {
+        return { card: c, index: idx, targetIndices: null, reason: `升级手牌基础等级 (${name}) 并腾出槽位` };
+      }
+      // The Hermit: Doubles money up to $20!
+      if (name === "The Hermit" && (state.money || 0) >= 5) {
+        return { card: c, index: idx, targetIndices: null, reason: `金钱翻倍 (现持 $${state.money})` };
+      }
+      // Temperance: Gives total sell value of all jokers (max $50)
+      if (name === "Temperance") {
+        let totalSell = 0;
+        for (const j of (state.jokers || [])) totalSell += (j.sell_cost || j.sell_value || 1);
+        if (totalSell >= 4) return { card: c, index: idx, targetIndices: null, reason: `变现小丑总价值 (+$${totalSell})` };
+      }
+      // The Wheel of Fortune: 1 in 4 to add Foil, Holo, or Polychrome to a random joker
+      if (name === "The Wheel of Fortune") {
+        const hasEditionless = (state.jokers || []).some(j => !j.edition);
+        if (hasEditionless) return { card: c, index: idx, targetIndices: null, reason: "为小丑博取闪箔/全息/多彩特效" };
+      }
+      // Judgement: Create a random joker if empty slot
+      if (name === "Judgement") {
+        const maxJokers = Number(state.joker_slots) || 5;
+        if ((state.jokers || []).length < maxJokers) return { card: c, index: idx, targetIndices: null, reason: "空槽随机生成新小丑" };
+      }
+      // Emperor / High Priestess: Add tarot / planet cards if empty slot
+      if (name === "The Emperor" || name === "The High Priestess") {
+        const maxSlots = Number(state.consumable_slots) || 2;
+        if (cons.length < maxSlots) return { card: c, index: idx, targetIndices: null, reason: `获取补充消耗牌 (${name})` };
+      }
+      // The Fool: duplicate last tarot/planet
+      if (name === "The Fool") {
+        return { card: c, index: idx, targetIndices: null, reason: "复制上一张使用的塔罗/星球牌" };
+      }
+    }
+    return null;
+  }
+
+  // Pack Card Usability Checker: Prevents selecting cards whose activation conditions are not met
+  function canUsePackCard(card, state) {
+    if (!card) return false;
+    const name = card.name || "";
+    const sname = state.state_name;
+    const jCount = (state.jokers || []).length;
+    const jMax = Number(state.joker_slots) || 5;
+    const cCount = (state.consumables || []).length;
+    const cMax = Number(state.consumable_slots) || 2;
+    const handLen = (state.hand || []).length;
+
+    if (card.set === "Joker" || sname === "BUFFOON_PACK") {
+      return jCount < jMax || (card.edition && card.edition === "negative");
+    }
+    if (name === "Judgement") {
+      return jCount < jMax;
+    }
+    if (name === "The Emperor" || name === "The High Priestess") {
+      return cCount < cMax;
+    }
+    if (name === "The Wheel of Fortune") {
+      return (state.jokers || []).some(j => !j.edition);
+    }
+    if (name === "Death") {
+      return handLen >= 2;
+    }
+    if (["The Hanged Man", "The Chariot", "Justice", "The Devil", "The Tower",
+         "The Empress", "The Hierophant", "The Magician", "The Lovers", "Strength",
+         "The Moon", "The Sun", "The World", "The Star"].includes(name)) {
+      return handLen >= 1;
+    }
+    if (sname === "SPECTRAL_PACK") {
+      if (name === "Ankh" || name === "Hex") return jCount >= 1;
+      if (name === "Cryptid" || name === "Aura" || name === "Deja Vu" || name === "Trance" || name === "Talisman" || name === "Medium") {
+        return handLen >= 1;
+      }
+    }
+    return true;
+  }
+
   // DecideX HUD Renderer
   window.onBalatroStateUpdate = function (state) {
     currentGameState = state;
@@ -2930,10 +3023,11 @@ end
     return dispatchLuaAction(luaCode, "skip_booster");
   };
 
-  window.executeSelectPackCard = function (index) {
+  window.executeSelectPackCard = function (index, targetIndices) {
     if (!window.Module || !window.Module.FS) return unavailableAction("select_pack_card");
-    const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("select_pack_card", {index = ${index}}) end`;
-    console.log("[DecideX] Dispatched select_pack_card action:", index);
+    const tIndices = (targetIndices && targetIndices.length > 0) ? `{${targetIndices.join(",")}}` : "nil";
+    const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("select_pack_card", {index = ${index}, target_indices = ${tIndices}}) end`;
+    console.log("[DecideX] Dispatched select_pack_card action:", index, "targets:", targetIndices);
     return dispatchLuaAction(luaCode, "select_pack_card");
   };
 
@@ -3275,7 +3369,17 @@ end
           if (!this._blindSelectEnterTime) this._blindSelectEnterTime = now;
           const timeInBlindSelect = now - this._blindSelectEnterTime;
 
-          if (state.can_select_blind) {
+          // Priority 0: Use non-combat consumables (Planets, Hermit, Temperance, Wheel) before entering blind
+          const nonCombatCons = findBestNonCombatConsumableToUse(state);
+          if (nonCombatCons && (!this._lastConsumableTime || now - this._lastConsumableTime > 1200)) {
+            this._lastConsumableTime = now;
+            this._lastProgressTimestamp = now;
+            this.updateStatus(`盲注前使用消耗牌: ${nonCombatCons.card.name}`, true);
+            console.log("[AutoPilot] Blind select auto-using consumable:", nonCombatCons.card.name, nonCombatCons.reason);
+            window.executeUseCard(nonCombatCons.index, null, "consumeables");
+            executedAction = true;
+            unlockCooldownMs = 600;
+          } else if (state.can_select_blind) {
             // Debounce repeated blind selection in the same transition window
             if (now - (this.lastBlindSelectTime || 0) > 800) {
               this.lastBlindSelectTime = now;
@@ -3474,8 +3578,18 @@ end
             const cardKey = bestCard ? `card_${bestCard.index}_${bestCard.name}` : null;
             const voucherKey = bestVoucher ? `voucher_${bestVoucher.index}_${bestVoucher.name}` : null;
 
-            // 1. Sell joker to make room for god-tier candidate
-            if (sellRec && !this._shopSoldJoker) {
+            // Priority 0: Use non-combat consumables (Planets, Hermit, Temperance, Wheel, Judgement)
+            // to gain cash, free consumable slots for buying, or level up hands!
+            const nonCombatCons = findBestNonCombatConsumableToUse(state);
+            if (nonCombatCons && (!this._lastConsumableTime || now - this._lastConsumableTime > 1200)) {
+              this._lastConsumableTime = now;
+              this._lastProgressTimestamp = now;
+              this.updateStatus(`商店使用消耗牌: ${nonCombatCons.card.name}`, true);
+              console.log("[AutoPilot] Shop auto-using consumable:", nonCombatCons.card.name, nonCombatCons.reason);
+              window.executeUseCard(nonCombatCons.index, null, "consumeables");
+              executedAction = true;
+              unlockCooldownMs = 600;
+            } else if (sellRec && !this._shopSoldJoker) {
               this._shopSoldJoker = true;
               this._lastProgressTimestamp = now;
               this.updateStatus(`出售小丑: ${sellRec.sellName} (腾出槽位购买 ${sellRec.targetCard.name})`, true);
@@ -3553,31 +3667,73 @@ end
         } else if (["TAROT_PACK", "PLANET_PACK", "SPECTRAL_PACK", "STANDARD_PACK", "BUFFOON_PACK"].includes(sname)) {
           const packCards = state.pack_cards || [];
           if (packCards.length > 0) {
-            let bestCard = packCards[0];
+            let bestCard = null;
             if (sname === "PLANET_PACK") {
-              const priorityPlanets = ["Jupiter", "Earth", "Saturn", "Mercury", "Uranus", "Mars", "Venus", "Pluto"];
+              const priorityPlanets = ["Jupiter", "Earth", "Saturn", "Mercury", "Uranus", "Mars", "Venus", "Pluto", "Planet X", "Ceres", "Eris"];
               for (const p of priorityPlanets) {
                 const found = packCards.find(c => c.name === p);
-                if (found) { bestCard = found; break; }
+                if (found && canUsePackCard(found, state)) { bestCard = found; break; }
               }
+              if (!bestCard) bestCard = packCards.find(c => canUsePackCard(c, state)) || packCards[0];
             } else if (sname === "BUFFOON_PACK") {
               const syn = analyzeSynergy(state.jokers);
+              const jCount = (state.jokers || []).length;
+              const jMax = Number(state.joker_slots) || 5;
+
+              // If joker slots are full, check if we should sell a weak joker to acquire an S-tier joker
+              if (jCount >= jMax && !this._shopSoldJoker) {
+                let worstJoker = null;
+                let worstScore = 999;
+                (state.jokers || []).forEach((j, idx) => {
+                  const p = JOKER_PILLAR_MAP[j.name] || "utility";
+                  const score = (p === syn.primaryNeed ? 30 : 15);
+                  if (score < worstScore) { worstScore = score; worstJoker = { joker: j, index: idx + 1 }; }
+                });
+                let bestPackJoker = null;
+                let bestPackScore = -999;
+                for (const c of packCards) {
+                  const p = JOKER_PILLAR_MAP[c.name] || "utility";
+                  let score = (p === syn.primaryNeed ? 50 : 20);
+                  if (score > bestPackScore) { bestPackScore = score; bestPackJoker = c; }
+                }
+                if (worstJoker && bestPackJoker && bestPackScore >= 45 && worstScore <= 15) {
+                  this._shopSoldJoker = true;
+                  this._lastProgressTimestamp = now;
+                  this.updateStatus(`补充包换牌出售: ${worstJoker.joker.name}`, true);
+                  console.log("[AutoPilot] Selling weak joker in buffoon pack:", worstJoker.joker.name);
+                  window.executeSellCard(worstJoker.index, "jokers");
+                  executedAction = true;
+                  unlockCooldownMs = 600;
+                  return;
+                }
+              }
+
               let bestScore = -999;
               for (const c of packCards) {
+                if (!canUsePackCard(c, state)) continue;
                 const p = JOKER_PILLAR_MAP[c.name] || "utility";
                 let score = (p === syn.primaryNeed ? 30 : 10);
                 if (score > bestScore) { bestScore = score; bestCard = c; }
               }
             } else if (sname === "TAROT_PACK") {
-              const priorityTarot = ["The Hermit", "The Wheel of Fortune", "The Emperor", "The High Priestess", "Judgement", "Death", "The Hanged Man", "The Empress", "The Hierophant"];
+              const priorityTarot = [
+                "The Hermit", "The Wheel of Fortune", "The Emperor", "The High Priestess",
+                "Judgement", "Death", "The Hanged Man", "The Empress", "The Hierophant",
+                "The Chariot", "Justice", "The Devil", "Strength", "The Magician",
+                "The Lovers", "The Sun", "The World", "The Moon", "The Star", "The Tower", "The Fool"
+              ];
               for (const t of priorityTarot) {
                 const found = packCards.find(c => c.name === t);
-                if (found) { bestCard = found; break; }
+                if (found && canUsePackCard(found, state)) { bestCard = found; break; }
+              }
+              if (!bestCard) {
+                bestCard = packCards.find(c => canUsePackCard(c, state)) || null;
               }
             } else if (sname === "SPECTRAL_PACK") {
               const jCount = (state.jokers || []).length;
               let bestScore = -999;
               for (const c of packCards) {
+                if (!canUsePackCard(c, state)) continue;
                 const name = c.name || "";
                 let score = 50;
                 if (name === "Black Hole") score = 100;
@@ -3620,14 +3776,33 @@ end
                 if (score > bestScore) { bestScore = score; bestCard = c; }
               }
             }
-            this.updateStatus(`补充包选择: ${bestCard.name || '卡牌'}`, true);
-            console.log("[AutoPilot] Selecting pack card:", bestCard.name, "at index", bestCard.index || 1);
-            window.executeSelectPackCard(bestCard.index || 1);
-            executedAction = true;
-            unlockCooldownMs = 600;
+
+            if (bestCard && canUsePackCard(bestCard, state)) {
+              let targetIndices = null;
+              const targets = selectConsumableTargets(bestCard.name, state.hand, state.jokers);
+              if (targets && targets.length > 0) {
+                targetIndices = targets;
+              }
+              const targetDesc = targetIndices ? ` (目标手牌: ${targetIndices.join(', ')})` : '';
+              this.updateStatus(`补充包选择: ${bestCard.name || '卡牌'}${targetDesc}`, true);
+              console.log("[AutoPilot] Selecting pack card:", bestCard.name, "at index", bestCard.index || 1, "targets:", targetIndices);
+              window.executeSelectPackCard(bestCard.index || 1, targetIndices);
+              executedAction = true;
+              unlockCooldownMs = 600;
+            } else if (state.can_skip_booster) {
+              this.updateStatus("跳过补充包...", true);
+              console.log("[AutoPilot] Skipping booster pack (no usable card)");
+              window.executeSkipBooster();
+              executedAction = true;
+              unlockCooldownMs = 400;
+            } else {
+              this.updateStatus("等待补充包就绪...", false);
+              executedAction = false;
+              unlockCooldownMs = 200;
+            }
           } else {
             this.updateStatus("跳过补充包...", true);
-            console.log("[AutoPilot] Skipping booster pack");
+            console.log("[AutoPilot] Skipping empty booster pack");
             window.executeSkipBooster();
             executedAction = true;
             unlockCooldownMs = 400;
