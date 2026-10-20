@@ -370,82 +370,34 @@ def patch_button_callbacks(content: str) -> str:
     )
 
     # Bulletproof G.FUNCS.wipe_off against nil G.screenwipe crashes
-    old_wipe_off_pattern = (
-        "G.FUNCS.wipe_off = function()\n"
-        "  G.E_MANAGER:add_event(Event({\n"
-        "    no_delete = true,\n"
-        "    func = function()\n"
-        "      delay(0.3)\n"
-        "      G.screenwipe.children.particles.max = 0"
-    )
-    new_wipe_off = (
-        "G.FUNCS.wipe_off = function()\n"
-        "  G.E_MANAGER:add_event(Event({\n"
-        "    no_delete = true,\n"
-        "    func = function()\n"
+    old_wipe_particles = "      delay(0.3)\n      G.screenwipe.children.particles.max = 0"
+    new_wipe_particles = (
         "      delay(0.3)\n"
         "      if G.screenwipe and G.screenwipe.children and G.screenwipe.children.particles then\n"
         "        G.screenwipe.children.particles.max = 0\n"
-        "      end\n"
-        "      if G.screenwipe and G.screenwipe.colours and G.screenwipe.colours.black then\n"
-        "        G.E_MANAGER:add_event(Event({\n"
-        "            trigger = 'ease',\n"
-        "            no_delete = true,\n"
-        "            blockable = false,\n"
-        "            blocking = false,\n"
-        "            timer = 'REAL',\n"
-        "            ref_table = G.screenwipe.colours.black,\n"
-        "            ref_value = 4,\n"
-        "            ease_to = 0,\n"
-        "            delay =  0.3,\n"
-        "            func = (function(t) return t end)\n"
-        "        }))\n"
-        "      end\n"
-        "      if G.screenwipe and G.screenwipe.colours and G.screenwipe.colours.white then\n"
-        "        G.E_MANAGER:add_event(Event({\n"
-        "          trigger = 'ease',\n"
-        "          no_delete = true,\n"
-        "          blockable = false,\n"
-        "          blocking = false,\n"
-        "          timer = 'REAL',\n"
-        "          ref_table = G.screenwipe.colours.white,\n"
-        "          ref_value = 4,\n"
-        "          ease_to = 0,\n"
-        "          delay =  0.3,\n"
-        "          func = (function(t) return t end)\n"
-        "        }))\n"
-        "      end\n"
-        "      return true\n"
-        "    end\n"
-        "  }))\n"
-        "  G.E_MANAGER:add_event(Event({\n"
-        "    trigger = 'after',\n"
-        "    delay = 0.55,\n"
-        "    no_delete = true,\n"
-        "    blocking = false,\n"
-        "    timer = 'REAL',\n"
-        "    func = function()\n"
-        "      if G.screenwipecard then G.screenwipecard:start_dissolve({G.C.BLACK, G.C.ORANGE,G.C.GOLD, G.C.RED}) end\n"
-        "      if G.screenwipe and G.screenwipe.get_UIE_by_ID and G.screenwipe:get_UIE_by_ID('text') then\n"
-        "        local txt = G.screenwipe:get_UIE_by_ID('text')\n"
-        "        if txt and txt.children then\n"
-        "          for k, v in ipairs(txt.children) do\n"
-        "            if v and v.children and v.children[1] and v.children[1].config and v.children[1].config.object then\n"
-        "              v.children[1].config.object:pop_out(4)\n"
-        "            end\n"
-        "          end\n"
-        "        end\n"
-        "      end\n"
-        "      return true\n"
-        "    end\n"
-        "  }))\n"
-        "  G.E_MANAGER:add_event(Event({\n"
-        "    trigger = 'after',\n"
-        "    delay = 1.1,\n"
-        "    no_delete = true,\n"
-        "    blocking = false,\n"
-        "    timer = 'REAL',\n"
-        "    func = function()\n"
+        "      end"
+    )
+    content = content.replace(old_wipe_particles, new_wipe_particles)
+
+    old_wipe_ref_black = "ref_table = G.screenwipe.colours.black,"
+    new_wipe_ref_black = "ref_table = (G.screenwipe and G.screenwipe.colours and G.screenwipe.colours.black) or {},"
+    content = content.replace(old_wipe_ref_black, new_wipe_ref_black)
+
+    old_wipe_ref_white = "ref_table = G.screenwipe.colours.white,"
+    new_wipe_ref_white = "ref_table = (G.screenwipe and G.screenwipe.colours and G.screenwipe.colours.white) or {},"
+    content = content.replace(old_wipe_ref_white, new_wipe_ref_white)
+
+    old_wipe_text = "if G.screenwipe:get_UIE_by_ID('text') then"
+    new_wipe_text = "if G.screenwipe and G.screenwipe.get_UIE_by_ID and G.screenwipe:get_UIE_by_ID('text') then"
+    content = content.replace(old_wipe_text, new_wipe_text)
+
+    old_wipe_cleanup = (
+        "      G.screenwipe.children.particles:remove()\n"
+        "      G.screenwipe:remove()\n"
+        "      G.screenwipe.children.particles = nil\n"
+        "      G.screenwipe = nil"
+    )
+    new_wipe_cleanup = (
         "      if G.screenwipe then\n"
         "        if G.screenwipe.children and G.screenwipe.children.particles then\n"
         "          pcall(function() G.screenwipe.children.particles:remove() end)\n"
@@ -453,28 +405,9 @@ def patch_button_callbacks(content: str) -> str:
         "        end\n"
         "        pcall(function() G.screenwipe:remove() end)\n"
         "        G.screenwipe = nil\n"
-        "      end\n"
-        "      G.screenwipecard = nil\n"
-        "      return true\n"
-        "    end\n"
-        "  }))\n"
-        "  G.E_MANAGER:add_event(Event({\n"
-        "    trigger = 'after',\n"
-        "    delay = 1.2,\n"
-        "    no_delete = true,\n"
-        "    blocking = true,\n"
-        "    timer = 'REAL',\n"
-        "    func = function()\n"
-        "      return true\n"
-        "    end\n"
-        "  }))\n"
-        "end\n"
+        "      end"
     )
-    if old_wipe_off_pattern in content:
-        # Replace the whole wipe_off block safely
-        start_idx = content.find(old_wipe_off_pattern)
-        end_idx = content.find("end\n", start_idx + 400) + 4
-        content = content[:start_idx] + new_wipe_off + content[end_idx:]
+    content = content.replace(old_wipe_cleanup, new_wipe_cleanup)
 
     return content
 
