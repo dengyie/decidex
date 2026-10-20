@@ -452,14 +452,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v68 / decidex-balatro-core-v68
-  const EXPECTED_LOVE_SIZE = 56341640;
+  const EXPECTED_LOVE_SIZE = 56341617;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v75";
+  const ASSET_VERSION = "v76";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=75";
-  const ASSET_WASM_URL = "love.wasm.bin?v=75";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=76";
+  const ASSET_WASM_URL = "love.wasm.bin?v=76";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3347,7 +3347,9 @@ end
         if (this.busy && this._busyTimestamp && (now - this._busyTimestamp > maxBusyTime)) {
           console.warn(`[AutoPilot Watchdog] Busy lock held > ${maxBusyTime}ms for action ${this._actionInFlight}, auto-clearing busy lock`);
           this.busy = false;
-          this._actionInFlight = null;
+          if (this._actionInFlight !== "select_blind" && this._actionInFlight !== "skip_blind") {
+            this._actionInFlight = null;
+          }
           this._busyTimestamp = null;
         }
 
@@ -3355,8 +3357,15 @@ end
         if (!this._lastProgressTimestamp) this._lastProgressTimestamp = now;
         if (now - this._lastProgressTimestamp > 3800) {
           if (this._actionInFlight) {
-            console.warn(`[AutoPilot Watchdog] Action ${this._actionInFlight} stuck for ${now - this._lastProgressTimestamp}ms, force-clearing in-flight lock`);
-            this._actionInFlight = null;
+            const curState = currentGameState || window._lastDecidexState;
+            const curStateName = curState && curState.state_name;
+            if ((this._actionInFlight === "select_blind" || this._actionInFlight === "skip_blind") && curStateName === "BLIND_SELECT") {
+              // Waiting for blind transition animation, keep in-flight lock active and refresh progress timestamp
+              this._lastProgressTimestamp = now;
+            } else {
+              console.warn(`[AutoPilot Watchdog] Action ${this._actionInFlight} stuck for ${now - this._lastProgressTimestamp}ms, force-clearing in-flight lock`);
+              this._actionInFlight = null;
+            }
           }
           this.busy = false;
         }
@@ -3597,7 +3606,10 @@ end
         this._lastSeenState = sname;
         this._stateEnterTime = now;
         this._lastProgressTimestamp = now;
-        if (sname !== "BLIND_SELECT") this._blindSelectEnterTime = null;
+        if (sname !== "BLIND_SELECT") {
+          this._blindSelectEnterTime = null;
+          this._blindActionSent = false;
+        }
         if (sname !== "ROUND_EVAL") this._roundEvalEnterTime = null;
         if (sname !== "SHOP") {
           this._shopEnterTime = null;
@@ -3630,67 +3642,73 @@ end
           this.lastCashOutTime = 0;
           this._shopEnterTime = null;
           this._togglingShop = false;
-          if (!this._blindSelectEnterTime) this._blindSelectEnterTime = now;
+          if (!this._blindSelectEnterTime) {
+            this._blindSelectEnterTime = now;
+            this._blindActionSent = false;
+          }
           const timeInBlindSelect = now - this._blindSelectEnterTime;
 
-          // Priority 0: Use non-combat consumables (Planets, Hermit, Temperance, Wheel) before entering blind
-          const nonCombatCons = findBestNonCombatConsumableToUse(state);
-          if (nonCombatCons && (!this._lastConsumableTime || now - this._lastConsumableTime > 1200)) {
-            this._lastConsumableTime = now;
-            this._lastProgressTimestamp = now;
-            this.updateStatus(`盲注前使用消耗牌: ${nonCombatCons.card.name}`, true);
-            console.log("[AutoPilot] Blind select auto-using consumable:", nonCombatCons.card.name, nonCombatCons.reason);
-            window.executeUseCard(nonCombatCons.index, null, "consumeables");
-            executedAction = true;
-            unlockCooldownMs = 600;
-          } else if (state.can_select_blind) {
-            // Suppress re-dispatch if select_blind or skip_blind is already actively in-flight
-            if (this._actionInFlight === "select_blind" || this._actionInFlight === "skip_blind") {
-              this.updateStatus("等待盲注转场动画...", true);
-              executedAction = false;
-              unlockCooldownMs = 300;
-            } else if (now - (this.lastBlindSelectTime || 0) > 1200) {
-              this.lastBlindSelectTime = now;
-              this._lastProgressTimestamp = now;
-              const choice = evaluateBlindChoice(state);
-              if (choice.action === "skip_blind" && state.can_skip_blind) {
-                this._actionInFlight = "skip_blind";
-                this.updateStatus(`跳过盲注获取 [${choice.tagName || 'Tag'}]...`, true);
-                console.log(`[AutoPilot] In BLIND_SELECT, auto skipping blind for ${choice.tagName} (skipEv=${choice.skipEv} > selectEv=${choice.selectEv}, time=${timeInBlindSelect}ms)`);
-                window.decidexSkipBlind();
-              } else {
-                this._actionInFlight = "select_blind";
-                this.updateStatus("自动选择盲注...", true);
-                console.log(`[AutoPilot] In BLIND_SELECT, auto selecting blind (can_select_blind=true, time=${timeInBlindSelect}ms)`);
-                window.decidexSelectBlind();
-              }
-              executedAction = true;
-              unlockCooldownMs = 1500;
-            } else {
-              this.updateStatus("盲注确认中...", true);
-              executedAction = false;
-              unlockCooldownMs = 200;
-            }
-          } else if (timeInBlindSelect > 2800 && !this._actionInFlight) {
-            // Watchdog fallback after 2.8s of being stuck in BLIND_SELECT without can_select_blind
-            if (now - (this.lastBlindSelectTime || 0) > 1500) {
-              this.lastBlindSelectTime = now;
-              this._lastProgressTimestamp = now;
-              this._actionInFlight = "select_blind";
-              this.updateStatus("超时保底选择盲注...", true);
-              console.log(`[AutoPilot] In BLIND_SELECT, watchdog fallback selecting blind (time=${timeInBlindSelect}ms)`);
-              window.decidexSelectBlind();
-              executedAction = true;
-              unlockCooldownMs = 1200;
-            } else {
-              this.updateStatus("盲注确认中...", true);
-              executedAction = false;
-              unlockCooldownMs = 200;
-            }
-          } else {
-            this.updateStatus("等待盲注界面就绪...", false);
+          if (this._blindActionSent || this._actionInFlight === "select_blind" || this._actionInFlight === "skip_blind") {
+            this.updateStatus("等待盲注转场动画...", true);
             executedAction = false;
-            unlockCooldownMs = 250;
+            unlockCooldownMs = 300;
+          } else {
+            // Priority 0: Use non-combat consumables (Planets, Hermit, Temperance, Wheel) before entering blind
+            const nonCombatCons = findBestNonCombatConsumableToUse(state);
+            if (nonCombatCons && (!this._lastConsumableTime || now - this._lastConsumableTime > 1200)) {
+              this._lastConsumableTime = now;
+              this._lastProgressTimestamp = now;
+              this.updateStatus(`盲注前使用消耗牌: ${nonCombatCons.card.name}`, true);
+              console.log("[AutoPilot] Blind select auto-using consumable:", nonCombatCons.card.name, nonCombatCons.reason);
+              window.executeUseCard(nonCombatCons.index, null, "consumeables");
+              executedAction = true;
+              unlockCooldownMs = 600;
+            } else if (state.can_select_blind) {
+              if (now - (this.lastBlindSelectTime || 0) > 1000) {
+                this.lastBlindSelectTime = now;
+                this._lastProgressTimestamp = now;
+                this._blindActionSent = true;
+                const choice = evaluateBlindChoice(state);
+                if (choice.action === "skip_blind" && state.can_skip_blind) {
+                  this._actionInFlight = "skip_blind";
+                  this.updateStatus(`跳过盲注获取 [${choice.tagName || 'Tag'}]...`, true);
+                  console.log(`[AutoPilot] In BLIND_SELECT, auto skipping blind for ${choice.tagName} (skipEv=${choice.skipEv} > selectEv=${choice.selectEv}, time=${timeInBlindSelect}ms)`);
+                  window.decidexSkipBlind();
+                } else {
+                  this._actionInFlight = "select_blind";
+                  this.updateStatus("自动选择盲注...", true);
+                  console.log(`[AutoPilot] In BLIND_SELECT, auto selecting blind (can_select_blind=true, time=${timeInBlindSelect}ms)`);
+                  window.decidexSelectBlind();
+                }
+                executedAction = true;
+                unlockCooldownMs = 1500;
+              } else {
+                this.updateStatus("盲注确认中...", true);
+                executedAction = false;
+                unlockCooldownMs = 200;
+              }
+            } else if (timeInBlindSelect > 3500 && !this._blindActionSent && !this._actionInFlight) {
+              // Watchdog fallback after 3.5s of being stuck in BLIND_SELECT without can_select_blind (only if action was not yet sent)
+              if (now - (this.lastBlindSelectTime || 0) > 2000) {
+                this.lastBlindSelectTime = now;
+                this._lastProgressTimestamp = now;
+                this._actionInFlight = "select_blind";
+                this._blindActionSent = true;
+                this.updateStatus("超时保底选择盲注...", true);
+                console.log(`[AutoPilot] In BLIND_SELECT, watchdog fallback selecting blind (time=${timeInBlindSelect}ms)`);
+                window.decidexSelectBlind();
+                executedAction = true;
+                unlockCooldownMs = 1500;
+              } else {
+                this.updateStatus("盲注确认中...", true);
+                executedAction = false;
+                unlockCooldownMs = 200;
+              }
+            } else {
+              this.updateStatus("等待盲注界面就绪...", false);
+              executedAction = false;
+              unlockCooldownMs = 250;
+            }
           }
         } else if (sname === "SELECTING_HAND") {
           this.lastToggleShopTime = 0;

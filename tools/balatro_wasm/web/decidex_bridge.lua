@@ -444,44 +444,20 @@ end
 
 local function find_select_blind_button()
   if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then return nil end
+  if G.GAME and G.GAME.facing_blind then return nil end
+  if _G._select_blind_in_flight then return nil end
 
   local now = (love.timer and love.timer.getTime()) or os.clock()
-
-  -- If select_blind is actively in-flight, suppress button detection to prevent double-firing
-  if _G._select_blind_in_flight then
-    if _G._last_select_blind_time and (now - _G._last_select_blind_time < 3.5) then
-      return nil
-    else
-      _G._select_blind_in_flight = nil
-    end
-  end
-
-  if _G._last_select_blind_time and (now - _G._last_select_blind_time < 1.5) and not (G.blind_select and not G.blind_select.REMOVED) then
+  if _G._last_select_blind_time and (now - _G._last_select_blind_time < 2.0) then
     return nil -- Still animating previous select
   end
 
-  if G.GAME then G.GAME.facing_blind = nil end
-
   local on_deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or "Small"
 
-  -- Pure read-only check with safe fallback: avoid recreating UIBox while animations run,
-  -- but self-heal if Balatro event queue has delayed G.blind_select for > 1.8s
   if not (G.blind_select and not G.blind_select.REMOVED) then
-    local wipe_locked = (G.CONTROLLER and G.CONTROLLER.locks and (G.CONTROLLER.locks.wipe or G.CONTROLLER.locks.load))
-    if not wipe_locked and _G._blind_select_enter_time and (now - _G._blind_select_enter_time > 1.8) then
-      if create_UIBox_blind_select and UIBox then
-        pcall(function()
-          G.blind_select = UIBox{
-            definition = create_UIBox_blind_select(),
-            config = {align="bmi", offset = {x=0,y=G.ROOM.T.y + 29},major = G.hand, bond = 'Weak'}
-          }
-        end)
-      end
-    end
-    if not (G.blind_select and not G.blind_select.REMOVED) then
-      return nil
-    end
+    return nil
   end
+
   local opt = G.blind_select_opts and G.blind_select_opts[string.lower(on_deck)]
   if opt and opt.get_UIE_by_ID then
     local btn = nil
@@ -508,6 +484,8 @@ end
 local function find_skip_blind_button()
   if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then return nil end
   if G.GAME and G.GAME.facing_blind then return nil end
+  if _G._select_blind_in_flight then return nil end
+  if not (G.blind_select and not G.blind_select.REMOVED) then return nil end
   local on_deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or "Small"
   if on_deck == "Boss" then return nil end
 
@@ -824,20 +802,40 @@ local function check_and_emit_state()
   -- Hand play & discard lifecycle trackers
   if G.STATE == G.STATES.HAND_PLAYED then
     _G._hand_play_saw_hand_played = true
+    _G._draw_to_hand_enter_time = nil
   elseif G.STATE == G.STATES.DRAW_TO_HAND then
     _G._hand_discard_saw_draw = true
+    if not _G._draw_to_hand_enter_time then _G._draw_to_hand_enter_time = now end
+    if now - _G._draw_to_hand_enter_time > 4.5 then
+      if G.hand and G.hand.cards and #G.hand.cards > 0 then
+        print("[DecideX Bridge] Watchdog: advancing stuck DRAW_TO_HAND to SELECTING_HAND")
+        G.STATE = G.STATES.SELECTING_HAND
+        G.STATE_COMPLETE = false
+        if G.GAME and G.GAME.blind and G.GAME.blind.drawn_to_hand then
+          pcall(function() G.GAME.blind:drawn_to_hand() end)
+        end
+        _G._draw_to_hand_enter_time = now
+      elseif G.deck and G.deck.cards and #G.deck.cards > 0 then
+        print("[DecideX Bridge] Watchdog: re-triggering draw_from_deck_to_hand in DRAW_TO_HAND")
+        pcall(function() G.FUNCS.draw_from_deck_to_hand(nil) end)
+        _G._draw_to_hand_enter_time = now - 2.0
+      end
+    end
   elseif G.STATE ~= G.STATES.SELECTING_HAND then
+    _G._draw_to_hand_enter_time = nil
     _G._hand_play_in_flight = nil
     _G._hand_play_saw_hand_played = nil
     _G._hand_discard_in_flight = nil
     _G._hand_discard_saw_draw = nil
   elseif _G._hand_play_saw_hand_played and G.STATE == G.STATES.SELECTING_HAND then
+    _G._draw_to_hand_enter_time = nil
     local play_has_cards = (G.play and G.play.cards and #G.play.cards > 0)
     if not play_has_cards then
       _G._hand_play_in_flight = nil
       _G._hand_play_saw_hand_played = nil
     end
   elseif _G._hand_discard_saw_draw and G.STATE == G.STATES.SELECTING_HAND then
+    _G._draw_to_hand_enter_time = nil
     _G._hand_discard_in_flight = nil
     _G._hand_discard_saw_draw = nil
   end
@@ -946,7 +944,8 @@ local function check_and_emit_state()
       _G._blind_select_enter_time = now
     end
     local wipe_locked = (G.CONTROLLER and G.CONTROLLER.locks and (G.CONTROLLER.locks.wipe or G.CONTROLLER.locks.load))
-    if not wipe_locked and (now - _G._blind_select_enter_time > 1.8) then
+    local facing = G.GAME and G.GAME.facing_blind
+    if not wipe_locked and not facing and not _G._select_blind_in_flight and (now - _G._blind_select_enter_time > 3.0) then
       if not (G.blind_select and not G.blind_select.REMOVED) then
         if create_UIBox_blind_select and UIBox then
           pcall(function()
@@ -1168,10 +1167,10 @@ local function decidex_execute_inner(action, args)
     if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then
       return false, "not in BLIND_SELECT"
     end
-    local now = (love.timer and love.timer.getTime()) or os.clock()
-    if _G._select_blind_in_flight and _G._last_select_blind_time and (now - _G._last_select_blind_time < 3.5) then
+    if (G.GAME and G.GAME.facing_blind) or _G._select_blind_in_flight then
       return true, "blind already selected (animating)"
     end
+    local now = (love.timer and love.timer.getTime()) or os.clock()
     if _G._last_select_blind_time and (now - _G._last_select_blind_time < 1.0) then
       return true, "select_blind debounced"
     end
@@ -1192,7 +1191,6 @@ local function decidex_execute_inner(action, args)
     end
     _G._last_select_blind_time = now
     _G._select_blind_in_flight = true
-    if G.GAME then G.GAME.facing_blind = nil end
 
     -- Ensure blind_prompt_box and blind_select are fully crash-proof for G.E_MANAGER animations
     if G.blind_prompt_box then
@@ -1226,11 +1224,13 @@ local function decidex_execute_inner(action, args)
       local prev_facing = G.GAME and G.GAME.facing_blind
       local ok, err = pcall(G.FUNCS.select_blind, btn)
       if not ok then
+        _G._select_blind_in_flight = nil
         if G.GAME then G.GAME.facing_blind = prev_facing end
         return false, "select_blind error: " .. tostring(err)
       end
       return true, "selected blind " .. tostring(on_deck)
     end
+    _G._select_blind_in_flight = nil
     return false, "no select_blind function"
   end
 
@@ -1238,20 +1238,23 @@ local function decidex_execute_inner(action, args)
     if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then
       return false, "not in BLIND_SELECT"
     end
-    if G.GAME and G.GAME.facing_blind then
+    if (G.GAME and G.GAME.facing_blind) or _G._select_blind_in_flight then
       return false, "blind already selected (animating)"
     end
     local btn, on_deck = find_skip_blind_button()
     if not btn then
       return false, "skip_blind button not found (boss or not ready)"
     end
+    _G._select_blind_in_flight = true
     if G.FUNCS and G.FUNCS.skip_blind then
       local ok, err = pcall(G.FUNCS.skip_blind, btn)
       if not ok then
+        _G._select_blind_in_flight = nil
         return false, "skip_blind error: " .. tostring(err)
       end
       return true, "skipped blind " .. tostring(on_deck)
     end
+    _G._select_blind_in_flight = nil
     return false, "no skip_blind function"
   end
 
