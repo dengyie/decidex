@@ -36,37 +36,50 @@
   }
 
   // Resilient Background-Execution Guard:
-  // Prevents Chrome/browsers from throttling or suspending the Emscripten game loop (love.js)
-  // when the tab is backgrounded, minimized, or occluded.
+  // When the tab is backgrounded/minimized (document.hidden), Chrome suspends requestAnimationFrame
+  // and throttles standard window.setTimeout to 1000ms.
+  // We use a lightweight Web Worker clock (which Chrome does NOT throttle) to drive
+  // requestAnimationFrame callbacks strictly one-at-a-time at 60 FPS, with zero duplicate executions
+  // or re-entrant runner explosions.
   try {
     if (typeof window !== "undefined") {
       const origRAF = window.requestAnimationFrame ? window.requestAnimationFrame.bind(window) : null;
-      if (origRAF) {
-        window.requestAnimationFrame = function (cb) {
-          if (typeof document !== "undefined" && document.hidden) {
-            return setTimeout(cb, 16);
-          }
-          return origRAF(cb);
-        };
-      }
+      let pendingHiddenCallbacks = [];
+      let hiddenRunning = false;
+      let workerInstance = null;
 
       if (typeof Worker !== "undefined" && typeof Blob !== "undefined" && typeof URL !== "undefined") {
         const workerCode = "let t = null; self.onmessage = function(e) { if (e.data === 'start') { if (!t) t = setInterval(function() { self.postMessage('tick'); }, 16); } else if (e.data === 'stop') { if (t) { clearInterval(t); t = null; } } };";
         const blob = new Blob([workerCode], { type: "application/javascript" });
-        const worker = new Worker(URL.createObjectURL(blob));
-        worker.onmessage = function () {
-          if (typeof document !== "undefined" && document.hidden) {
-            const B = window.Module && window.Module.Browser;
-            if (B && B.mainLoop && B.mainLoop.runner) {
-              try {
-                B.mainLoop.runner();
-              } catch (_) {}
+        workerInstance = new Worker(URL.createObjectURL(blob));
+        workerInstance.onmessage = function () {
+          if (typeof document !== "undefined" && document.hidden && pendingHiddenCallbacks.length > 0 && !hiddenRunning) {
+            hiddenRunning = true;
+            const cbs = pendingHiddenCallbacks;
+            pendingHiddenCallbacks = [];
+            const now = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+            for (let i = 0; i < cbs.length; i++) {
+              try { cbs[i](now); } catch (_) {}
             }
+            hiddenRunning = false;
           }
         };
-        worker.postMessage("start");
-        window.__decidexHeartbeatWorker = worker;
-        console.log("[DecideX] Background Web Worker Heartbeat active");
+        workerInstance.postMessage("start");
+        window.__decidexHeartbeatWorker = workerInstance;
+        console.log("[DecideX] Background Web Worker Heartbeat active (queue-driven rAF)");
+      }
+
+      if (origRAF) {
+        window.requestAnimationFrame = function (cb) {
+          if (typeof document !== "undefined" && document.hidden) {
+            if (workerInstance) {
+              pendingHiddenCallbacks.push(cb);
+              return pendingHiddenCallbacks.length;
+            }
+            return setTimeout(() => cb((typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now()), 16);
+          }
+          return origRAF(cb);
+        };
       }
     }
   } catch (e) {
@@ -438,15 +451,15 @@ end
   window.addEventListener("beforeunload", syncSaveFileSystem);
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
-  // Cache key: balatro-asset-cache-v66 / decidex-balatro-core-v66
+  // Cache key: balatro-asset-cache-v67 / decidex-balatro-core-v67
   const EXPECTED_LOVE_SIZE = 56339555;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v66";
+  const ASSET_VERSION = "v67";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_" + ASSET_VERSION;
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=66";
-  const ASSET_WASM_URL = "love.wasm.bin?v=66";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=67";
+  const ASSET_WASM_URL = "love.wasm.bin?v=67";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
