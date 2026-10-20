@@ -452,14 +452,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v68 / decidex-balatro-core-v68
-  const EXPECTED_LOVE_SIZE = 56342020;
+  const EXPECTED_LOVE_SIZE = 56342159;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v78";
+  const ASSET_VERSION = "v79";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=78";
-  const ASSET_WASM_URL = "love.wasm.bin?v=78";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=79";
+  const ASSET_WASM_URL = "love.wasm.bin?v=79";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3490,7 +3490,10 @@ end
       const isTransient = /not ready|animating|debounced|in progress|busy|locked|waiting|already in play/i.test(errStr);
       if (isTransient) {
         console.log(`[AutoPilot] Dispatch transient wait for ${action}: ${errStr}`);
-        if (action !== "play" && action !== "discard" && action !== "select_blind") {
+        if (action === "select_blind" || action === "skip_blind") {
+          this._actionInFlight = null;
+          this._blindActionSent = false;
+        } else if (action !== "play" && action !== "discard") {
           this._actionInFlight = null;
         }
         this._busyTimestamp = null;
@@ -3542,8 +3545,8 @@ end
           this._actionInFlight = null;
           this._playSawHandPlayed = false;
           this.busy = false;
-        } else if (now - (this._lastPlayActionTime || 0) > 10000) {
-          // Hard watchdog fallback (10s)
+        } else if (now - (this._lastPlayActionTime || 0) > 15000) {
+          // Hard watchdog fallback (15s)
           this._actionInFlight = null;
           this._playSawHandPlayed = false;
           this.busy = false;
@@ -3616,6 +3619,16 @@ end
       let executedAction = false;
       let unlockCooldownMs = 300;
 
+      // Ignore transient UNKNOWN states (during screen wipe / UI destruction) so we don't clear action locks or reset dwell times
+      if (!sname || sname === "UNKNOWN") {
+        this.updateStatus("游戏状态加载中...", false);
+        this.busy = false;
+        this._busyTimestamp = null;
+        this.pendingState = null;
+        this.scheduleNextAction(400);
+        return;
+      }
+
       // Track state dwell time and reset sub-state clocks on transition
       const now = Date.now();
       if (sname !== this._lastSeenState) {
@@ -3641,17 +3654,17 @@ end
         console.log(`[AutoPilot] Step executing for state: ${sname}`);
 
         if (sname === "SPLASH" || sname === "MENU") {
-          if (now - this.lastStartRunTime > 2500) {
+          if (now - this.lastStartRunTime > 6000) {
             this.lastStartRunTime = now;
             this.updateStatus("正在启动新局...", true);
             console.log(`[AutoPilot] In ${sname}, auto starting new run`);
             window.decidexStartRun();
             executedAction = true;
-            unlockCooldownMs = 1200;
+            unlockCooldownMs = 2000;
           } else {
             this.updateStatus("等待新局加载...", true);
             executedAction = false;
-            unlockCooldownMs = 250;
+            unlockCooldownMs = 400;
           }
         } else if (sname === "BLIND_SELECT") {
           this.lastToggleShopTime = 0;
@@ -3663,6 +3676,14 @@ end
             this._blindActionSent = false;
           }
           const timeInBlindSelect = now - this._blindSelectEnterTime;
+          const timeSinceBlindAction = now - (this.lastBlindSelectTime || 0);
+
+          // If blind action was sent, but we've been stuck in BLIND_SELECT for > 4.5s, clear the locks to self-heal
+          if (this._blindActionSent && timeSinceBlindAction > 4500) {
+            console.warn(`[AutoPilot] Blind action sent ${timeSinceBlindAction}ms ago but still in BLIND_SELECT, clearing lock to retry`);
+            this._blindActionSent = false;
+            this._actionInFlight = null;
+          }
 
           if (this._blindActionSent || this._actionInFlight === "select_blind" || this._actionInFlight === "skip_blind") {
             this.updateStatus("等待盲注转场动画...", true);
@@ -3735,13 +3756,13 @@ end
             this.updateStatus("等待发牌...", false);
             executedAction = false;
             unlockCooldownMs = 200;
-          } else if (this._actionInFlight === "play" && (now - (this._lastPlayActionTime || 0) < 8000)) {
-            // A play was dispatched and is animating; wait up to 8.0s
+          } else if (this._actionInFlight === "play" && (now - (this._lastPlayActionTime || 0) < 15000)) {
+            // A play was dispatched and is animating; wait up to 15.0s
             this.updateStatus("出牌结算中...", true);
             executedAction = false;
             unlockCooldownMs = 400;
-          } else if (this._actionInFlight === "discard" && (now - (this._lastDiscardActionTime || 0) < 5000)) {
-            // A discard was dispatched and is drawing; wait up to 5.0s
+          } else if (this._actionInFlight === "discard" && (now - (this._lastDiscardActionTime || 0) < 8000)) {
+            // A discard was dispatched and is drawing; wait up to 8.0s
             this.updateStatus("弃牌处理中...", true);
             executedAction = false;
             unlockCooldownMs = 400;

@@ -19,10 +19,10 @@ async def main():
             print("[Attach 9222] No balatro tab found, creating new page...", flush=True)
             ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
             target_page = await ctx.new_page()
-            await target_page.goto("https://balatro.mangoqwq.com/?v=77", wait_until="domcontentloaded")
+            await target_page.goto("https://balatro.mangoqwq.com/?v=78", wait_until="domcontentloaded")
         else:
-            print(f"[Attach 9222] Navigating target tab to v77: {target_page.url}", flush=True)
-            await target_page.goto("https://balatro.mangoqwq.com/?v=77", wait_until="domcontentloaded")
+            print(f"[Attach 9222] Navigating target tab to v78: {target_page.url}", flush=True)
+            await target_page.goto("https://balatro.mangoqwq.com/?v=78", wait_until="domcontentloaded")
 
         print(f"[Attach 9222] Target tab found: {target_page.url}", flush=True)
 

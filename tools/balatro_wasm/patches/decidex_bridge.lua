@@ -445,10 +445,15 @@ end
 local function find_select_blind_button()
   if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then return nil end
   if G.GAME and G.GAME.facing_blind then return nil end
-  if _G._select_blind_in_flight then return nil end
 
   local now = (love.timer and love.timer.getTime()) or os.clock()
-  if _G._last_select_blind_time and (now - _G._last_select_blind_time < 2.0) then
+  if _G._last_select_blind_time and (now - _G._last_select_blind_time > 4.0) then
+    _G._select_blind_in_flight = nil
+  end
+
+  if _G._select_blind_in_flight then return nil end
+
+  if _G._last_select_blind_time and (now - _G._last_select_blind_time < 1.2) then
     return nil -- Still animating previous select
   end
 
@@ -484,7 +489,17 @@ end
 local function find_skip_blind_button()
   if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then return nil end
   if G.GAME and G.GAME.facing_blind then return nil end
+
+  local now = (love.timer and love.timer.getTime()) or os.clock()
+  if _G._last_select_blind_time and (now - _G._last_select_blind_time > 4.0) then
+    _G._select_blind_in_flight = nil
+  end
+
   if _G._select_blind_in_flight then return nil end
+
+  if _G._last_select_blind_time and (now - _G._last_select_blind_time < 1.2) then
+    return nil
+  end
   if not (G.blind_select and not G.blind_select.REMOVED) then return nil end
   local on_deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or "Small"
   if on_deck == "Boss" then return nil end
@@ -858,9 +873,11 @@ local function check_and_emit_state()
   -- and play area is empty, or when exiting combat into a non-combat state.
   if G.STATE == G.STATES.SELECTING_HAND then
     local play_has_cards = (G.play and G.play.cards and #G.play.cards > 0)
-    if not play_has_cards then
+    if not play_has_cards and _G._hand_play_saw_hand_played then
       _G._hand_play_in_flight = nil
       _G._hand_play_saw_hand_played = nil
+    end
+    if _G._hand_discard_saw_draw then
       _G._hand_discard_in_flight = nil
       _G._hand_discard_saw_draw = nil
     end
@@ -872,7 +889,7 @@ local function check_and_emit_state()
   end
 
   -- Watchdog fallback to prevent any permanent lock (generous windows for animations)
-  if _G._hand_play_in_flight and _G._hand_play_start_time and (now - _G._hand_play_start_time > 12.0) then
+  if _G._hand_play_in_flight and _G._hand_play_start_time and (now - _G._hand_play_start_time > 15.0) then
     _G._hand_play_in_flight = nil
     _G._hand_play_saw_hand_played = nil
   end
@@ -1094,12 +1111,18 @@ local function decidex_execute_inner(action, args)
 
     if action == "play" then
       if _G._hand_play_in_flight then
-        if _G._hand_play_start_time and (now - _G._hand_play_start_time < 8.0) then
+        if _G._hand_play_start_time and (now - _G._hand_play_start_time < 15.0) then
           return false, "hand play already in progress (animating)"
         else
           _G._hand_play_in_flight = nil
           _G._hand_play_saw_hand_played = nil
         end
+      end
+      if G.play and G.play.cards and #G.play.cards > 0 then
+        return false, "cards already in play"
+      end
+      if G.STATE and G.STATES and G.STATE == G.STATES.HAND_PLAYED then
+        return false, "state is HAND_PLAYED"
       end
       if G.GAME and G.GAME.blind and G.GAME.blind.block_play then
         return false, "blind blocks play"
@@ -1220,10 +1243,13 @@ local function decidex_execute_inner(action, args)
     if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then
       return false, "not in BLIND_SELECT"
     end
+    local now = (love.timer and love.timer.getTime()) or os.clock()
+    if _G._last_select_blind_time and (now - _G._last_select_blind_time > 4.0) then
+      _G._select_blind_in_flight = nil
+    end
     if (G.GAME and G.GAME.facing_blind) or _G._select_blind_in_flight then
       return true, "blind already selected (animating)"
     end
-    local now = (love.timer and love.timer.getTime()) or os.clock()
     if _G._last_select_blind_time and (now - _G._last_select_blind_time < 1.0) then
       return true, "select_blind debounced"
     end
@@ -1280,6 +1306,10 @@ local function decidex_execute_inner(action, args)
         _G._select_blind_in_flight = nil
         if G.GAME then G.GAME.facing_blind = prev_facing end
         return false, "select_blind error: " .. tostring(err)
+      end
+      if not (G.GAME and G.GAME.facing_blind) then
+        _G._select_blind_in_flight = nil
+        return false, "select_blind no-op (facing_blind not set)"
       end
       return true, "selected blind " .. tostring(on_deck)
     end
@@ -1631,8 +1661,12 @@ local function decidex_execute_inner(action, args)
       end
     end
     local now = (love.timer and love.timer.getTime()) or os.clock()
-    if _G._last_start_run_time and (now - _G._last_start_run_time < 3.0) then
+    if _G._last_start_run_time and (now - _G._last_start_run_time < 6.0) then
       return true, "start_run already in progress"
+    end
+    local wipe_locked = (G.CONTROLLER and G.CONTROLLER.locks and (G.CONTROLLER.locks.wipe or G.CONTROLLER.locks.load))
+    if wipe_locked then
+      return true, "start_run screen wipe transition in progress"
     end
     _G._last_start_run_time = now
 
