@@ -1100,9 +1100,49 @@ local function decidex_execute_inner(action, args)
     local idx = tonumber(args.index) or 1
     local c = area.cards[idx]
     if not c then return false, "card not found at index " .. tostring(idx) end
+
+    -- Handle Booster pack purchase and opening
+    if area_name == "shop_booster" or area_name == "shop_boosters" or (c.ability and c.ability.set == "Booster") then
+      local available_money = (G.GAME and G.GAME.dollars and (G.GAME.dollars - (G.GAME.bankrupt_at or 0))) or 0
+      if c.cost and c.cost > 0 and c.cost > available_money then
+        return false, "cannot afford booster pack: cost=" .. tostring(c.cost) .. ", available=" .. tostring(available_money)
+      end
+      local btn = (c.children and c.children.buy_button and c.children.buy_button.definition) or { config = { ref_table = c } }
+      if G.FUNCS and G.FUNCS.use_card then
+        local ok, err = pcall(G.FUNCS.use_card, btn)
+        if ok then return true, "opened booster pack" end
+      end
+      if c.open then
+        local ok, err = pcall(function() c:open() end)
+        if ok then return true, "opened booster pack directly" end
+      end
+      return false, "failed to open booster pack"
+    end
+
+    -- Handle Voucher purchase and redemption
+    if area_name == "shop_vouchers" or area_name == "shop_voucher" or (c.ability and c.ability.set == "Voucher") then
+      local available_money = (G.GAME and G.GAME.dollars and (G.GAME.dollars - (G.GAME.bankrupt_at or 0))) or 0
+      if c.cost and c.cost > 0 and c.cost > available_money then
+        return false, "cannot afford voucher: cost=" .. tostring(c.cost) .. ", available=" .. tostring(available_money)
+      end
+      local btn = (c.children and c.children.buy_button and c.children.buy_button.definition) or { config = { ref_table = c } }
+      if G.FUNCS and G.FUNCS.use_card then
+        local ok, err = pcall(G.FUNCS.use_card, btn)
+        if ok then return true, "redeemed voucher" end
+      end
+      if c.redeem then
+        local ok, err = pcall(function() c:redeem() end)
+        if ok then return true, "redeemed voucher directly" end
+      end
+      return false, "failed to redeem voucher"
+    end
+
+    -- Standard card / joker / consumable purchase
     if G.FUNCS and G.FUNCS.buy_from_shop then
-      G.FUNCS.buy_from_shop({config = {ref_table = c}})
-      return true, "bought card"
+      local btn = (c.children and c.children.buy_button and c.children.buy_button.definition) or { config = { ref_table = c } }
+      local ok, err = pcall(G.FUNCS.buy_from_shop, btn)
+      if ok then return true, "bought card" end
+      return false, tostring(err or "buy_from_shop failed")
     end
     return false, "no buy_from_shop func"
   end
@@ -1346,6 +1386,14 @@ local function decidex_execute_inner(action, args)
     end
     _G._last_start_run_time = now
 
+    local is_game_over = (G.STATE and G.STATES and (G.STATE == G.STATES.GAME_OVER or G.STATE == G.STATES.GAME_WON)) or (G.GAME and G.GAME.won)
+    if is_game_over then
+      if G.FUNCS and G.FUNCS.go_to_menu then
+        pcall(G.FUNCS.go_to_menu)
+        return true, "resetting run from game over to menu"
+      end
+    end
+
     if G.STAGE and G.STAGES and G.STAGE == G.STAGES.RUN and G.STATE ~= G.STATES.SPLASH and G.STATE ~= G.STATES.MENU then
       return false, "already in run"
     end
@@ -1355,6 +1403,14 @@ local function decidex_execute_inner(action, args)
       return ok, tostring(err or "started run")
     end
     return false, "no start_run"
+  end
+
+  if action == "go_to_menu" then
+    if G.FUNCS and G.FUNCS.go_to_menu then
+      local ok, err = pcall(G.FUNCS.go_to_menu)
+      return ok, tostring(err or "went to menu")
+    end
+    return false, "no go_to_menu func"
   end
 
   if action == "force_state_dump" then

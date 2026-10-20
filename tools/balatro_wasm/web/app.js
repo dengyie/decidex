@@ -451,15 +451,15 @@ end
   window.addEventListener("beforeunload", syncSaveFileSystem);
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
-  // Cache key: balatro-asset-cache-v67 / decidex-balatro-core-v67
-  const EXPECTED_LOVE_SIZE = 56339555;
+  // Cache key: balatro-asset-cache-v68 / decidex-balatro-core-v68
+  const EXPECTED_LOVE_SIZE = 56340008;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v67";
+  const ASSET_VERSION = "v68";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_" + ASSET_VERSION;
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=67";
-  const ASSET_WASM_URL = "love.wasm.bin?v=67";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=68";
+  const ASSET_WASM_URL = "love.wasm.bin?v=68";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3123,6 +3123,12 @@ end
     return dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("start_run") end', "start_run");
   };
 
+  window.decidexGoToMenu = function () {
+    if (!window.Module || !window.Module.FS) return unavailableAction("go_to_menu");
+    console.log("[AutoPilot] Dispatched go_to_menu action");
+    return dispatchLuaAction('local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("go_to_menu") end', "go_to_menu");
+  };
+
   window.decidexContinueEndless = function () {
     if (!window.Module || !window.Module.FS) return unavailableAction("continue_endless");
     console.log("[AutoPilot] Dispatched continue_endless action");
@@ -3859,13 +3865,31 @@ end
             unlockCooldownMs = 400;
           }
         } else if (sname === "GAME_WON" || state.won) {
-          this.updateStatus("🎉 达成通关胜利！", false);
-          this.toggle(false);
+          this.updateStatus("🎉 达成通关胜利！5秒后自动继续新对局...", true);
+          if (!this._gameWonTimer) {
+            this._gameWonTimer = setTimeout(() => {
+              this._gameWonTimer = null;
+              if (this.enabled) {
+                console.log("[AutoPilot] Auto restarting new run after GAME_WON");
+                window.decidexStartRun();
+              }
+            }, 5000);
+          }
           executedAction = true;
+          unlockCooldownMs = 1000;
         } else if (sname === "GAME_OVER") {
-          this.updateStatus("游戏结束", false);
-          this.toggle(false);
+          this.updateStatus("💀 游戏结束，3秒后自动开启全新对局...", true);
+          if (!this._gameOverTimer) {
+            this._gameOverTimer = setTimeout(() => {
+              this._gameOverTimer = null;
+              if (this.enabled) {
+                console.log("[AutoPilot] Auto restarting new run after GAME_OVER");
+                window.decidexStartRun();
+              }
+            }, 3000);
+          }
           executedAction = true;
+          unlockCooldownMs = 1000;
         } else if (sname === "HAND_PLAYED") {
           this._actionInFlight = null;
           this.updateStatus("计分结算中...", true);
