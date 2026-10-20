@@ -452,14 +452,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v68 / decidex-balatro-core-v68
-  const EXPECTED_LOVE_SIZE = 56341275;
+  const EXPECTED_LOVE_SIZE = 56341640;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v74";
+  const ASSET_VERSION = "v75";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=74";
-  const ASSET_WASM_URL = "love.wasm.bin?v=74";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=75";
+  const ASSET_WASM_URL = "love.wasm.bin?v=75";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -2152,8 +2152,9 @@ end
     const vouchers = shop.vouchers || [];
     const money = Number(state.money) || 0;
     const jokersCount = Number(state.jokers_count) || (state.jokers ? state.jokers.length : 0);
-    const maxSlots = Number(state.joker_slots) || 5;
-    const hasSlot = jokersCount < maxSlots;
+    const maxJokerSlots = Number(state.joker_slots) || 5;
+    const consumableCount = Number(state.consumables ? state.consumables.length : 0);
+    const maxConsumableSlots = Number(state.consumable_slots) || 2;
     const rerollCost = Number(shop.reroll_cost) || 5;
 
     const synergy = analyzeSynergy(state.jokers);
@@ -2166,6 +2167,14 @@ end
       "Half Joker", "Gros Michel", "Blue Joker", "Banner", "Scary Face", "Odd Todd"
     ];
 
+    const PLANET_NAMES = ["Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune", "Pluto", "Planet X", "Ceres", "Eris"];
+    const TAROT_NAMES = [
+      "The Fool", "The Magician", "The High Priestess", "The Empress", "The Emperor",
+      "The Hierophant", "The Lovers", "The Chariot", "Justice", "The Hermit",
+      "The Wheel of Fortune", "Strength", "The Hanged Man", "Death", "Temperance",
+      "The Devil", "The Tower", "The Star", "The Moon", "The Sun", "Judgement", "The World"
+    ];
+
     const evaluatedCards = [];
     for (const c of cards) {
       let score = 50;
@@ -2173,57 +2182,106 @@ end
       const cost = Number(c.cost) || 0;
       const canAfford = money >= cost;
 
-      const pillar = JOKER_PILLAR_MAP[cname] || (c.xmult && c.xmult > 1 ? "x_mult" : (c.mult >= 8 ? "flat_mult" : (c.chips >= 30 ? "chips" : "utility")));
+      const isPlanet = (c.set === "Planet") || (c.type === "planet") || PLANET_NAMES.includes(cname);
+      const isTarot = (c.set === "Tarot") || (c.type === "tarot") || TAROT_NAMES.includes(cname);
+      const isSpectral = (c.set === "Spectral") || (c.type === "spectral");
+      const isConsumable = isPlanet || isTarot || isSpectral;
 
-      if (TOP_TIER.includes(cname)) score += 35;
-      if (pillar === synergy.primaryNeed) score += 30; // 契合四角大厦当前短板加分
-      if (c.xmult && c.xmult > 1.0) score += 40;
-      if (c.mult && c.mult >= 8) score += 20;
-      if (c.chips && c.chips >= 50) score += 20;
-      if (c.edition === "poly") score += 30;
-      else if (c.edition === "holo") score += 20;
-      else if (c.edition === "foil") score += 15;
+      const hasSlot = isConsumable ? (consumableCount < maxConsumableSlots) : (jokersCount < maxJokerSlots);
+      let pillar = "utility";
 
-      // Boss Blind 针对性规避与特化加成
-      const upcomingBoss = (state.blind && state.blind.upcoming_boss) || null;
-      if (upcomingBoss) {
-        if (upcomingBoss === "The Plant") {
-          const faceJokers = ["Scary Face", "Smiley Face", "Photograph", "Baron", "Sock and Buskin", "Pareidolia", "Business Card"];
-          if (faceJokers.includes(cname)) {
-            score -= 50; // 即将面临人头牌封印，严禁选购
+      if (isConsumable) {
+        if (isPlanet) {
+          pillar = "planet";
+          if (["Jupiter", "Earth", "Saturn", "Mercury", "Planet X", "Mars", "Uranus"].includes(cname)) {
+            score = 80;
+          } else {
+            score = 68;
           }
-        } else if (upcomingBoss === "The Head" && ["Lusty Joker", "Bloodstone"].includes(cname)) {
-          score -= 45; // 红桃封印
-        } else if (upcomingBoss === "The Window" && ["Greedy Joker", "Rough Gem"].includes(cname)) {
-          score -= 45; // 方块封印
-        } else if (upcomingBoss === "The Goad" && ["Wrathful Joker", "Arrowhead"].includes(cname)) {
-          score -= 45; // 黑桃封印
-        } else if (upcomingBoss === "The Club" && ["Gluttonous Joker", "Onyx Agate"].includes(cname)) {
-          score -= 45; // 梅花封印
-        } else if (upcomingBoss === "The Needle") {
-          if (["Burglar", "Grabber", "Nacho Tong"].includes(cname)) score += 35; // 补足出牌次数
-          if (["Ice Cream", "Bull", "Cavendish"].includes(cname)) score += 25; // 强化单发一击必杀爆发力
-        } else if (upcomingBoss === "The Water") {
-          if (["Mail-In Rebate", "Castle"].includes(cname)) score -= 35; // 0次弃牌下失效
+        } else if (isTarot) {
+          pillar = "tarot";
+          if (cname === "The Hermit") {
+            score = money >= 8 ? 88 : (money >= 5 ? 78 : 55);
+          } else if (cname === "Temperance") {
+            let totalSell = 0;
+            for (const j of (state.jokers || [])) totalSell += (j.sell_cost || j.sell_value || 1);
+            score = totalSell >= 4 ? 82 : 55;
+          } else if (cname === "Judgement") {
+            score = jokersCount < maxJokerSlots ? 90 : 40;
+          } else if (cname === "The Wheel of Fortune") {
+            const hasEditionless = (state.jokers || []).some(j => !j.edition);
+            score = hasEditionless ? 72 : 35;
+          } else if (cname === "The Emperor" || cname === "The High Priestess") {
+            score = consumableCount < maxConsumableSlots ? 76 : 45;
+          } else if (cname === "Death" || cname === "The Hanged Man") {
+            score = 78;
+          } else {
+            score = 65;
+          }
+        } else if (isSpectral) {
+          pillar = "spectral";
+          score = (cname === "Black Hole" || cname === "Immolate" || cname === "Cryptid") ? 92 : 75;
+        }
+      } else {
+        // Standard Joker evaluation
+        pillar = JOKER_PILLAR_MAP[cname] || (c.xmult && c.xmult > 1 ? "x_mult" : (c.mult >= 8 ? "flat_mult" : (c.chips >= 30 ? "chips" : "utility")));
+
+        if (TOP_TIER.includes(cname)) score += 35;
+        if (pillar === synergy.primaryNeed) score += 30; // 契合四角大厦当前短板加分
+        if (c.xmult && c.xmult > 1.0) score += 40;
+        if (c.mult && c.mult >= 8) score += 20;
+        if (c.chips && c.chips >= 50) score += 20;
+        if (c.edition === "poly") score += 30;
+        else if (c.edition === "holo") score += 20;
+        else if (c.edition === "foil") score += 15;
+
+        // Early game Ante 1-2 survival boost for basic scoring jokers
+        if ((state.ante || 1) <= 2 && jokersCount < 2) {
+          if (c.mult || c.chips || ["Joker", "Half Joker", "Misprint", "Popcorn", "Ice Cream", "Blue Joker", "Gros Michel", "Abstract Joker"].includes(cname)) {
+            score += 35; // 早期生存小丑极大加成
+          }
+        }
+
+        // Boss Blind 针对性规避与特化加成
+        const upcomingBoss = (state.blind && state.blind.upcoming_boss) || null;
+        if (upcomingBoss) {
+          if (upcomingBoss === "The Plant") {
+            const faceJokers = ["Scary Face", "Smiley Face", "Photograph", "Baron", "Sock and Buskin", "Pareidolia", "Business Card"];
+            if (faceJokers.includes(cname)) score -= 50;
+          } else if (upcomingBoss === "The Head" && ["Lusty Joker", "Bloodstone"].includes(cname)) {
+            score -= 45;
+          } else if (upcomingBoss === "The Window" && ["Greedy Joker", "Rough Gem"].includes(cname)) {
+            score -= 45;
+          } else if (upcomingBoss === "The Goad" && ["Wrathful Joker", "Arrowhead"].includes(cname)) {
+            score -= 45;
+          } else if (upcomingBoss === "The Club" && ["Gluttonous Joker", "Onyx Agate"].includes(cname)) {
+            score -= 45;
+          } else if (upcomingBoss === "The Needle") {
+            if (["Burglar", "Grabber", "Nacho Tong"].includes(cname)) score += 35;
+            if (["Ice Cream", "Bull", "Cavendish"].includes(cname)) score += 25;
+          } else if (upcomingBoss === "The Water") {
+            if (["Mail-In Rebate", "Castle"].includes(cname)) score -= 35;
+          }
+        }
+
+        // 利息线保护 ($25 黄金利息法则) - 仅当非生死紧急时惩罚
+        if (canAfford && ((state.ante || 1) > 1 || jokersCount >= 2)) {
+          const remaining = money - cost;
+          const curInterest = Math.min(5, Math.floor(money / 5));
+          const newInterest = Math.min(5, Math.floor(remaining / 5));
+          const interestLoss = curInterest - newInterest;
+          if (interestLoss > 0 && !TOP_TIER.includes(cname) && pillar !== synergy.primaryNeed) {
+            score -= (interestLoss * 20);
+          }
         }
       }
 
-      // 利息线保护 ($25 黄金利息法则)
-      if (canAfford) {
-        const remaining = money - cost;
-        const curInterest = Math.min(5, Math.floor(money / 5));
-        const newInterest = Math.min(5, Math.floor(remaining / 5));
-        const interestLoss = curInterest - newInterest;
-        if (interestLoss > 0 && !TOP_TIER.includes(cname) && pillar !== synergy.primaryNeed) {
-          score -= (interestLoss * 20); // 惩罚跌破利息挡位的平庸小丑采购
-        }
-      }
-
-      if (!hasSlot) score -= 30;
+      if (!hasSlot) score -= 35;
       if (!canAfford) score -= 50;
 
       evaluatedCards.push({
         ...c,
+        isConsumable: isConsumable,
         pillar: pillar,
         score: score,
         canAfford: canAfford,
@@ -2234,6 +2292,54 @@ end
 
     evaluatedCards.sort((a, b) => b.score - a.score);
     const bestCard = evaluatedCards[0];
+
+    // Evaluate shop boosters
+    const evaluatedBoosters = [];
+    for (const b of boosters) {
+      const bname = b.name || "";
+      const cost = Number(b.cost) || 0;
+      const canAfford = money >= cost;
+      let bScore = 50;
+
+      if (bname.includes("Buffoon")) {
+        // Buffoon pack: provides jokers! Critical for early survival
+        bScore = (jokersCount === 0 ? 100 : (jokersCount === 1 ? 88 : (jokersCount < maxJokerSlots ? 72 : 35)));
+      } else if (bname.includes("Celestial")) {
+        bScore = 75;
+      } else if (bname.includes("Arcana")) {
+        bScore = 72;
+      } else if (bname.includes("Spectral")) {
+        bScore = 78;
+      } else if (bname.includes("Standard")) {
+        bScore = 48;
+      }
+
+      if (bname.includes("Mega") || bname.includes("Jumbo")) {
+        bScore += 12;
+      }
+
+      // Safe threshold for booster purchase:
+      // Early game survival: Buffoon pack has threshold = 0 if < 2 jokers.
+      let safeThreshold = 0;
+      if (bname.includes("Buffoon") && jokersCount < 2) {
+        safeThreshold = 0;
+      } else if ((state.ante || 1) <= 2) {
+        safeThreshold = 4;
+      } else {
+        safeThreshold = 20;
+      }
+      const budgetAllowed = canAfford && (money - cost >= safeThreshold);
+
+      evaluatedBoosters.push({
+        ...b,
+        score: bScore,
+        canAfford: canAfford,
+        budgetAllowed: budgetAllowed,
+        recommendation: budgetAllowed && bScore >= 80 ? "强烈推荐" : (budgetAllowed ? "值得购买" : "资金暂缓")
+      });
+    }
+    evaluatedBoosters.sort((a, b) => b.score - a.score);
+    const bestBooster = evaluatedBoosters.find(b => b.budgetAllowed) || null;
 
     // Evaluate shop vouchers
     const evaluatedVouchers = [];
@@ -2258,8 +2364,8 @@ end
 
     // Full Joker Replacement / Sell Evaluation
     let sellRecommendation = null;
-    if (!hasSlot && state.jokers && state.jokers.length > 0 && evaluatedCards.length > 0) {
-      const bestCandidate = evaluatedCards[0];
+    if (jokersCount >= maxJokerSlots && state.jokers && state.jokers.length > 0 && evaluatedCards.length > 0) {
+      const bestCandidate = evaluatedCards.find(c => !c.isConsumable);
       if (bestCandidate && bestCandidate.score >= 80 && money >= bestCandidate.cost) {
         let weakest = null;
         let weakestScore = 999;
@@ -2282,12 +2388,22 @@ end
       }
     }
 
-    // Reroll evaluation
-    const hasStrongShopCard = (bestCard && bestCard.score >= 75) ||
-                              (bestVoucher && bestVoucher.score >= 75) ||
-                              boosters.some(b => b.cost && money - b.cost >= 25);
+    // Reroll safety evaluation:
+    // CRITICAL: Rerolling costs $rerollCost (usually $5).
+    // If money < rerollCost + 4 (e.g. $8 < $9), rerolling leaves you with <= $3,
+    // which makes it impossible to buy ANY Joker or Booster on the refreshed shelf!
+    const hasAffordableJoker = evaluatedCards.some(c => !c.isConsumable && c.canAfford && c.hasSlot && c.score >= 45);
+    const hasAffordableBuffoon = evaluatedBoosters.some(b => (b.name || "").includes("Buffoon") && b.canAfford);
+    const hasStrongShopCard = (bestCard && bestCard.canAfford && bestCard.hasSlot && bestCard.score >= 70) ||
+                              (bestVoucher && bestVoucher.canAfford && bestVoucher.score >= 75) ||
+                              (bestBooster && bestBooster.canAfford && bestBooster.score >= 70);
+
     const safeReroll = money >= 25 + rerollCost && !hasStrongShopCard;
-    const emergencyReroll = (state.ante || 1) <= 2 && jokersCount === 0 && money >= rerollCost && !hasStrongShopCard;
+    const emergencyReroll = (state.ante || 1) <= 2 && jokersCount === 0 &&
+                            money >= (rerollCost + 4) &&
+                            !hasAffordableJoker &&
+                            !hasAffordableBuffoon &&
+                            !hasStrongShopCard;
     const shouldReroll = safeReroll || emergencyReroll;
 
     let interestAdvice = "💰 当前资金充足";
@@ -2300,7 +2416,9 @@ end
 
     return {
       evaluatedCards: evaluatedCards,
-      bestCard: bestCard && bestCard.canAfford && (bestCard.score >= 60 || (jokersCount < 2 && bestCard.score >= 45)) ? bestCard : null,
+      bestCard: bestCard && bestCard.canAfford && bestCard.hasSlot && (bestCard.score >= 60 || (jokersCount < 2 && bestCard.score >= 45)) ? bestCard : null,
+      evaluatedBoosters: evaluatedBoosters,
+      bestBooster: bestBooster,
       evaluatedVouchers: evaluatedVouchers,
       bestVoucher: bestVoucher,
       sellRecommendation: sellRecommendation,
@@ -2309,7 +2427,7 @@ end
       canReroll: money >= rerollCost,
       shouldReroll: shouldReroll,
       rerollCost: rerollCost,
-      hasSlot: hasSlot,
+      hasSlot: jokersCount < maxJokerSlots,
       synergy: synergy
     };
   }
@@ -2454,8 +2572,9 @@ end
 
     for (let i = 0; i < cons.length; i++) {
       const c = cons[i];
-      if (c.can_use === false) continue;
       const name = c.name || "";
+      const isPlanet = (c.set === "Planet") || PLANET_NAMES.includes(name) || (c.type === "planet");
+      if (c.can_use === false && !isPlanet) continue;
       const idx = c.index !== undefined ? c.index : (i + 1);
 
       // Black Hole: upgrades ALL poker hands +1 level!
@@ -2463,18 +2582,18 @@ end
         return { card: c, index: idx, targetIndices: null, reason: "全牌型等级统一 +1 级！" };
       }
       // Planet cards: permanently boost hand level!
-      if (PLANET_NAMES.includes(name) || (c.set === "Planet")) {
+      if (isPlanet) {
         return { card: c, index: idx, targetIndices: null, reason: `升级手牌基础等级 (${name})` };
       }
       // The Hermit: Doubles money up to $20!
-      if (name === "The Hermit" && (state.money || 0) >= 10) {
+      if (name === "The Hermit" && (state.money || 0) >= 5) {
         return { card: c, index: idx, targetIndices: null, reason: `金钱翻倍 (现持 $${state.money})` };
       }
       // Temperance: Gives total sell value of all jokers
       if (name === "Temperance") {
         let totalSell = 0;
         for (const j of (state.jokers || [])) totalSell += (j.sell_cost || j.sell_value || 1);
-        if (totalSell >= 6) return { card: c, index: idx, targetIndices: null, reason: `变现小丑总价值 (+$${totalSell})` };
+        if (totalSell >= 4) return { card: c, index: idx, targetIndices: null, reason: `变现小丑总价值 (+$${totalSell})` };
       }
       // The Wheel of Fortune: 1 in 4 to add Foil, Holo, or Polychrome to a random joker
       if (name === "The Wheel of Fortune") {
@@ -2518,8 +2637,9 @@ end
 
     for (let i = 0; i < cons.length; i++) {
       const c = cons[i];
-      if (c.can_use === false) continue;
       const name = c.name || "";
+      const isPlanet = (c.set === "Planet") || PLANET_NAMES.includes(name) || (c.type === "planet");
+      if (c.can_use === false && !isPlanet) continue;
       const idx = c.index !== undefined ? c.index : (i + 1);
 
       // Black Hole: upgrades ALL poker hands +1 level!
@@ -2527,18 +2647,18 @@ end
         return { card: c, index: idx, targetIndices: null, reason: "全牌型等级统一 +1 级！" };
       }
       // Planet cards: permanently boost hand level and free consumable slot!
-      if (PLANET_NAMES.includes(name) || (c.set === "Planet")) {
+      if (isPlanet) {
         return { card: c, index: idx, targetIndices: null, reason: `升级手牌基础等级 (${name}) 并腾出槽位` };
       }
       // The Hermit: Doubles money up to $20!
-      if (name === "The Hermit" && (state.money || 0) >= 5) {
+      if (name === "The Hermit" && (state.money || 0) >= 4) {
         return { card: c, index: idx, targetIndices: null, reason: `金钱翻倍 (现持 $${state.money})` };
       }
       // Temperance: Gives total sell value of all jokers (max $50)
       if (name === "Temperance") {
         let totalSell = 0;
         for (const j of (state.jokers || [])) totalSell += (j.sell_cost || j.sell_value || 1);
-        if (totalSell >= 4) return { card: c, index: idx, targetIndices: null, reason: `变现小丑总价值 (+$${totalSell})` };
+        if (totalSell >= 3) return { card: c, index: idx, targetIndices: null, reason: `变现小丑总价值 (+$${totalSell})` };
       }
       // The Wheel of Fortune: 1 in 4 to add Foil, Holo, or Polychrome to a random joker
       if (name === "The Wheel of Fortune") {
@@ -3718,13 +3838,15 @@ end
           } else if (state.can_toggle_shop || timeInShop > 2500) {
             const shopAdv = findBestShopPurchases(state);
             const bestCard = shopAdv && shopAdv.bestCard;
+            const bestBooster = shopAdv && shopAdv.bestBooster;
             const bestVoucher = shopAdv && shopAdv.bestVoucher;
             const sellRec = shopAdv && shopAdv.sellRecommendation;
             const jokersCount = (state.jokers || []).length;
-            const shouldBuyJoker = bestCard && bestCard.canAfford && bestCard.hasSlot && (
+            const shouldBuyCard = bestCard && bestCard.canAfford && bestCard.hasSlot && (
               bestCard.recommendation === "强烈推荐" ||
               (jokersCount < 2 && bestCard.score >= 45) ||
-              (jokersCount === 0 && bestCard.score >= 35)
+              (jokersCount === 0 && bestCard.score >= 35) ||
+              (bestCard.isConsumable && bestCard.score >= 60)
             );
 
             const cardKey = bestCard ? `card_${bestCard.index}_${bestCard.name}` : null;
@@ -3749,17 +3871,38 @@ end
               window.executeSellCard(sellRec.sellIndex, "jokers");
               executedAction = true;
               unlockCooldownMs = 600;
-            } else if (shouldBuyJoker && cardKey && !this._shopAttemptedItems.has(cardKey)) {
-              // 2. Buy recommended joker (only once per item key)
+            } else if (bestBooster && (state.ante || 1) <= 2 && jokersCount < 2 && (bestBooster.name || "").includes("Buffoon") && !this._shopAttemptedItems.has(`booster_${bestBooster.index}`)) {
+              // Priority 1: In early game with 0/1 joker, buying Buffoon pack is HIGHEST survival priority!
+              const bKey = `booster_${bestBooster.index}`;
+              this._shopAttemptedItems.add(bKey);
+              this._lastProgressTimestamp = now;
+              this.updateStatus(`开局紧急采购小丑包: ${bestBooster.name}`, true);
+              console.log("[AutoPilot] Auto buy early buffoon pack for survival:", bestBooster.name, "at index", bestBooster.index);
+              window.executeBuyAction(bestBooster.index, "shop_booster");
+              executedAction = true;
+              unlockCooldownMs = 600;
+            } else if (shouldBuyCard && cardKey && !this._shopAttemptedItems.has(cardKey)) {
+              // Priority 2: Buy recommended card (Joker or Consumable)
               this._shopAttemptedItems.add(cardKey);
               this._lastProgressTimestamp = now;
-              this.updateStatus(`购买小丑: ${bestCard.name}`, true);
-              console.log("[AutoPilot] Auto buy joker:", bestCard.name, "score:", bestCard.score);
+              const cardLabel = bestCard.isConsumable ? `购买消耗牌: ${bestCard.name}` : `购买小丑: ${bestCard.name}`;
+              this.updateStatus(cardLabel, true);
+              console.log("[AutoPilot] Auto buy card:", bestCard.name, "isConsumable:", bestCard.isConsumable, "score:", bestCard.score);
               window.executeBuyAction(bestCard.index, "shop_jokers");
               executedAction = true;
               unlockCooldownMs = 600;
+            } else if (bestBooster && !this._shopAttemptedItems.has(`booster_${bestBooster.index}`)) {
+              // Priority 3: Buy affordable booster pack
+              const bKey = `booster_${bestBooster.index}`;
+              this._shopAttemptedItems.add(bKey);
+              this._lastProgressTimestamp = now;
+              this.updateStatus(`购买补充包: ${bestBooster.name || '补充包'}`, true);
+              console.log("[AutoPilot] Auto buy booster pack:", bestBooster.name, "at index", bestBooster.index);
+              window.executeBuyAction(bestBooster.index, "shop_booster");
+              executedAction = true;
+              unlockCooldownMs = 600;
             } else if (bestVoucher && voucherKey && !this._shopAttemptedItems.has(voucherKey)) {
-              // 3. Buy recommended voucher (only once per item key)
+              // Priority 4: Buy recommended voucher
               this._shopAttemptedItems.add(voucherKey);
               this._lastProgressTimestamp = now;
               this.updateStatus(`购买优惠券: ${bestVoucher.name}`, true);
@@ -3767,47 +3910,33 @@ end
               window.executeBuyAction(bestVoucher.index, "shop_vouchers");
               executedAction = true;
               unlockCooldownMs = 600;
+            } else if (shopAdv && shopAdv.shouldReroll && !this._shopRerolled) {
+              // Priority 5: Reroll shop if cash is abundant or genuine emergency
+              this._shopRerolled = true;
+              this._lastProgressTimestamp = now;
+              this.updateStatus(`刷新商店 ($${shopAdv.rerollCost})...`, true);
+              console.log("[AutoPilot] Auto reroll shop:", "cost=", shopAdv.rerollCost);
+              window.executeRerollShop();
+              executedAction = true;
+              unlockCooldownMs = 600;
             } else {
-              // 4. Consider purchasing booster pack if economy allows ($25 interest line or early healthy cash)
-              const safeThreshold = (state.ante && state.ante > 2) ? 25 : 12;
-              const affordableBooster = boosters.find(b => b.cost && (state.money - b.cost >= safeThreshold) && !this._shopAttemptedItems.has(`booster_${b.index}`));
-              if (affordableBooster) {
-                const bKey = `booster_${affordableBooster.index}`;
-                this._shopAttemptedItems.add(bKey);
-                this._lastProgressTimestamp = now;
-                this.updateStatus(`购买补充包: ${affordableBooster.name || '补充包'}`, true);
-                console.log("[AutoPilot] Auto buy booster pack:", affordableBooster.name, "at index", affordableBooster.index);
-                window.executeBuyAction(affordableBooster.index, "shop_booster");
-                executedAction = true;
-                unlockCooldownMs = 600;
-              } else if (shopAdv && shopAdv.shouldReroll && !this._shopRerolled) {
-                // 5. Reroll shop if cash is abundant (> $25 + cost) and shelf has no strong cards
-                this._shopRerolled = true;
-                this._lastProgressTimestamp = now;
-                this.updateStatus(`刷新商店 ($${shopAdv.rerollCost})...`, true);
-                console.log("[AutoPilot] Auto reroll shop:", "cost=", shopAdv.rerollCost);
-                window.executeRerollShop();
-                executedAction = true;
-                unlockCooldownMs = 600;
+              if (this._togglingShop || (now - (this.lastToggleShopTime || 0) < 2500)) {
+                this.updateStatus("正在进入下轮盲注...", true);
+                executedAction = false;
+                unlockCooldownMs = 300;
               } else {
-                if (this._togglingShop || (now - (this.lastToggleShopTime || 0) < 2500)) {
-                  this.updateStatus("正在进入下轮盲注...", true);
-                  executedAction = false;
-                  unlockCooldownMs = 300;
-                } else {
-                  this._togglingShop = true;
-                  this._togglingShopStart = now;
-                  this.lastToggleShopTime = now;
-                  this._lastProgressTimestamp = now;
-                  this._shopSoldJoker = false;
-                  this._shopAttemptedItems.clear();
-                  this._shopRerolled = false;
-                  this.updateStatus("离开商店进入下轮...", true);
-                  console.log(`[AutoPilot] Auto toggle shop (can_toggle_shop=${state.can_toggle_shop}, time=${timeInShop}ms)`);
-                  window.executeToggleShop();
-                  executedAction = true;
-                  unlockCooldownMs = 1000;
-                }
+                this._togglingShop = true;
+                this._togglingShopStart = now;
+                this.lastToggleShopTime = now;
+                this._lastProgressTimestamp = now;
+                this._shopSoldJoker = false;
+                this._shopAttemptedItems.clear();
+                this._shopRerolled = false;
+                this.updateStatus("离开商店进入下轮...", true);
+                console.log(`[AutoPilot] Auto toggle shop (can_toggle_shop=${state.can_toggle_shop}, time=${timeInShop}ms)`);
+                window.executeToggleShop();
+                executedAction = true;
+                unlockCooldownMs = 1000;
               }
             }
           } else {
@@ -3864,8 +3993,22 @@ end
               let bestScore = -999;
               for (const c of packCards) {
                 if (!canUsePackCard(c, state)) continue;
-                const p = JOKER_PILLAR_MAP[c.name] || "utility";
-                let score = (p === syn.primaryNeed ? 30 : 10);
+                const cname = c.name || "";
+                const p = JOKER_PILLAR_MAP[cname] || (c.xmult && c.xmult > 1 ? "x_mult" : (c.mult >= 8 ? "flat_mult" : (c.chips >= 30 ? "chips" : "utility")));
+                let score = 50;
+                if (TOP_TIER.includes(cname)) score += 35;
+                if (p === syn.primaryNeed) score += 30;
+                if (c.xmult && c.xmult > 1.0) score += 40;
+                if (c.mult && c.mult >= 8) score += 20;
+                if (c.chips && c.chips >= 50) score += 20;
+                if (c.edition === "poly") score += 30;
+                else if (c.edition === "holo") score += 20;
+                else if (c.edition === "foil") score += 15;
+                if ((state.ante || 1) <= 2 && jCount < 2) {
+                  if (c.mult || c.chips || ["Joker", "Half Joker", "Misprint", "Popcorn", "Ice Cream", "Blue Joker", "Gros Michel", "Abstract Joker"].includes(cname)) {
+                    score += 35;
+                  }
+                }
                 if (score > bestScore) { bestScore = score; bestCard = c; }
               }
             } else if (sname === "TAROT_PACK") {

@@ -241,26 +241,51 @@ end
 local function consumable_json(c, idx)
   local name = c.ability and c.ability.name or ""
   local set = c.ability and c.ability.set or ""
-  local can_use = true
+  local can_use = false
   if c.can_use_consumeable then
-    local ok, res = pcall(function() return c:can_use_consumeable() end)
-    if ok and res == false then
-      -- If it returned false solely because hand cards are not currently highlighted,
-      -- check if it is a targeted card that can be used once hand cards are highlighted
-      if c.ability and c.ability.consumeable and c.ability.consumeable.max_highlighted then
-        local min_needed = c.ability.consumeable.min_highlighted or 1
-        local hand_count = (G.hand and G.hand.cards and #G.hand.cards) or 0
-        local valid_state = (G.STATE == G.STATES.SELECTING_HAND or G.STATE == G.STATES.TAROT_PACK or G.STATE == G.STATES.SPECTRAL_PACK or G.STATE == G.STATES.PLANET_PACK)
-        if valid_state and hand_count >= min_needed then
-          can_use = true
-        else
-          can_use = false
-        end
-      else
-        can_use = false
-      end
+    local ok, res = pcall(function() return c:can_use_consumeable(true, true) end)
+    if ok and res then
+      can_use = true
     end
   end
+
+  if not can_use then
+    -- Targeted cards requiring hand cards to be highlighted
+    if c.ability and c.ability.consumeable and c.ability.consumeable.max_highlighted then
+      local min_needed = c.ability.consumeable.min_highlighted or 1
+      local hand_count = (G.hand and G.hand.cards and #G.hand.cards) or 0
+      local valid_state = (G.STATE == G.STATES.SELECTING_HAND or G.STATE == G.STATES.TAROT_PACK or G.STATE == G.STATES.SPECTRAL_PACK or G.STATE == G.STATES.PLANET_PACK)
+      if valid_state and hand_count >= min_needed then
+        can_use = true
+      end
+    -- Non-targeted consumables usable across SHOP, BLIND_SELECT, ROUND_EVAL, and SELECTING_HAND
+    elseif set:lower() == "planet" or (c.ability and c.ability.consumeable and c.ability.consumeable.hand_type) or name == "Black Hole" then
+      can_use = true
+    elseif name == "The Hermit" or name == "Temperance" then
+      can_use = true
+    elseif name == "The Wheel of Fortune" then
+      local jokers = (G.jokers and G.jokers.cards) or {}
+      for _, j in ipairs(jokers) do
+        if not j.edition then can_use = true break end
+      end
+    elseif name == "The Emperor" or name == "The High Priestess" then
+      local max_c = (G.consumeables and G.consumeables.config and G.consumeables.config.card_limit) or 2
+      local cur_c = (G.consumeables and G.consumeables.cards and #G.consumeables.cards) or 0
+      if cur_c < max_c or (c.area == G.consumeables) then can_use = true end
+    elseif name == "Judgement" or name == "The Soul" or name == "Wraith" then
+      local max_j = (G.jokers and G.jokers.config and G.jokers.config.card_limit) or 5
+      local cur_j = (G.jokers and G.jokers.cards and #G.jokers.cards) or 0
+      if cur_j < max_j then can_use = true end
+    elseif name == "The Fool" then
+      if G.GAME and G.GAME.last_tarot_planet and G.GAME.last_tarot_planet ~= "c_fool" then
+        can_use = true
+      end
+    elseif name == "Ankh" or name == "Hex" then
+      local j_count = (G.jokers and G.jokers.cards and #G.jokers.cards) or 0
+      if j_count > 0 then can_use = true end
+    end
+  end
+
   local parts = {
     '"name":' .. jstr(name),
     '"type":' .. jstr(set:lower()),
@@ -1254,14 +1279,24 @@ local function decidex_execute_inner(action, args)
       if c.cost and c.cost > 0 and c.cost > available_money then
         return false, "cannot afford booster pack: cost=" .. tostring(c.cost) .. ", available=" .. tostring(available_money)
       end
-      local btn = { config = { ref_table = c, button = 'use_card' } }
-      if G.FUNCS and G.FUNCS.use_card then
-        local ok, err = pcall(G.FUNCS.use_card, btn)
-        if ok then return true, "opened booster pack via use_card" end
+      if G.FUNCS and G.FUNCS.buy_from_shop then
+        local btn = { config = { ref_table = c, id = 'buy_button' } }
+        local ok, err = pcall(G.FUNCS.buy_from_shop, btn)
+        if ok then return true, "opened booster pack via buy_from_shop" end
       end
       if c.open then
+        if c.cost and c.cost > 0 and ease_dollars then
+          pcall(function() ease_dollars(-c.cost) end)
+        elseif c.cost and c.cost > 0 and G.GAME and G.GAME.dollars then
+          G.GAME.dollars = G.GAME.dollars - c.cost
+        end
         local ok, err = pcall(function() c:open() end)
         if ok then return true, "opened booster pack directly" end
+      end
+      if G.FUNCS and G.FUNCS.use_card then
+        local btn = { config = { ref_table = c, button = 'use_card' } }
+        local ok, err = pcall(G.FUNCS.use_card, btn)
+        if ok then return true, "opened booster pack via use_card" end
       end
       return false, "failed to open booster pack"
     end
