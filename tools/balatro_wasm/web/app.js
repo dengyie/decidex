@@ -452,14 +452,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v68 / decidex-balatro-core-v68
-  const EXPECTED_LOVE_SIZE = 56340765;
+  const EXPECTED_LOVE_SIZE = 56341110;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v72";
+  const ASSET_VERSION = "v73";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=72";
-  const ASSET_WASM_URL = "love.wasm.bin?v=72";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=73";
+  const ASSET_WASM_URL = "love.wasm.bin?v=73";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -2559,6 +2559,25 @@ end
       if (name === "The Fool") {
         return { card: c, index: idx, targetIndices: null, reason: "复制上一张使用的塔罗/星球牌" };
       }
+      // The Soul: Creates a Legendary Joker!
+      if (name === "The Soul") {
+        const maxJokers = Number(state.joker_slots) || 5;
+        if ((state.jokers || []).length < maxJokers) return { card: c, index: idx, targetIndices: null, reason: "召唤传奇小丑！" };
+      }
+      // Spectral non-combat utilities
+      if (name === "Ankh") {
+        const jCount = (state.jokers || []).length;
+        const maxJokers = Number(state.joker_slots) || 5;
+        if (jCount === 1 && maxJokers > 1) return { card: c, index: idx, targetIndices: null, reason: "克隆单核心小丑 (Ankh)" };
+      }
+      if (name === "Hex") {
+        const jCount = (state.jokers || []).length;
+        if (jCount === 1) return { card: c, index: idx, targetIndices: null, reason: "单核心小丑赋予多彩 (Hex)" };
+      }
+      if (name === "Wraith") {
+        const maxJokers = Number(state.joker_slots) || 5;
+        if ((state.jokers || []).length < maxJokers && (state.money || 0) <= 5) return { card: c, index: idx, targetIndices: null, reason: "低金钱时召唤稀有小丑 (Wraith)" };
+      }
     }
     return null;
   }
@@ -3168,6 +3187,8 @@ end
     lastStartRunTime: 0,
     _lastProgressTimestamp: 0,
     _shopAttemptedItems: new Set(),
+    _playSawHandPlayed: false,
+    _discardSawDraw: false,
 
     toggle(enable) {
       this.enabled = enable !== undefined ? Boolean(enable) : !this.enabled;
@@ -3188,6 +3209,8 @@ end
         }
         this.busy = false;
         this._actionInFlight = null;
+        this._playSawHandPlayed = false;
+        this._discardSawDraw = false;
         this.pendingState = null;
       }
     },
@@ -3364,16 +3387,51 @@ end
         this._actionFailureStreak = 0;
       }
       if (!this.enabled) return;
+
+      // Play lifecycle tracking: Must witness HAND_PLAYED before considering play completed
+      if (this._actionInFlight === "play") {
+        if (sname === "HAND_PLAYED") {
+          this._playSawHandPlayed = true;
+        } else if (this._playSawHandPlayed && (sname === "SELECTING_HAND" || sname === "ROUND_EVAL" || sname === "GAME_OVER" || sname === "GAME_WON")) {
+          // Play lifecycle completed cleanly!
+          this._actionInFlight = null;
+          this._playSawHandPlayed = false;
+          this.busy = false;
+        } else if (now - (this._lastPlayActionTime || 0) > 8000) {
+          // Hard watchdog fallback
+          this._actionInFlight = null;
+          this._playSawHandPlayed = false;
+          this.busy = false;
+        }
+      }
+
+      // Discard lifecycle tracking
+      if (this._actionInFlight === "discard") {
+        if (sname === "DRAW_TO_HAND") {
+          this._discardSawDraw = true;
+        } else if (this._discardSawDraw && sname === "SELECTING_HAND") {
+          this._actionInFlight = null;
+          this._discardSawDraw = false;
+          this.busy = false;
+        } else if (now - (this._lastDiscardActionTime || 0) > 5000) {
+          this._actionInFlight = null;
+          this._discardSawDraw = false;
+          this.busy = false;
+        }
+      }
+
       const actionMadeProgress = (
         (this._lastHandsLeft !== undefined && handsLeft !== this._lastHandsLeft) ||
         (this._lastDiscardsLeft !== undefined && discardsLeft !== this._lastDiscardsLeft) ||
-        (this._lastHandLen !== undefined && handLen !== this._lastHandLen && this._actionInFlight)
+        (this._lastHandLen !== undefined && handLen !== this._lastHandLen && this._actionInFlight && this._actionInFlight !== "play" && this._actionInFlight !== "discard")
       );
 
-      // When the state changes or hands/discards progress, unlock immediately!
+      // When the state changes or progress is made, unlock if NOT in combat animation lifecycle
       if (stateChanged || actionMadeProgress) {
-        this.busy = false;
-        this._actionInFlight = null;
+        if (this._actionInFlight !== "play" && this._actionInFlight !== "discard") {
+          this.busy = false;
+          this._actionInFlight = null;
+        }
         this.pendingState = null;
         this._actionFailureStreak = 0;
         this._lastHandsLeft = handsLeft;
@@ -3523,13 +3581,13 @@ end
             this.updateStatus("等待发牌...", false);
             executedAction = false;
             unlockCooldownMs = 200;
-          } else if (this._actionInFlight === "play" && (now - (this._lastPlayActionTime || 0) < 3500)) {
-            // A play was dispatched and is animating; wait up to 3.5s (not 8s!)
+          } else if (this._actionInFlight === "play" && (now - (this._lastPlayActionTime || 0) < 6000)) {
+            // A play was dispatched and is animating; wait up to 6.0s
             this.updateStatus("出牌结算中...", true);
             executedAction = false;
             unlockCooldownMs = 400;
-          } else if (this._actionInFlight === "discard" && (now - (this._lastDiscardActionTime || 0) < 2200)) {
-            // A discard was dispatched and is drawing; wait up to 2.2s
+          } else if (this._actionInFlight === "discard" && (now - (this._lastDiscardActionTime || 0) < 3000)) {
+            // A discard was dispatched and is drawing; wait up to 3.0s
             this.updateStatus("弃牌处理中...", true);
             executedAction = false;
             unlockCooldownMs = 400;
@@ -3538,6 +3596,8 @@ end
             if (this._actionInFlight) {
               console.warn(`[AutoPilot] In-flight action ${this._actionInFlight} timed out in SELECTING_HAND, resetting action lock`);
               this._actionInFlight = null;
+              this._playSawHandPlayed = false;
+              this._discardSawDraw = false;
             }
 
             // Priority 1: Check if jokers need reordering according to left-to-right math rule
@@ -3570,10 +3630,11 @@ end
                   const arb = arbitrateAction(state, bestPlay, bestDiscard);
 
                   if (arb && arb.verdict === "DISCARD" && arb.cards && arb.cards.length > 0) {
-                    if (now - (this._lastDiscardActionTime || 0) > 1200) {
+                    if (now - (this._lastDiscardActionTime || 0) > 1500) {
                       this._lastDiscardActionTime = now;
                       this._lastProgressTimestamp = now;
                       this._actionInFlight = "discard";
+                      this._discardSawDraw = false;
                       this.updateStatus(`自动弃牌 (${arb.cards.length}张)...`, true);
                       console.log("[AutoPilot] Executing strategic discard:", arb.reason);
                       window.executeDiscardAction(arb.cards);
@@ -3585,19 +3646,20 @@ end
                       unlockCooldownMs = 250;
                     }
                   } else if (arb && arb.cards && arb.cards.length > 0) {
-                    if (now - (this._lastPlayActionTime || 0) > 1800) {
+                    if (now - (this._lastPlayActionTime || 0) > 3000) {
                       this._lastPlayActionTime = now;
                       this._lastProgressTimestamp = now;
                       this._actionInFlight = "play";
+                      this._playSawHandPlayed = false;
                       this.updateStatus(`自动出牌 (${bestPlay.handName})...`, true);
                       console.log("[AutoPilot] Executing play hand:", bestPlay.handName, arb.reason);
                       window.executePlayAction(arb.cards);
                       executedAction = true;
-                      unlockCooldownMs = 2200;
+                      unlockCooldownMs = 2500;
                     } else {
                       this.updateStatus("出牌冷却中...", true);
                       executedAction = false;
-                      unlockCooldownMs = 250;
+                      unlockCooldownMs = 300;
                     }
                   }
                 }

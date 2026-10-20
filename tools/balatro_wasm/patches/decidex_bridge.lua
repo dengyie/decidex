@@ -779,6 +779,39 @@ local LAST_PACK_SIG = ""
 local function check_and_emit_state()
   if not G or not G.STATE or not G.STATES then return end
 
+  local now = (love.timer and love.timer.getTime()) or os.clock()
+
+  -- Hand play & discard lifecycle trackers
+  if G.STATE == G.STATES.HAND_PLAYED then
+    _G._hand_play_saw_hand_played = true
+  elseif G.STATE == G.STATES.DRAW_TO_HAND then
+    _G._hand_discard_saw_draw = true
+  elseif G.STATE ~= G.STATES.SELECTING_HAND then
+    _G._hand_play_in_flight = nil
+    _G._hand_play_saw_hand_played = nil
+    _G._hand_discard_in_flight = nil
+    _G._hand_discard_saw_draw = nil
+  elseif _G._hand_play_saw_hand_played and G.STATE == G.STATES.SELECTING_HAND then
+    local play_has_cards = (G.play and G.play.cards and #G.play.cards > 0)
+    if not play_has_cards then
+      _G._hand_play_in_flight = nil
+      _G._hand_play_saw_hand_played = nil
+    end
+  elseif _G._hand_discard_saw_draw and G.STATE == G.STATES.SELECTING_HAND then
+    _G._hand_discard_in_flight = nil
+    _G._hand_discard_saw_draw = nil
+  end
+
+  -- Watchdog fallback to prevent any permanent lock
+  if _G._hand_play_in_flight and _G._hand_play_start_time and (now - _G._hand_play_start_time > 8.0) then
+    _G._hand_play_in_flight = nil
+    _G._hand_play_saw_hand_played = nil
+  end
+  if _G._hand_discard_in_flight and _G._hand_discard_start_time and (now - _G._hand_discard_start_time > 5.0) then
+    _G._hand_discard_in_flight = nil
+    _G._hand_discard_saw_draw = nil
+  end
+
   local state_changed = (G.STATE ~= LAST_STATE_NUM)
   if state_changed then
     LAST_STATE_NUM = G.STATE
@@ -954,7 +987,37 @@ local function decidex_execute_inner(action, args)
     end
 
     local now = (love.timer and love.timer.getTime()) or os.clock()
-    if _G._last_hand_action_time and (now - _G._last_hand_action_time < 0.25) then
+
+    if action == "play" then
+      if _G._hand_play_in_flight then
+        if _G._hand_play_start_time and (now - _G._hand_play_start_time < 8.0) then
+          return false, "hand play already in progress (animating)"
+        else
+          _G._hand_play_in_flight = nil
+          _G._hand_play_saw_hand_played = nil
+        end
+      end
+      if G.GAME and G.GAME.blind and G.GAME.blind.block_play then
+        return false, "blind blocks play"
+      end
+      if G.GAME and G.GAME.current_round and G.GAME.current_round.hands_left and G.GAME.current_round.hands_left <= 0 then
+        return false, "no hands left"
+      end
+    elseif action == "discard" then
+      if _G._hand_discard_in_flight then
+        if _G._hand_discard_start_time and (now - _G._hand_discard_start_time < 5.0) then
+          return false, "hand discard already in progress (animating)"
+        else
+          _G._hand_discard_in_flight = nil
+          _G._hand_discard_saw_draw = nil
+        end
+      end
+      if G.GAME and G.GAME.current_round and G.GAME.current_round.discards_left and G.GAME.current_round.discards_left <= 0 then
+        return false, "no discards left"
+      end
+    end
+
+    if _G._last_hand_action_time and (now - _G._last_hand_action_time < 0.5) then
       return false, "hand action debounced"
     end
 
@@ -991,34 +1054,35 @@ local function decidex_execute_inner(action, args)
     end
 
     if action == "play" then
-      if G.GAME and G.GAME.blind and G.GAME.blind.block_play then
-        return false, "blind blocks play"
-      end
-      if G.GAME and G.GAME.current_round and G.GAME.current_round.hands_left and G.GAME.current_round.hands_left <= 0 then
-        return false, "no hands left"
-      end
       if G.FUNCS and G.FUNCS.play_cards_from_highlighted then
         local selected = {}
         for _, card in ipairs(G.hand.highlighted or {}) do selected[#selected + 1] = card end
         _G._last_hand_action_time = now
+        _G._hand_play_in_flight = true
+        _G._hand_play_start_time = now
+        _G._hand_play_saw_hand_played = false
         local ok, err = pcall(G.FUNCS.play_cards_from_highlighted, {})
         if ok then
           record_hand_type(classify_selected_hand(selected))
           return true, "played"
         else
+          _G._hand_play_in_flight = nil
+          _G._hand_play_saw_hand_played = nil
           return false, "play error: " .. tostring(err)
         end
       end
     elseif action == "discard" then
-      if G.GAME and G.GAME.current_round and G.GAME.current_round.discards_left and G.GAME.current_round.discards_left <= 0 then
-        return false, "no discards left"
-      end
       if G.FUNCS and G.FUNCS.discard_cards_from_highlighted then
         _G._last_hand_action_time = now
+        _G._hand_discard_in_flight = true
+        _G._hand_discard_start_time = now
+        _G._hand_discard_saw_draw = false
         local ok, err = pcall(G.FUNCS.discard_cards_from_highlighted, {})
         if ok then
           return true, "discarded"
         else
+          _G._hand_discard_in_flight = nil
+          _G._hand_discard_saw_draw = nil
           return false, "discard error: " .. tostring(err)
         end
       end
