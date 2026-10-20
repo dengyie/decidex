@@ -452,14 +452,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v68 / decidex-balatro-core-v68
-  const EXPECTED_LOVE_SIZE = 56341110;
+  const EXPECTED_LOVE_SIZE = 56341275;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v73";
+  const ASSET_VERSION = "v74";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=73";
-  const ASSET_WASM_URL = "love.wasm.bin?v=73";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=74";
+  const ASSET_WASM_URL = "love.wasm.bin?v=74";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3551,8 +3551,8 @@ end
               executedAction = false;
               unlockCooldownMs = 200;
             }
-          } else if (timeInBlindSelect > 9000 && !this._actionInFlight) {
-            // Watchdog fallback after 9s of being stuck in BLIND_SELECT without can_select_blind
+          } else if (timeInBlindSelect > 2800 && !this._actionInFlight) {
+            // Watchdog fallback after 2.8s of being stuck in BLIND_SELECT without can_select_blind
             if (now - (this.lastBlindSelectTime || 0) > 1500) {
               this.lastBlindSelectTime = now;
               this._lastProgressTimestamp = now;

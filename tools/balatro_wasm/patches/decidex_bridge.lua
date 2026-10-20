@@ -437,12 +437,26 @@ local function find_select_blind_button()
 
   if G.GAME then G.GAME.facing_blind = nil end
 
-  -- Pure read-only check: never recreate UIBox here as that interrupts Balatro's native state machine!
-  if not (G.blind_select and not G.blind_select.REMOVED) then
-    return nil
-  end
-
   local on_deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or "Small"
+
+  -- Pure read-only check with safe fallback: avoid recreating UIBox while animations run,
+  -- but self-heal if Balatro event queue has delayed G.blind_select for > 1.8s
+  if not (G.blind_select and not G.blind_select.REMOVED) then
+    local wipe_locked = (G.CONTROLLER and G.CONTROLLER.locks and (G.CONTROLLER.locks.wipe or G.CONTROLLER.locks.load))
+    if not wipe_locked and _G._blind_select_enter_time and (now - _G._blind_select_enter_time > 1.8) then
+      if create_UIBox_blind_select and UIBox then
+        pcall(function()
+          G.blind_select = UIBox{
+            definition = create_UIBox_blind_select(),
+            config = {align="bmi", offset = {x=0,y=G.ROOM.T.y + 29},major = G.hand, bond = 'Weak'}
+          }
+        end)
+      end
+    end
+    if not (G.blind_select and not G.blind_select.REMOVED) then
+      return nil
+    end
+  end
   local opt = G.blind_select_opts and G.blind_select_opts[string.lower(on_deck)]
   if opt and opt.get_UIE_by_ID then
     local btn = nil
@@ -737,6 +751,7 @@ local function build_state_json(actual)
 
   if not (G.STATE and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then
     _G._select_blind_in_flight = nil
+    _G._blind_select_enter_time = nil
   end
 
   local can_select_blind = not not (find_select_blind_button())
@@ -900,6 +915,24 @@ local function check_and_emit_state()
   elseif G.STATE == G.STATES.BLIND_SELECT then
     G.toggling_shop = false
     G.cashing_out = false
+    local now = (love.timer and love.timer.getTime()) or os.clock()
+    if not _G._blind_select_enter_time then _G._blind_select_enter_time = now end
+    if state_changed then
+      _G._blind_select_enter_time = now
+    end
+    local wipe_locked = (G.CONTROLLER and G.CONTROLLER.locks and (G.CONTROLLER.locks.wipe or G.CONTROLLER.locks.load))
+    if not wipe_locked and (now - _G._blind_select_enter_time > 1.8) then
+      if not (G.blind_select and not G.blind_select.REMOVED) then
+        if create_UIBox_blind_select and UIBox then
+          pcall(function()
+            G.blind_select = UIBox{
+              definition = create_UIBox_blind_select(),
+              config = {align="bmi", offset = {x=0,y=G.ROOM.T.y + 29},major = G.hand, bond = 'Weak'}
+            }
+          end)
+        end
+      end
+    end
     local btn_ready = (find_select_blind_button() ~= nil)
     local deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or ""
     local facing = (G.GAME and G.GAME.facing_blind) and "1" or "0"
