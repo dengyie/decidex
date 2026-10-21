@@ -452,14 +452,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v68 / decidex-balatro-core-v68
-  const EXPECTED_LOVE_SIZE = 56342159;
+  const EXPECTED_LOVE_SIZE = 56342288;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v79";
+  const ASSET_VERSION = "v80";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=79";
-  const ASSET_WASM_URL = "love.wasm.bin?v=79";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=80";
+  const ASSET_WASM_URL = "love.wasm.bin?v=80";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -1847,8 +1847,12 @@ end
     const chipsTarget = Number(blind.chips) || 300;
     const chipsScored = Number(blind.scored) || 0;
     const need = Math.max(0, chipsTarget - chipsScored);
-    const handsLeft = Number(state.hands_left) || 1;
+    const handsLeft = (state.hands_left !== undefined && state.hands_left !== null) ? Number(state.hands_left) : 1;
     const discardsLeft = Number(state.discards_left) || 0;
+
+    if (handsLeft <= 0) {
+      return null;
+    }
 
     const filteringNote = (bestPlay.junkCards && bestPlay.junkCards.length > 0)
       ? ` [附带 ${bestPlay.junkCards.length} 张废牌 (${bestPlay.junkCards.map(c => (c.rank || '') + (c.suit || '')).join(' ')}) 进行伪弃牌过滤]`
@@ -1898,7 +1902,7 @@ end
     }
 
     // - Last hand left
-    if (handsLeft <= 1) {
+    if (handsLeft === 1) {
       return {
         verdict: "PLAY",
         confidence: "CRITICAL",
@@ -3373,7 +3377,7 @@ end
         if (["HAND_PLAYED", "DRAW_TO_HAND", "NEW_ROUND"].includes(curStateName)) {
           this._lastProgressTimestamp = now;
         }
-        const maxStuckTime = (this._actionInFlight === "play") ? 9000 : ((this._actionInFlight === "discard") ? 6000 : 3800);
+        const maxStuckTime = (this._actionInFlight === "play") ? 15000 : ((this._actionInFlight === "discard") ? 8000 : 3800);
         if (now - this._lastProgressTimestamp > maxStuckTime) {
           if (this._actionInFlight) {
             if ((this._actionInFlight === "select_blind" || this._actionInFlight === "skip_blind") && curStateName === "BLIND_SELECT") {
@@ -3756,6 +3760,15 @@ end
             this.updateStatus("等待发牌...", false);
             executedAction = false;
             unlockCooldownMs = 200;
+          } else if (Number(state.hands_left) <= 0) {
+            this.updateStatus("出牌次数已耗尽，等待盲注结算...", false);
+            executedAction = false;
+            unlockCooldownMs = 500;
+          } else if (Number(state.deck_count || 0) > 0 && state.hand.length < Math.min(Number(state.hand_size || 8), state.hand.length + Number(state.deck_count || 0))) {
+            const expected = Math.min(Number(state.hand_size || 8), state.hand.length + Number(state.deck_count || 0));
+            this.updateStatus(`等待手牌发全 (${state.hand.length}/${expected})...`, true);
+            executedAction = false;
+            unlockCooldownMs = 300;
           } else if (this._actionInFlight === "play" && (now - (this._lastPlayActionTime || 0) < 15000)) {
             // A play was dispatched and is animating; wait up to 15.0s
             this.updateStatus("出牌结算中...", true);

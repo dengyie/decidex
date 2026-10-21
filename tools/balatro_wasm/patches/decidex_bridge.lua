@@ -904,6 +904,20 @@ local function check_and_emit_state()
   end
 
   if G.STATE == G.STATES.SELECTING_HAND then
+    if G.GAME and G.GAME.current_round and G.GAME.current_round.hands_left and G.GAME.current_round.hands_left <= 0 then
+      if G.GAME.chips and G.GAME.blind and G.GAME.chips < G.GAME.blind.chips then
+        if not _G._zero_hands_time then _G._zero_hands_time = now end
+        if now - _G._zero_hands_time > 2.0 then
+          print("[DecideX Bridge] Hands depleted and blind not met in SELECTING_HAND, advancing to NEW_ROUND/GAME_OVER")
+          G.STATE = G.STATES.NEW_ROUND
+          G.STATE_COMPLETE = false
+          _G._zero_hands_time = nil
+        end
+      end
+    else
+      _G._zero_hands_time = nil
+    end
+
     if not G.hand or not G.hand.cards then return end
     local hand = G.hand.cards
     local sig_parts = {}
@@ -1065,6 +1079,17 @@ local function check_and_emit_state()
         print("[DecideX State Build Error]: " .. tostring(json))
       end
     end
+  elseif G.STATE == G.STATES.GAME_OVER or G.STATE == G.STATES.GAME_WON then
+    local cur_sig = tostring(G.STATE) .. ":" .. tostring(G.GAME and G.GAME.round or 0) .. ":" .. tostring(G.GAME and G.GAME.dollars or 0)
+    if cur_sig ~= _G._last_game_over_sig or state_changed then
+      _G._last_game_over_sig = cur_sig
+      local ok, json = pcall(build_state_json, nil)
+      if ok and json then
+        print("[DECIDEX_STATE] " .. json)
+      else
+        print("[DecideX State Build Error]: " .. tostring(json))
+      end
+    end
   elseif state_changed then
     local ok, json = pcall(build_state_json, nil)
     if ok and json then
@@ -1085,23 +1110,7 @@ local function decidex_execute_inner(action, args)
       return false, "not in SELECTING_HAND"
     end
     if G.play and G.play.cards and #G.play.cards > 0 then
-      if G.FUNCS and G.FUNCS.draw_from_play_to_discard then
-        pcall(G.FUNCS.draw_from_play_to_discard)
-      end
-      if G.play.cards and #G.play.cards > 0 and G.discard then
-        for i = #G.play.cards, 1, -1 do
-          local c = G.play.cards[i]
-          if c then
-            pcall(function()
-              G.play:remove_card(c)
-              G.discard:emplace(c)
-            end)
-          end
-        end
-      end
-      if G.play.cards and #G.play.cards > 0 then
-        return false, "cards already in play"
-      end
+      return false, "cards already in play"
     end
     if not (G.hand and G.hand.cards and #G.hand.cards > 0) then
       return false, "no hand cards"
