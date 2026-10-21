@@ -452,14 +452,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v68 / decidex-balatro-core-v68
-  const EXPECTED_LOVE_SIZE = 56342649;
+  const EXPECTED_LOVE_SIZE = 56342615;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v81";
+  const ASSET_VERSION = "v82";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=81";
-  const ASSET_WASM_URL = "love.wasm.bin?v=81";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=82";
+  const ASSET_WASM_URL = "love.wasm.bin?v=82";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3491,7 +3491,7 @@ end
       }
 
       const errStr = String(error || "");
-      const isTransient = /not ready|animating|debounced|in progress|busy|locked|waiting|already in play/i.test(errStr);
+      const isTransient = /not ready|animating|debounced|in progress|busy|locked|waiting|already in play|no-op|not set/i.test(errStr);
       if (isTransient) {
         console.log(`[AutoPilot] Dispatch transient wait for ${action}: ${errStr}`);
         if (action === "select_blind" || action === "skip_blind") {
@@ -3508,6 +3508,9 @@ end
         return;
       }
 
+      if (action === "select_blind" || action === "skip_blind") {
+        this._blindActionSent = false;
+      }
       this._actionFailureStreak = (this._actionFailureStreak || 0) + 1;
       this._actionInFlight = null;
       this._busyTimestamp = null;

@@ -457,6 +457,8 @@ local function find_select_blind_button()
     return nil -- Still animating previous select
   end
 
+  if not (G.blind_select and not G.blind_select.REMOVED) then return nil end
+
   local on_deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or "Small"
 
   local opt = G.blind_select_opts and G.blind_select_opts[string.lower(on_deck)]
@@ -1035,11 +1037,6 @@ local function check_and_emit_state()
     end
     local wipe_locked = (G.CONTROLLER and G.CONTROLLER.locks and (G.CONTROLLER.locks.wipe or G.CONTROLLER.locks.load))
     local facing = G.GAME and G.GAME.facing_blind
-    if facing and (now - _G._blind_select_enter_time > 3.0) then
-      print("[DecideX Bridge] Watchdog: facing_blind stuck in BLIND_SELECT >3s, advancing to DRAW_TO_HAND")
-      G.STATE = G.STATES.DRAW_TO_HAND
-      G.STATE_COMPLETE = false
-    end
     if not wipe_locked and not facing and not _G._select_blind_in_flight and (now - _G._blind_select_enter_time > 3.0) then
       if not (G.blind_select and not G.blind_select.REMOVED) then
         if create_UIBox_blind_select and UIBox then
