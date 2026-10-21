@@ -459,10 +459,6 @@ local function find_select_blind_button()
 
   local on_deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or "Small"
 
-  if not (G.blind_select and not G.blind_select.REMOVED) then
-    return nil
-  end
-
   local opt = G.blind_select_opts and G.blind_select_opts[string.lower(on_deck)]
   if opt and opt.get_UIE_by_ID then
     local btn = nil
@@ -878,8 +874,40 @@ local function check_and_emit_state()
       _G._hand_play_saw_hand_played = nil
     end
     if _G._hand_discard_saw_draw then
-      _G._hand_discard_in_flight = nil
-      _G._hand_discard_saw_draw = nil
+      local expected = 8
+      if G.hand and G.hand.config and G.hand.config.card_limit then
+        expected = G.hand.config.card_limit
+      end
+      local deck_count = (G.deck and G.deck.cards and #G.deck.cards) or 0
+      local hand_count = (G.hand and G.hand.cards and #G.hand.cards) or 0
+      local target = math.min(expected, hand_count + deck_count)
+      local elapsed = _G._hand_discard_start_time and (now - _G._hand_discard_start_time) or 0
+      if hand_count >= target or elapsed >= 3.0 then
+        _G._hand_discard_in_flight = nil
+        _G._hand_discard_saw_draw = nil
+        _G._last_discard_finish_time = now
+      end
+    end
+
+    -- Self-heal incomplete hand if hand cards did not refill after 2.5s
+    local expected = 8
+    if G.hand and G.hand.config and G.hand.config.card_limit then
+      expected = G.hand.config.card_limit
+    end
+    local deck_count = (G.deck and G.deck.cards and #G.deck.cards) or 0
+    local hand_count = (G.hand and G.hand.cards and #G.hand.cards) or 0
+    local target = math.min(expected, hand_count + deck_count)
+    if deck_count > 0 and hand_count < target and not _G._hand_discard_in_flight and not _G._hand_play_in_flight then
+      if not _G._incomplete_hand_time then _G._incomplete_hand_time = now end
+      if now - _G._incomplete_hand_time > 2.5 then
+        print("[DecideX Bridge] Incomplete hand in SELECTING_HAND (" .. hand_count .. "/" .. target .. ") >2.5s, healing via draw_from_deck_to_hand")
+        if G.FUNCS and G.FUNCS.draw_from_deck_to_hand then
+          pcall(function() G.FUNCS.draw_from_deck_to_hand(target - hand_count) end)
+        end
+        _G._incomplete_hand_time = now
+      end
+    else
+      _G._incomplete_hand_time = nil
     end
   elseif G.STATE == G.STATES.NEW_ROUND or G.STATE == G.STATES.ROUND_EVAL or G.STATE == G.STATES.SHOP or G.STATE == G.STATES.BLIND_SELECT or G.STATE == G.STATES.GAME_OVER or G.STATE == G.STATES.GAME_WON then
     _G._hand_play_in_flight = nil
@@ -1007,6 +1035,11 @@ local function check_and_emit_state()
     end
     local wipe_locked = (G.CONTROLLER and G.CONTROLLER.locks and (G.CONTROLLER.locks.wipe or G.CONTROLLER.locks.load))
     local facing = G.GAME and G.GAME.facing_blind
+    if facing and (now - _G._blind_select_enter_time > 3.0) then
+      print("[DecideX Bridge] Watchdog: facing_blind stuck in BLIND_SELECT >3s, advancing to DRAW_TO_HAND")
+      G.STATE = G.STATES.DRAW_TO_HAND
+      G.STATE_COMPLETE = false
+    end
     if not wipe_locked and not facing and not _G._select_blind_in_flight and (now - _G._blind_select_enter_time > 3.0) then
       if not (G.blind_select and not G.blind_select.REMOVED) then
         if create_UIBox_blind_select and UIBox then
@@ -1147,6 +1180,9 @@ local function decidex_execute_inner(action, args)
           _G._hand_discard_in_flight = nil
           _G._hand_discard_saw_draw = nil
         end
+      end
+      if _G._last_discard_finish_time and (now - _G._last_discard_finish_time < 1.5) then
+        return false, "discard debounced (drawing cards)"
       end
       if G.GAME and G.GAME.current_round and G.GAME.current_round.discards_left and G.GAME.current_round.discards_left <= 0 then
         return false, "no discards left"

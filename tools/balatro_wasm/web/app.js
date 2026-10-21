@@ -452,14 +452,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v68 / decidex-balatro-core-v68
-  const EXPECTED_LOVE_SIZE = 56342288;
+  const EXPECTED_LOVE_SIZE = 56342649;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v80";
+  const ASSET_VERSION = "v81";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=80";
-  const ASSET_WASM_URL = "love.wasm.bin?v=80";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=81";
+  const ASSET_WASM_URL = "love.wasm.bin?v=81";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3562,9 +3562,13 @@ end
         if (sname === "DRAW_TO_HAND") {
           this._discardSawDraw = true;
         } else if (this._discardSawDraw && sname === "SELECTING_HAND") {
-          this._actionInFlight = null;
-          this._discardSawDraw = false;
-          this.busy = false;
+          const expected = Math.min(Number(state.hand_size || 8), (state.hand ? state.hand.length : 0) + Number(state.deck_count || 0));
+          const currentHandLen = state.hand ? state.hand.length : 0;
+          if (currentHandLen >= expected || now - (this._lastDiscardActionTime || 0) > 3000) {
+            this._actionInFlight = null;
+            this._discardSawDraw = false;
+            this.busy = false;
+          }
         } else if (now - (this._lastDiscardActionTime || 0) > 7000) {
           this._actionInFlight = null;
           this._discardSawDraw = false;
@@ -3764,22 +3768,28 @@ end
             this.updateStatus("出牌次数已耗尽，等待盲注结算...", false);
             executedAction = false;
             unlockCooldownMs = 500;
-          } else if (Number(state.deck_count || 0) > 0 && state.hand.length < Math.min(Number(state.hand_size || 8), state.hand.length + Number(state.deck_count || 0))) {
+          } else if (Number(state.deck_count || 0) > 0 && state.hand.length < Math.min(Number(state.hand_size || 8), state.hand.length + Number(state.deck_count || 0)) && (!this._handIncompleteSince || now - this._handIncompleteSince < 2800)) {
             const expected = Math.min(Number(state.hand_size || 8), state.hand.length + Number(state.deck_count || 0));
+            if (!this._handIncompleteSince) {
+              this._handIncompleteSince = now;
+            }
             this.updateStatus(`等待手牌发全 (${state.hand.length}/${expected})...`, true);
             executedAction = false;
             unlockCooldownMs = 300;
           } else if (this._actionInFlight === "play" && (now - (this._lastPlayActionTime || 0) < 15000)) {
+            this._handIncompleteSince = null;
             // A play was dispatched and is animating; wait up to 15.0s
             this.updateStatus("出牌结算中...", true);
             executedAction = false;
             unlockCooldownMs = 400;
           } else if (this._actionInFlight === "discard" && (now - (this._lastDiscardActionTime || 0) < 8000)) {
+            this._handIncompleteSince = null;
             // A discard was dispatched and is drawing; wait up to 8.0s
             this.updateStatus("弃牌处理中...", true);
             executedAction = false;
             unlockCooldownMs = 400;
           } else {
+            this._handIncompleteSince = null;
             // If in-flight action was not acknowledged after timeout, clear it for retry
             if (this._actionInFlight) {
               console.warn(`[AutoPilot] In-flight action ${this._actionInFlight} timed out in SELECTING_HAND, resetting action lock`);
@@ -3818,7 +3828,7 @@ end
                   const arb = arbitrateAction(state, bestPlay, bestDiscard);
 
                   if (arb && arb.verdict === "DISCARD" && arb.cards && arb.cards.length > 0) {
-                    if (now - (this._lastDiscardActionTime || 0) > 1500) {
+                    if (now - (this._lastDiscardActionTime || 0) > 2500) {
                       this._lastDiscardActionTime = now;
                       this._lastProgressTimestamp = now;
                       this._actionInFlight = "discard";
@@ -3827,11 +3837,11 @@ end
                       console.log("[AutoPilot] Executing strategic discard:", arb.reason);
                       window.executeDiscardAction(arb.cards);
                       executedAction = true;
-                      unlockCooldownMs = 1200;
+                      unlockCooldownMs = 1600;
                     } else {
                       this.updateStatus("弃牌冷却中...", true);
                       executedAction = false;
-                      unlockCooldownMs = 250;
+                      unlockCooldownMs = 350;
                     }
                   } else if (arb && arb.cards && arb.cards.length > 0) {
                     if (now - (this._lastPlayActionTime || 0) > 3000) {
