@@ -19,10 +19,10 @@ async def main():
             print("[Attach 9222] No balatro tab found, creating new page...", flush=True)
             ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
             target_page = await ctx.new_page()
-            await target_page.goto("https://balatro.mangoqwq.com/?v=83", wait_until="domcontentloaded")
+            await target_page.goto("https://balatro.mangoqwq.com/?v=86", wait_until="domcontentloaded")
         else:
-            print(f"[Attach 9222] Navigating target tab to v83: {target_page.url}", flush=True)
-            await target_page.goto("https://balatro.mangoqwq.com/?v=83", wait_until="domcontentloaded")
+            print(f"[Attach 9222] Navigating target tab to v86: {target_page.url}", flush=True)
+            await target_page.goto("https://balatro.mangoqwq.com/?v=86", wait_until="domcontentloaded")
 
         print(f"[Attach 9222] Target tab found: {target_page.url}", flush=True)
         await target_page.bring_to_front()
@@ -30,10 +30,11 @@ async def main():
 
         target_page.on("pageerror", lambda err: print(f"[Browser Error] {err}", flush=True))
         target_page.on("console", lambda msg: print(f"[Console] {msg.text}", flush=True) if any(
-            k in msg.text for k in [
-                "[AutoPilot]", "[DecideX]", "[DecideX Bridge]", "opened booster", "redeemed", "GAME_OVER",
-                "GAME_WON", "start_run", "STATE_NUM", "go_to_menu", "booster pack",
-                "buying booster", "selecting pack", "TAROT_PACK", "PLANET_PACK", "BUFFOON_PACK"
+            k.lower() in msg.text.lower() for k in [
+                "[autopilot]", "decidex", "decidex_state", "decidex_action_result", "opened booster", "redeemed", "game_over",
+                "game_won", "start_run", "state_num", "go_to_menu", "booster pack",
+                "buying booster", "selecting pack", "tarot_pack", "planet_pack", "buffoon_pack",
+                "already in play", "clearing g.state_complete", "deadlocked", "shop waiting", "shop shelf"
             ]
         ) else None)
 
@@ -93,6 +94,8 @@ async def main():
         last_sname = None
         for sec in range(240):
             await asyncio.sleep(1)
+            if sec % 15 == 0:
+                await target_page.bring_to_front()
             cur_state = await target_page.evaluate("() => window._lastDecidexState || null")
             ap_status = await target_page.evaluate("() => { const el = document.getElementById('autopilot-status'); return el ? el.textContent : ''; }")
             if cur_state:

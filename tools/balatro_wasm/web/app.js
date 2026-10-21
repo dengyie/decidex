@@ -452,14 +452,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v68 / decidex-balatro-core-v68
-  const EXPECTED_LOVE_SIZE = 56343171;
+  const EXPECTED_LOVE_SIZE = 56343487;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v83";
+  const ASSET_VERSION = "v86";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=83";
-  const ASSET_WASM_URL = "love.wasm.bin?v=83";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=86";
+  const ASSET_WASM_URL = "love.wasm.bin?v=86";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -2328,7 +2328,8 @@ end
       if (bname.includes("Buffoon") && jokersCount < 2) {
         safeThreshold = 0;
       } else if ((state.ante || 1) <= 2) {
-        safeThreshold = 4;
+        // Celestial and Arcana packs directly boost hand level or provide cleanse/cash
+        safeThreshold = (bname.includes("Celestial") || bname.includes("Arcana")) ? 0 : 4;
       } else {
         safeThreshold = 20;
       }
@@ -2403,8 +2404,11 @@ end
                               (bestBooster && bestBooster.canAfford && bestBooster.score >= 70);
 
     const safeReroll = money >= 25 + rerollCost && !hasStrongShopCard;
-    const emergencyReroll = (state.ante || 1) <= 2 && jokersCount === 0 &&
-                            money >= (rerollCost + 4) &&
+    // Early game: Ante 1 base deck clears easily (Flush/Straight/Full House).
+    // Never blind reroll in Ante 1 or when money is under rerollCost + 6 ($11),
+    // because after paying $5 reroll, you have <$6 and cannot afford any newly appeared Joker!
+    const emergencyReroll = (state.ante || 1) >= 2 && jokersCount === 0 &&
+                            money >= (rerollCost + 6) &&
                             !hasAffordableJoker &&
                             !hasAffordableBuffoon &&
                             !hasStrongShopCard;
@@ -3656,6 +3660,7 @@ end
           this._shopPurchasedCard = false;
           this._shopPurchasedBooster = false;
           this._shopAttemptedItems.clear();
+          this._loggedShelf = false;
         }
       }
 
@@ -3910,13 +3915,19 @@ end
           if (!this._shopEnterTime) this._shopEnterTime = now;
           const timeInShop = now - this._shopEnterTime;
 
-          // If shop items haven't arrived yet and we just entered, wait for shelf rendering (up to 1500ms)
-          if (cards.length === 0 && boosters.length === 0 && timeInShop < 1500) {
+          // If shop items haven't arrived yet and we just entered, wait for shelf rendering (up to 4500ms)
+          if (cards.length === 0 && boosters.length === 0 && timeInShop < 4500) {
             this.updateStatus("等待商店上架商品...", false);
             console.log("[AutoPilot] Shop waiting for shelf population, elapsed:", timeInShop);
             executedAction = false;
-            unlockCooldownMs = 200;
-          } else if (state.can_toggle_shop || timeInShop > 2500) {
+            unlockCooldownMs = 300;
+          } else if (cards.length > 0 || boosters.length > 0 || state.can_toggle_shop || timeInShop > 5000) {
+            if (cards.length > 0 || boosters.length > 0) {
+              if (!this._loggedShelf) {
+                this._loggedShelf = true;
+                console.log("[AutoPilot] Shop shelf populated! Cards:", cards.map(c => `${c.name} ($${c.cost})`).join(", "), "| Boosters:", boosters.map(b => `${b.name} ($${b.cost})`).join(", "));
+              }
+            }
             const shopAdv = findBestShopPurchases(state);
             const bestCard = shopAdv && shopAdv.bestCard;
             const bestBooster = shopAdv && shopAdv.bestBooster;

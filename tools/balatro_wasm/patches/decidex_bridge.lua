@@ -59,8 +59,11 @@ local RANK_MAP = {
 local SEAL_MAP = { Red = "red", Blue = "blue", Gold = "gold", Purple = "purple" }
 local ENH_MAP = {
   ["Bonus"] = "bonus", ["Mult"] = "mult", ["Wild"] = "wild",
-  ["Glass"] = "glass", ["Steel"] = "steel", ["Gold"] = "gold", ["Lucky"] = "lucky"
+  ["Glass"] = "glass", ["Steel"] = "steel", ["Gold"] = "gold", ["Lucky"] = "lucky", ["Stone"] = "stone",
+  ["m_bonus"] = "bonus", ["m_mult"] = "mult", ["m_wild"] = "wild",
+  ["m_glass"] = "glass", ["m_steel"] = "steel", ["m_gold"] = "gold", ["m_lucky"] = "lucky", ["m_stone"] = "stone"
 }
+local ENHANCEMENT_MAP = ENH_MAP
 local EDITION_MAP = { foil = "foil", holo = "holo", polychrome = "poly" }
 
 local function jstr(v)
@@ -157,85 +160,108 @@ local function serialize_extra(extra)
 end
 
 local function joker_json(c, idx)
-  local name = c.ability and c.ability.name or "Joker"
-  local mult = c.ability and c.ability.mult or 0
-  local x_mult = c.ability and (c.ability.x_mult or c.ability.xmult) or 1
-  local chips = c.ability and (c.ability.chips or c.ability.t_chips) or 0
-  local extra_str = serialize_extra(c.ability and c.ability.extra)
+  if not c then return "{}" end
+  local ok, res = pcall(function()
+    local name = c.ability and c.ability.name or "Joker"
+    local mult = c.ability and c.ability.mult or 0
+    local x_mult = c.ability and (c.ability.x_mult or c.ability.xmult) or 1
+    local chips = c.ability and (c.ability.chips or c.ability.t_chips) or 0
+    local extra_str = serialize_extra(c.ability and c.ability.extra)
 
-  local edition = nil
-  if c.edition and type(c.edition) == "table" then
-    for k, v in pairs(EDITION_MAP) do
-      if c.edition[k] then edition = v break end
+    local edition = nil
+    if c.edition and type(c.edition) == "table" then
+      for k, v in pairs(EDITION_MAP) do
+        if c.edition[k] then edition = v break end
+      end
     end
-  end
 
-  local rarity = (c.config and c.config.center and c.config.center.rarity) or 1
-  local cost = tonumber(c.cost or 0) or 0
-  local sell_cost = tonumber(c.sell_cost or 0) or 0
+    local rarity = (c.config and c.config.center and c.config.center.rarity) or 1
+    local cost = tonumber(c.cost or 0) or 0
+    local sell_cost = tonumber(c.sell_cost or 0) or 0
 
-  local parts = {
-    '"name":' .. jstr(name),
-    '"mult":' .. jstr(mult),
-    '"xmult":' .. jstr(x_mult),
-    '"chips":' .. jstr(chips),
-    '"extra":' .. extra_str,
-    '"edition":' .. jstr(edition),
-    '"rarity":' .. jstr(rarity),
-    '"cost":' .. jstr(cost),
-    '"sell_cost":' .. jstr(sell_cost),
-    '"debuff":' .. jstr(c.debuff and true or false),
-    '"index":' .. jstr(idx)
-  }
-  return "{" .. table.concat(parts, ",") .. "}"
+    local parts = {
+      '"name":' .. jstr(name),
+      '"mult":' .. jstr(mult),
+      '"xmult":' .. jstr(x_mult),
+      '"chips":' .. jstr(chips),
+      '"extra":' .. extra_str,
+      '"edition":' .. jstr(edition),
+      '"rarity":' .. jstr(rarity),
+      '"cost":' .. jstr(cost),
+      '"sell_cost":' .. jstr(sell_cost),
+      '"debuff":' .. jstr(c.debuff and true or false),
+      '"index":' .. jstr(idx)
+    }
+    return "{" .. table.concat(parts, ",") .. "}"
+  end)
+  if ok and res then return res end
+  local fallback_cost = tonumber(c.cost or 0) or 0
+  local fallback_sell = tonumber(c.sell_cost or 0) or 0
+  local fallback_idx = tonumber(idx or 0) or 0
+  return string.format('{"name":"Joker","mult":0,"xmult":1,"chips":0,"cost":%d,"sell_cost":%d,"debuff":false,"index":%d}', fallback_cost, fallback_sell, fallback_idx)
 end
 
 local function shop_card_json(c, idx)
-  local name = c.ability and c.ability.name or (c.config and c.config.center and c.config.center.name) or "Card"
-  local mult = c.ability and c.ability.mult or 0
-  local x_mult = c.ability and (c.ability.x_mult or c.ability.xmult) or 1
-  local chips = c.ability and (c.ability.chips or c.ability.t_chips) or 0
-  local cost = tonumber(c.cost or 0) or 0
-  local rarity = (c.config and c.config.center and c.config.center.rarity) or 1
-  local set = (c.ability and c.ability.set) or (c.config and c.config.center and c.config.center.set) or "Joker"
+  if not c then return "{}" end
+  local ok, res = pcall(function()
+    local name = c.ability and c.ability.name or (c.config and c.config.center and c.config.center.name) or "Card"
+    local mult = c.ability and c.ability.mult or 0
+    local x_mult = c.ability and (c.ability.x_mult or c.ability.xmult) or 1
+    local chips = c.ability and (c.ability.chips or c.ability.t_chips) or 0
+    local cost = tonumber(c.cost or 0) or 0
+    local rarity = (c.config and c.config.center and c.config.center.rarity) or 1
+    local set = (c.ability and c.ability.set) or (c.config and c.config.center and c.config.center.set) or "Joker"
 
-  local edition = nil
-  if c.edition and type(c.edition) == "table" then
-    for k, v in pairs(EDITION_MAP) do
-      if c.edition[k] then edition = v break end
+    local edition = nil
+    if c.edition and type(c.edition) == "table" then
+      for k, v in pairs(EDITION_MAP) do
+        if c.edition[k] then edition = v break end
+      end
     end
-  end
 
-  local r = (c.base and c.base.value) or (c.ability and c.ability.value) or nil
-  local s = (c.base and c.base.suit) or (c.ability and c.ability.suit) or nil
-  local enh = nil
-  if c.ability and c.ability.name and ENHANCEMENT_MAP[c.ability.name] then
-    enh = ENHANCEMENT_MAP[c.ability.name]
-  elseif c.config and c.config.center and ENHANCEMENT_MAP[c.config.center.key] then
-    enh = ENHANCEMENT_MAP[c.config.center.key]
-  end
-  local seal = nil
-  if c.seal then
-    seal = SEAL_MAP[c.seal] or tostring(c.seal):lower()
-  end
+    local r = (c.base and c.base.value) or (c.ability and c.ability.value) or nil
+    local s = (c.base and c.base.suit) or (c.ability and c.ability.suit) or nil
+    if r then r = RANK_MAP[tonumber(r)] or RANK_MAP[r] or r end
+    if s then s = SUIT_MAP[s] or s end
 
-  local parts = {
-    '"name":' .. jstr(name),
-    '"type":' .. jstr(set:lower()),
-    '"cost":' .. jstr(cost),
-    '"rarity":' .. jstr(rarity),
-    '"mult":' .. jstr(mult),
-    '"xmult":' .. jstr(x_mult),
-    '"chips":' .. jstr(chips),
-    '"edition":' .. jstr(edition),
-    '"rank":' .. jstr(r),
-    '"suit":' .. jstr(s),
-    '"enhancement":' .. jstr(enh),
-    '"seal":' .. jstr(seal),
-    '"extra":' .. serialize_extra(c.ability and c.ability.extra),
-    '"index":' .. jstr(idx)
-  }
-  return "{" .. table.concat(parts, ",") .. "}"
+    local enh = nil
+    if c.ability and c.ability.name and ENH_MAP[c.ability.name] then
+      enh = ENH_MAP[c.ability.name]
+    elseif c.config and c.config.center and c.config.center.key and ENH_MAP[c.config.center.key] then
+      enh = ENH_MAP[c.config.center.key]
+    end
+    local seal = nil
+    if c.seal then
+      seal = SEAL_MAP[c.seal] or tostring(c.seal):lower()
+    end
+
+    local type_str = "joker"
+    if type(set) == "string" and set ~= "" then
+      type_str = set:lower()
+    end
+
+    local parts = {
+      '"name":' .. jstr(name),
+      '"type":' .. jstr(type_str),
+      '"cost":' .. jstr(cost),
+      '"rarity":' .. jstr(rarity),
+      '"mult":' .. jstr(mult),
+      '"xmult":' .. jstr(x_mult),
+      '"chips":' .. jstr(chips),
+      '"edition":' .. jstr(edition),
+      '"rank":' .. jstr(r),
+      '"suit":' .. jstr(s),
+      '"enhancement":' .. jstr(enh),
+      '"seal":' .. jstr(seal),
+      '"extra":' .. serialize_extra(c.ability and c.ability.extra),
+      '"index":' .. jstr(idx)
+    }
+    return "{" .. table.concat(parts, ",") .. "}"
+  end)
+  if ok and res then return res end
+  local fallback_cost = tonumber(c.cost or 0) or 0
+  local fallback_idx = tonumber(idx or 0) or 0
+  return string.format('{"name":"Card","type":"unknown","cost":%d,"index":%d}', fallback_cost, fallback_idx)
 end
 
 local function consumable_json(c, idx)
@@ -754,7 +780,7 @@ local function build_state_json(actual)
       local shop_boosters_count = (G.shop_booster and G.shop_booster.cards and #G.shop_booster.cards) or 0
       local now = (love.timer and love.timer.getTime()) or os.clock()
       if not _G._shop_enter_time then _G._shop_enter_time = now end
-      if (shop_cards_count > 0 or shop_boosters_count > 0 or (now - _G._shop_enter_time >= 0.8)) then
+      if (shop_cards_count > 0 or shop_boosters_count > 0 or (now - _G._shop_enter_time >= 5.0)) then
         can_toggle_shop = true
       end
     else
@@ -1005,6 +1031,7 @@ local function check_and_emit_state()
   end
 
   if G.STATE == G.STATES.SELECTING_HAND then
+    LAST_SHOP_SIG = ""
     if G.GAME and G.GAME.current_round and G.GAME.current_round.hands_left and G.GAME.current_round.hands_left <= 0 then
       if G.GAME.chips and G.GAME.blind and G.GAME.chips < G.GAME.blind.chips then
         if not _G._zero_hands_time then _G._zero_hands_time = now end
@@ -1082,13 +1109,16 @@ local function check_and_emit_state()
         local set = card.ability and card.ability.set or ""
         local cost = tonumber(card.cost or 0) or 0
         local extra = serialize_extra(card.ability and card.ability.extra)
-        local edition = card.edition and table.concat(map({"foil", "holo", "polychrome"}, function(k)
-          return card.edition[k] and k or ""
-        end), ",") or ""
+        local edition = ""
+        if card.edition and type(card.edition) == "table" then
+          for k, v in pairs(EDITION_MAP) do
+            if card.edition[k] then edition = v break end
+          end
+        end
         shop_items_sig[#shop_items_sig + 1] = table.concat({key, name, set, tostring(cost), tostring(extra), edition}, ":")
       end
     end
-    local cur_shop_sig = tostring(dollars) .. ":" .. tostring(reroll) .. ":" .. table.concat(shop_items_sig, "|") .. ":" .. tostring(#jokers) .. ":" .. can_toggle .. ":" .. locked
+    local cur_shop_sig = tostring(dollars) .. ":" .. tostring(reroll) .. ":" .. tostring(#shop_cards) .. ":" .. tostring(#booster_cards) .. ":" .. tostring(#voucher_cards) .. ":" .. table.concat(shop_items_sig, "|") .. ":" .. tostring(#jokers) .. ":" .. can_toggle .. ":" .. locked
     if cur_shop_sig ~= LAST_SHOP_SIG or state_changed then
       LAST_SHOP_SIG = cur_shop_sig
       local ok, json = pcall(build_state_json, nil)
@@ -1099,6 +1129,7 @@ local function check_and_emit_state()
       end
     end
   elseif G.STATE == G.STATES.BLIND_SELECT then
+    LAST_SHOP_SIG = ""
     G.toggling_shop = false
     G.cashing_out = false
     local now = (love.timer and love.timer.getTime()) or os.clock()
@@ -1838,6 +1869,7 @@ local function decidex_execute_inner(action, args)
 
   if action == "force_state_dump" then
     LAST_HAND_SIG = ""
+    LAST_SHOP_SIG = ""
     LAST_STATE_NUM = nil
     check_and_emit_state()
     return true, "dumped"
