@@ -19,17 +19,19 @@ async def main():
             print("[Attach 9222] No balatro tab found, creating new page...", flush=True)
             ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
             target_page = await ctx.new_page()
-            await target_page.goto("https://balatro.mangoqwq.com/?v=82", wait_until="domcontentloaded")
+            await target_page.goto("https://balatro.mangoqwq.com/?v=83", wait_until="domcontentloaded")
         else:
-            print(f"[Attach 9222] Navigating target tab to v82: {target_page.url}", flush=True)
-            await target_page.goto("https://balatro.mangoqwq.com/?v=82", wait_until="domcontentloaded")
+            print(f"[Attach 9222] Navigating target tab to v83: {target_page.url}", flush=True)
+            await target_page.goto("https://balatro.mangoqwq.com/?v=83", wait_until="domcontentloaded")
 
         print(f"[Attach 9222] Target tab found: {target_page.url}", flush=True)
+        await target_page.bring_to_front()
+        await target_page.evaluate("() => { window.focus(); document.body && document.body.focus && document.body.focus(); }")
 
         target_page.on("pageerror", lambda err: print(f"[Browser Error] {err}", flush=True))
         target_page.on("console", lambda msg: print(f"[Console] {msg.text}", flush=True) if any(
             k in msg.text for k in [
-                "[AutoPilot]", "[DecideX]", "opened booster", "redeemed", "GAME_OVER",
+                "[AutoPilot]", "[DecideX]", "[DecideX Bridge]", "opened booster", "redeemed", "GAME_OVER",
                 "GAME_WON", "start_run", "STATE_NUM", "go_to_menu", "booster pack",
                 "buying booster", "selecting pack", "TAROT_PACK", "PLANET_PACK", "BUFFOON_PACK"
             ]

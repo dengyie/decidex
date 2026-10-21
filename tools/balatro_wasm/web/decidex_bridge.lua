@@ -816,9 +816,37 @@ local function check_and_emit_state()
   if G.STATE == G.STATES.HAND_PLAYED then
     _G._hand_play_saw_hand_played = true
     _G._draw_to_hand_enter_time = nil
-    if not _G._hand_played_enter_time then _G._hand_played_enter_time = now end
-    if now - _G._hand_played_enter_time > 10.0 then
-      print("[DecideX Bridge] Watchdog: advancing stuck HAND_PLAYED after 10s")
+    if not _G._hand_played_enter_time then
+      _G._hand_played_enter_time = now
+      _G._last_base_queue_len = nil
+      _G._last_base_queue_progress = now
+    end
+
+    local base_len = (G.E_MANAGER and G.E_MANAGER.queues and G.E_MANAGER.queues.base and #G.E_MANAGER.queues.base) or 0
+    if base_len ~= _G._last_base_queue_len then
+      _G._last_base_queue_len = base_len
+      _G._last_base_queue_progress = now
+    end
+
+    local time_since_progress = now - (_G._last_base_queue_progress or now)
+
+    -- If the event queue has completely drained, ensure G.STATE_COMPLETE is cleared so Game:update_hand_played progresses natively
+    if base_len == 0 then
+      if not _G._hand_played_empty_time then _G._hand_played_empty_time = now end
+      if (now - _G._hand_played_empty_time > 0.4) and G.STATE_COMPLETE then
+        print("[DecideX Bridge] HAND_PLAYED event queue empty, clearing G.STATE_COMPLETE to advance state")
+        G.STATE_COMPLETE = false
+      end
+    else
+      _G._hand_played_empty_time = nil
+    end
+
+    -- Only if event queue has made ZERO progress for > 15s (deadlocked/crashed animation) do we intervene
+    if time_since_progress > 15.0 and (now - _G._hand_played_enter_time > 15.0) then
+      print("[DecideX Bridge] Watchdog: advancing genuinely deadlocked HAND_PLAYED after 15s no queue progress")
+      if G.E_MANAGER and G.E_MANAGER.clear_queue then
+        pcall(function() G.E_MANAGER:clear_queue('base') end)
+      end
       if G.FUNCS and G.FUNCS.draw_from_play_to_discard then
         pcall(G.FUNCS.draw_from_play_to_discard)
       end
@@ -840,37 +868,80 @@ local function check_and_emit_state()
         G.STATE = G.STATES.DRAW_TO_HAND
       end
       _G._hand_played_enter_time = now
+      _G._last_base_queue_progress = now
     end
   else
     _G._hand_played_enter_time = nil
+    _G._hand_played_empty_time = nil
+    _G._last_base_queue_len = nil
+    _G._last_base_queue_progress = nil
   end
 
   if G.STATE == G.STATES.DRAW_TO_HAND then
     _G._hand_discard_saw_draw = true
-    if not _G._draw_to_hand_enter_time then _G._draw_to_hand_enter_time = now end
-    if now - _G._draw_to_hand_enter_time > 10.0 then
+    if not _G._draw_to_hand_enter_time then
+      _G._draw_to_hand_enter_time = now
+      _G._last_draw_queue_len = nil
+      _G._last_draw_queue_progress = now
+    end
+
+    local base_len = (G.E_MANAGER and G.E_MANAGER.queues and G.E_MANAGER.queues.base and #G.E_MANAGER.queues.base) or 0
+    if base_len ~= _G._last_draw_queue_len then
+      _G._last_draw_queue_len = base_len
+      _G._last_draw_queue_progress = now
+    end
+
+    local time_since_progress = now - (_G._last_draw_queue_progress or now)
+    if base_len == 0 then
+      if not _G._draw_empty_time then _G._draw_empty_time = now end
+      if (now - _G._draw_empty_time > 0.4) and G.STATE_COMPLETE then
+        G.STATE_COMPLETE = false
+      end
+    else
+      _G._draw_empty_time = nil
+    end
+
+    if time_since_progress > 12.0 and (now - _G._draw_to_hand_enter_time > 12.0) then
       if G.hand and G.hand.cards and #G.hand.cards > 0 then
-        print("[DecideX Bridge] Watchdog: advancing stuck DRAW_TO_HAND to SELECTING_HAND after 10s")
+        print("[DecideX Bridge] Watchdog: advancing stuck DRAW_TO_HAND to SELECTING_HAND after 12s")
         G.STATE = G.STATES.SELECTING_HAND
         G.STATE_COMPLETE = false
         if G.GAME and G.GAME.blind and G.GAME.blind.drawn_to_hand then
           pcall(function() G.GAME.blind:drawn_to_hand() end)
         end
         _G._draw_to_hand_enter_time = now
+        _G._last_draw_queue_progress = now
       elseif G.deck and G.deck.cards and #G.deck.cards > 0 then
         print("[DecideX Bridge] Watchdog: re-triggering draw_from_deck_to_hand in DRAW_TO_HAND")
         pcall(function() G.FUNCS.draw_from_deck_to_hand(nil) end)
         _G._draw_to_hand_enter_time = now - 5.0
+        _G._last_draw_queue_progress = now
       end
     end
   else
     _G._draw_to_hand_enter_time = nil
+    _G._draw_empty_time = nil
+    _G._last_draw_queue_len = nil
+    _G._last_draw_queue_progress = nil
   end
 
   -- Lifecycle reset rules: Only release in-flight combat locks when safely back in SELECTING_HAND
   -- and play area is empty, or when exiting combat into a non-combat state.
   if G.STATE == G.STATES.SELECTING_HAND then
     local play_has_cards = (G.play and G.play.cards and #G.play.cards > 0)
+    if play_has_cards and not _G._hand_play_in_flight then
+      -- Auto-heal orphan cards left in G.play
+      for i = #G.play.cards, 1, -1 do
+        local c = G.play.cards[i]
+        if c then
+          pcall(function()
+            G.play:remove_card(c)
+            if G.discard then G.discard:emplace(c) end
+          end)
+        end
+      end
+      play_has_cards = (G.play and G.play.cards and #G.play.cards > 0)
+    end
     if not play_has_cards and _G._hand_play_saw_hand_played then
       _G._hand_play_in_flight = nil
       _G._hand_play_saw_hand_played = nil
@@ -1140,7 +1211,20 @@ local function decidex_execute_inner(action, args)
       return false, "not in SELECTING_HAND"
     end
     if G.play and G.play.cards and #G.play.cards > 0 then
-      return false, "cards already in play"
+      if not _G._hand_play_in_flight then
+        for i = #G.play.cards, 1, -1 do
+          local c = G.play.cards[i]
+          if c then
+            pcall(function()
+              G.play:remove_card(c)
+              if G.discard then G.discard:emplace(c) end
+            end)
+          end
+        end
+      end
+      if G.play and G.play.cards and #G.play.cards > 0 then
+        return false, "cards already in play"
+      end
     end
     if not (G.hand and G.hand.cards and #G.hand.cards > 0) then
       return false, "no hand cards"
@@ -1158,7 +1242,20 @@ local function decidex_execute_inner(action, args)
         end
       end
       if G.play and G.play.cards and #G.play.cards > 0 then
-        return false, "cards already in play"
+        if not _G._hand_play_in_flight then
+          for i = #G.play.cards, 1, -1 do
+            local c = G.play.cards[i]
+            if c then
+              pcall(function()
+                G.play:remove_card(c)
+                if G.discard then G.discard:emplace(c) end
+              end)
+            end
+          end
+        end
+        if G.play and G.play.cards and #G.play.cards > 0 then
+          return false, "cards already in play"
+        end
       end
       if G.STATE and G.STATES and G.STATE == G.STATES.HAND_PLAYED then
         return false, "state is HAND_PLAYED"
