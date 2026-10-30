@@ -165,6 +165,20 @@
         if (window.AutoPilot && typeof window.AutoPilot.onActionResult === "function") {
           window.AutoPilot.onActionResult(resStr);
         }
+      } else if (
+        text.startsWith("[DecideX Pack Watchdog] ") ||
+        text.startsWith("[DecideX Event Guard] ") ||
+        text.startsWith("[DecideX Frame Guard] ")
+      ) {
+        // Self-healing events from the bridge watchdogs. Surfacing them keeps
+        // the operator informed: a pack stall (auto-recovered or abandoned)
+        // and suppressed frame errors are exactly the failures that used to
+        // wedge the run silently.
+        console.warn("[DecideX Recovery]", text);
+        if (window.AutoPilot && typeof window.AutoPilot.updateStatus === "function" && window.AutoPilot.enabled) {
+          const detail = text.replace(/^\[[^\]]+\]\s*/, "").trim();
+          window.AutoPilot.updateStatus(`自愈: ${detail}`.slice(0, 120), true);
+        }
       } else {
         console.log("[LÖVE stdout]", text);
       }
@@ -451,15 +465,15 @@ end
   window.addEventListener("beforeunload", syncSaveFileSystem);
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
-  // Cache key: balatro-asset-cache-v68 / decidex-balatro-core-v68
-  const EXPECTED_LOVE_SIZE = 56343487;
+  // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
+  const EXPECTED_LOVE_SIZE = 56349344;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v86";
+  const ASSET_VERSION = "v92";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=86";
-  const ASSET_WASM_URL = "love.wasm.bin?v=86";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=92";
+  const ASSET_WASM_URL = "love.wasm.bin?v=92";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -605,19 +619,32 @@ end
 
       async function fetchWithResume(url, initialTotal, onProgress) {
         let loaded = 0;
-        const chunks = [];
+        let chunks = [];
         let total = initialTotal;
         let attempts = 0;
 
-        while (loaded < total && attempts < 20) {
+        // A stalled connection must not hang the loader forever. Without a
+        // deadline the retry fetch() can sit unresolved indefinitely (the
+        // socket is open but no more bytes arrive), leaving the progress bar
+        // frozen at the last successful offset with no error shown.
+        const STALL_TIMEOUT_MS = 30000;
+
+        while (loaded < total && attempts < 40) {
           attempts++;
           try {
             const headers = loaded > 0 ? { "Range": `bytes=${loaded}-` } : {};
-            const res = await fetch(url, { headers });
+            const controller = new AbortController();
+            const stallTimer = setTimeout(() => controller.abort(), STALL_TIMEOUT_MS);
+            let res;
+            try {
+              res = await fetch(url, { headers, signal: controller.signal });
+            } finally {
+              clearTimeout(stallTimer);
+            }
             if (loaded > 0) {
               if (res.status === 200) {
                 console.warn(`[DecideX Download] Server returned 200 instead of 206 for Range request, resetting stream from 0`);
-                chunks.length = 0;
+                chunks = [];
                 loaded = 0;
               } else if (res.status !== 206) {
                 throw new Error(`HTTP ${res.status} when requesting range bytes=${loaded}-`);
@@ -638,10 +665,26 @@ end
 
             const reader = res.body.getReader();
             while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              chunks.push(value);
-              loaded += value.length;
+              // Per-read deadline: a socket that stays open but stops
+              // delivering must not block the retry loop. The timer is
+              // cleared on every successful read so it never rejects after
+              // the read has already resolved.
+              let stallTimer = null;
+              const readTimeout = new Promise((_, reject) => {
+                stallTimer = setTimeout(
+                  () => reject(new Error("stream stall timeout")),
+                  STALL_TIMEOUT_MS
+                );
+              });
+              let result;
+              try {
+                result = await Promise.race([reader.read(), readTimeout]);
+              } finally {
+                clearTimeout(stallTimer);
+              }
+              if (result.done) break;
+              chunks.push(result.value);
+              loaded += result.value.length;
               onProgress(loaded, total);
             }
           } catch (e) {
@@ -861,6 +904,17 @@ end
     "Shortcut": "utility", "Splash": "utility", "Mime": "utility", "Hanging Chad": "utility",
     "Hack": "utility", "Dusk": "utility", "Sock and Buskin": "utility"
   };
+
+  // S-tier Joker list. Must live at module scope: the AutoPilot pack-scoring
+  // path references it outside of findBestShopPurchases, where a function-local
+  // copy is invisible (ReferenceError: TOP_TIER is not defined).
+  const TOP_TIER = [
+    "Cavendish", "Blueprint", "Brainstorm", "Constellation", "Hologram",
+    "Card Sharp", "Blackboard", "Baron", "Baseball Card", "Stuntman",
+    "Green Joker", "Ride the Bus", "Red Card", "Square Joker", "Supernova",
+    "Golden Joker", "Bull", "Bootstraps", "Mail-In Rebate", "Trading Card",
+    "Half Joker", "Gros Michel", "Blue Joker", "Banner", "Scary Face", "Odd Todd"
+  ];
 
   function analyzeSynergy(jokers) {
     let chips = 0, flatMult = 0, xMult = 0, economy = 0;
@@ -2163,14 +2217,6 @@ end
 
     const synergy = analyzeSynergy(state.jokers);
 
-    const TOP_TIER = [
-      "Cavendish", "Blueprint", "Brainstorm", "Constellation", "Hologram",
-      "Card Sharp", "Blackboard", "Baron", "Baseball Card", "Stuntman",
-      "Green Joker", "Ride the Bus", "Red Card", "Square Joker", "Supernova",
-      "Golden Joker", "Bull", "Bootstraps", "Mail-In Rebate", "Trading Card",
-      "Half Joker", "Gros Michel", "Blue Joker", "Banner", "Scary Face", "Odd Todd"
-    ];
-
     const PLANET_NAMES = ["Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune", "Pluto", "Planet X", "Ceres", "Eris"];
     const TAROT_NAMES = [
       "The Fool", "The Magician", "The High Priestess", "The Empress", "The Emperor",
@@ -3241,6 +3287,16 @@ end
     return dispatchLuaAction(luaCode, "select_pack_card");
   };
 
+  // Escape hatch for a booster pack whose UI never appeared. The bridge
+  // rebuilds the pack UI directly, and falls back to abandoning the pack
+  // and returning to the shop so the run keeps advancing.
+  window.executeForceLeavePack = function () {
+    if (!window.Module || !window.Module.FS) return unavailableAction("force_leave_pack");
+    const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("force_leave_pack") end`;
+    console.log("[AutoPilot] Dispatched force_leave_pack action");
+    return dispatchLuaAction(luaCode, "force_leave_pack");
+  };
+
 
   // Utilities
   window.decidexSelectBlind = function () {
@@ -3330,14 +3386,22 @@ end
     _playSawHandPlayed: false,
     _discardSawDraw: false,
 
-    toggle(enable) {
+    toggle(enable, opts) {
+      const options = opts || {};
       this.enabled = enable !== undefined ? Boolean(enable) : !this.enabled;
       const chk = document.getElementById("autopilot-toggle");
       if (chk) chk.checked = this.enabled;
-      this.updateStatus(this.enabled ? "运行中" : "已暂停", this.enabled);
+      if (!options.preserveStatus) {
+        this.updateStatus(this.enabled ? "运行中" : "已暂停", this.enabled);
+      }
 
       console.log(`[AutoPilot] ${this.enabled ? "Enabled" : "Disabled"}`);
       if (this.enabled) {
+        // A fresh start must not inherit the previous run's failure count,
+        // otherwise re-enabling immediately re-trips the 12-strike auto-pause.
+        this._actionFailureStreak = 0;
+        this._lastFailureReason = "";
+        this._lastFailureAction = "";
         this._lastProgressTimestamp = Date.now();
         this.startWatchdog();
         this.scheduleNextAction(200);
@@ -3495,7 +3559,13 @@ end
       }
 
       const errStr = String(error || "");
-      const isTransient = /not ready|animating|debounced|in progress|busy|locked|waiting|already in play|no-op|not set/i.test(errStr);
+      // A state mismatch means the client acted on a snapshot the game has
+      // already moved past. That is transient, not a broken action: the game
+      // is fine, the client's view is one step behind. Treating it as a hard
+      // failure used to burn the 12-strike budget and auto-pause the run.
+      const isStateMismatch = /not in (BLIND_SELECT|SHOP|ROUND_EVAL|SELECTING_HAND|HAND_PLAYED|new_round)/i.test(errStr);
+      const isTransient = isStateMismatch ||
+        /not ready|animating|debounced|in progress|busy|locked|waiting|already in play|no-op|not set/i.test(errStr);
       if (isTransient) {
         console.log(`[AutoPilot] Dispatch transient wait for ${action}: ${errStr}`);
         if (action === "select_blind" || action === "skip_blind") {
@@ -3507,7 +3577,18 @@ end
         this._busyTimestamp = null;
         this.pendingState = null;
         this.busy = false;
-        this.updateStatus("界面过渡中，等待就绪...", true);
+        if (isStateMismatch) {
+          // Ask the bridge for a fresh snapshot so the next decision is made
+          // against the game's real state instead of the stale one.
+          this._actionFailureStreak = 0;
+          this._lastProgressTimestamp = Date.now();
+          if (typeof window.decidexReEvaluate === "function") {
+            window.decidexReEvaluate();
+          }
+          this.updateStatus(`状态已切换，重新同步: ${errStr}`.slice(0, 120), true);
+        } else {
+          this.updateStatus("界面过渡中，等待就绪...", true);
+        }
         this.scheduleNextAction(600);
         return;
       }
@@ -3520,15 +3601,26 @@ end
       this._busyTimestamp = null;
       this.pendingState = null;
       this.busy = false;
-      this._lastProgressTimestamp = Date.now();
+      // Deliberately do NOT refresh _lastProgressTimestamp here. Refreshing it
+      // on every failure keeps the anti-hang watchdog permanently satisfied,
+      // so a hard-failing action loops forever with no visible escalation.
       console.warn(`[AutoPilot] Dispatch failed for ${action}${sequence ? ` #${sequence}` : ""}; cleared action lock`, error);
 
+      // Keep the underlying Lua error visible. toggle() rewrites the badge
+      // with a generic label, which used to hide the actual cause of the
+      // interruption from the operator.
+      const reason = (error && error.message ? String(error.message) : String(error || "unknown error"))
+        .replace(/\s+/g, " ")
+        .trim();
+      this._lastFailureReason = reason;
+      this._lastFailureAction = action;
+
       if (this._actionFailureStreak >= 12) {
-        this.updateStatus("动作连续失败，自动托管已暂停", false);
-        this.toggle(false);
+        this.updateStatus(`动作连续失败(${this._actionFailureStreak}次)已暂停：${reason}`.slice(0, 120), false);
+        this.toggle(false, { preserveStatus: true });
         return;
       }
-      this.updateStatus("动作失败，正在重试...", false);
+      this.updateStatus(`动作失败(${this._actionFailureStreak}/12) ${reason}`.slice(0, 120), false);
       this.scheduleNextAction(600);
     },
 
@@ -3546,6 +3638,25 @@ end
         this._actionFailureStreak = 0;
       }
       if (!this.enabled) return;
+
+      // A successful skip_blind advances blind_on_deck (Small -> Big) while
+      // state_name stays BLIND_SELECT. Watching that field lets us release
+      // the blind action lock immediately instead of waiting for the generic
+      // 4.5s self-heal timeout.
+      const onDeck = state.blind_on_deck || "";
+      if (onDeck && this._lastBlindOnDeck && onDeck !== this._lastBlindOnDeck) {
+        console.log(`[AutoPilot] Blind on deck changed ${this._lastBlindOnDeck} -> ${onDeck}; releasing blind action lock`);
+        this._blindActionSent = false;
+        if (this._actionInFlight === "select_blind" || this._actionInFlight === "skip_blind") {
+          this._actionInFlight = null;
+        }
+        this._actionFailureStreak = 0;
+        this._lastProgressTimestamp = now;
+        this.busy = false;
+      }
+      if (onDeck) {
+        this._lastBlindOnDeck = onDeck;
+      }
 
       // Play lifecycle tracking: Must witness HAND_PLAYED before considering play completed
       if (this._actionInFlight === "play") {
@@ -4201,6 +4312,18 @@ end
               window.executeSkipBooster();
               executedAction = true;
               unlockCooldownMs = 600;
+            } else if (timeInPack > 20000) {
+              // The pack UI never appeared: the game froze inside the pack
+              // state (a modal unlock popup pauses the game and freezes every
+              // timer, so the pack UIBox event never runs). The bridge
+              // watchdog rebuilds the pack UI and, failing that, abandons the
+              // pack so the run keeps advancing.
+              this.updateStatus("补充包卡死，强制脱离...", true);
+              console.log("[AutoPilot] Booster pack wedged for", Math.round(timeInPack), "ms, forcing leave");
+              window.executeForceLeavePack();
+              this._packEnterTime = null;
+              executedAction = true;
+              unlockCooldownMs = 1200;
             } else {
               this.updateStatus("等待补充包卡牌...", false);
               executedAction = false;

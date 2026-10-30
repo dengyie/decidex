@@ -362,24 +362,58 @@ local function area_cards(area)
   return area.cards
 end
 
+-- Name of the game's current state, for diagnostics. A guard that only says
+-- "not in BLIND_SELECT" hides which state the game is actually in, which is
+-- exactly the information needed to debug a state-machine desync.
+local function state_name_of(state_num)
+  if not (G and G.STATES) then return "NOSTATE" end
+  if state_num == nil then return "NONE" end
+  for k, v in pairs(G.STATES) do
+    if state_num == v then return tostring(k) end
+  end
+  return "UNKNOWN(" .. tostring(state_num) .. ")"
+end
+
+local function current_state_name()
+  if not (G and G.STATE) then return "NOSTATE" end
+  return state_name_of(G.STATE)
+end
+
 local function find_uie_by_id(id)
   if not G then return nil end
-  if G.round_eval and not G.round_eval.REMOVED and G.round_eval.get_UIE_by_ID then
-    local res = nil
-    pcall(function() res = G.round_eval:get_UIE_by_ID(id) end)
-    if res then return res end
-  end
-  if G.shop and not G.shop.REMOVED and G.shop.get_UIE_by_ID then
-    local res = nil
-    pcall(function() res = G.shop:get_UIE_by_ID(id) end)
-    if res then return res end
-  end
-  if G.blind_select and not G.blind_select.REMOVED and G.blind_select.get_UIE_by_ID then
-    local res = nil
-    pcall(function() res = G.blind_select:get_UIE_by_ID(id) end)
-    if res then return res end
+  local roots = { G.round_eval, G.shop, G.blind_select, G.booster_pack }
+  for _, root in ipairs(roots) do
+    if root and not root.REMOVED and root.get_UIE_by_ID then
+      local res = nil
+      pcall(function() res = root:get_UIE_by_ID(id) end)
+      if res then return res end
+    end
   end
   return nil
+end
+
+-- Walks a UIBox's element tree looking for a node whose config.button matches.
+-- Several game buttons (shop reroll, booster pack skip) are declared with a
+-- `button` field but no `id`, so get_UIE_by_ID can never find them.
+local function find_button_by_button_name(root, button_name)
+  if not root then return nil end
+  local function walk(node, depth, visited)
+    if not node or depth > 24 then return nil end
+    if visited[node] then return nil end
+    visited[node] = true
+    if node.config and node.config.button == button_name then return node end
+    if node.children then
+      for _, child in ipairs(node.children) do
+        local found = walk(child, depth + 1, visited)
+        if found then return found end
+      end
+    end
+    return nil
+  end
+  local start = root.UIRoot or root
+  local found = nil
+  pcall(function() found = walk(start, 0, {}) end)
+  return found
 end
 
 local function find_cash_out_button()
@@ -410,6 +444,281 @@ local function find_cash_out_button()
     end
   end
   return nil
+end
+
+--[[
+  True when the game is in the middle of a run, i.e. a state the autopilot
+  is actively driving. Modal overlays that the game raises *during* a run
+  (unlock popup, achievement card) are safe to dismiss; the game-over screen
+  and the run-setup menu are not, and must be left to the autopilot.
+]]
+local function is_active_run_state()
+  if not (G and G.STATES and G.STATE) then return false end
+  local S = G.STATES
+  return G.STATE == S.SELECTING_HAND or G.STATE == S.DRAW_TO_HAND or
+         G.STATE == S.HAND_PLAYED or G.STATE == S.NEW_ROUND or
+         G.STATE == S.ROUND_EVAL or G.STATE == S.BLIND_SELECT or
+         G.STATE == S.SHOP or G.STATE == S.PLAY_TAROT or
+         G.STATE == S.TAROT_PACK or G.STATE == S.PLANET_PACK or
+         G.STATE == S.SPECTRAL_PACK or G.STATE == S.STANDARD_PACK or
+         G.STATE == S.BUFFOON_PACK
+end
+
+--[[
+  Dismiss a modal overlay that the game raised on its own.
+
+  The game pauses itself when it shows an unlock/achievement overlay
+  (create_unlock_overlay -> G.SETTINGS.paused = true + G.FUNCS.overlay_menu).
+  While paused, Game:update sets dt = 0, which freezes G.TIMERS.TOTAL, so
+  every pending 'after' event stops firing; and Event:handle returns
+  'pause_skip' for events that were created while unpaused, so even
+  'immediate' events (the one that builds the booster-pack UIBox) never run.
+
+  The DecideX autopilot never clicks the overlay's "continue" button, so the
+  run used to freeze forever whenever a new card centre was discovered
+  mid-pack. G.FUNCS.continue_unlock is the game's own dismissal path: it
+  closes the overlay, unpauses, and force-flushes the event queue so the next
+  unlock overlay can appear.
+
+  Only overlays raised during an active run are dismissed; the game-over
+  screen and the run-setup menu are left alone.
+
+  Returns true when an overlay was actually dismissed.
+]]
+local function dismiss_blocking_overlay()
+  if not (G and G.OVERLAY_MENU) then return false end
+  if not is_active_run_state() then return false end
+
+  -- The card/deck unlock overlay has a "continue" button that runs
+  -- continue_unlock; prefer it so queued unlock overlays keep draining.
+  if G.FUNCS and G.FUNCS.continue_unlock then
+    local ok = pcall(G.FUNCS.continue_unlock)
+    if ok then
+      if G.SETTINGS then G.SETTINGS.paused = false end
+      return true
+    end
+  end
+
+  if G.FUNCS and G.FUNCS.exit_overlay_menu then
+    local ok = pcall(G.FUNCS.exit_overlay_menu)
+    if ok then
+      if G.SETTINGS then G.SETTINGS.paused = false end
+      return true
+    end
+  end
+
+  -- Last resort: drop the overlay by hand and unpause.
+  pcall(function()
+    if G.OVERLAY_MENU and G.OVERLAY_MENU.remove then G.OVERLAY_MENU:remove() end
+    G.OVERLAY_MENU = nil
+    if G.SETTINGS then G.SETTINGS.paused = false end
+  end)
+  return true
+end
+
+--[[
+  True when the current game state is one of the booster-pack states.
+]]
+local function is_pack_state()
+  if not (G and G.STATES and G.STATE) then return false end
+  return G.STATE == G.STATES.TAROT_PACK or G.STATE == G.STATES.PLANET_PACK or
+         G.STATE == G.STATES.SPECTRAL_PACK or G.STATE == G.STATES.STANDARD_PACK or
+         G.STATE == G.STATES.BUFFOON_PACK
+end
+
+--[[
+  Rebuild the booster-pack UIBox without going through the event queue.
+
+  Game:update_<pack> only creates the pack UI once, behind an 'immediate'
+  event, and only while G.STATE_COMPLETE is false. If that event is lost
+  (paused overlay, dropped event, queue head-of-line block) the run wedges:
+  G.STATE stays on the pack state, G.booster_pack and G.pack_cards stay nil,
+  G.STATE_COMPLETE stays true, and the autopilot loops forever.
+
+  The factory functions themselves are pure enough to call directly:
+  create_UIBox_buffoon_pack() and friends assign G.pack_cards as their very
+  first statement, then return a UIBox definition. We call the factory and
+  build the UIBox the same way game.lua does, so G.pack_cards comes back.
+
+  Returns true when a pack UI was rebuilt.
+]]
+local function rebuild_pack_ui()
+  if not is_pack_state() then return false end
+  if G.pack_cards and G.booster_pack then return false end
+
+  local factory = nil
+  if G.STATE == G.STATES.TAROT_PACK then factory = create_UIBox_arcana_pack
+  elseif G.STATE == G.STATES.PLANET_PACK then factory = create_UIBox_celestial_pack
+  elseif G.STATE == G.STATES.SPECTRAL_PACK then factory = create_UIBox_spectral_pack
+  elseif G.STATE == G.STATES.STANDARD_PACK then factory = create_UIBox_standard_pack
+  elseif G.STATE == G.STATES.BUFFOON_PACK then factory = create_UIBox_buffoon_pack end
+  if not factory then return false end
+
+  -- create_UIBox_* reads G.GAME.pack_size; Card:open() sets it, but a pack
+  -- entered through any other path may not have.
+  if not (G.GAME and G.GAME.pack_size and G.GAME.pack_size > 0) then
+    if G.GAME then G.GAME.pack_size = 2 end
+  end
+
+  local ok = pcall(function()
+    if G.booster_pack then
+      pcall(function() G.booster_pack:remove() end)
+      G.booster_pack = nil
+    end
+    local definition = factory()
+    G.booster_pack = UIBox{
+      definition = definition,
+      config = {align = "tmi", offset = {x = 0, y = G.ROOM.T.y + 9}, major = G.hand, bond = 'Weak'}
+    }
+    G.booster_pack.alignment.offset.y = -2.2
+  end)
+
+  if not ok then
+    print("[DecideX Pack Watchdog] rebuild_pack_ui failed")
+    return false
+  end
+  if not G.pack_cards then
+    print("[DecideX Pack Watchdog] rebuild_pack_ui produced no G.pack_cards")
+    return false
+  end
+  print("[DecideX Pack Watchdog] rebuilt pack UI, G.pack_cards restored")
+  return true
+end
+
+--[[
+  Abandon the current booster pack and return to the shop.
+
+  Used as the last-resort escape from a wedged pack: the run keeps going
+  instead of hanging. The player loses the pack contents, which is strictly
+  better than an automation run that never advances again.
+]]
+local function abandon_pack()
+  if not is_pack_state() then return false end
+  local ok = pcall(function()
+    local back = (G.GAME and G.GAME.PACK_INTERRUPT) or G.STATES.SHOP
+    if G.booster_pack then
+      pcall(function() G.booster_pack:remove() end)
+      G.booster_pack = nil
+    end
+    G.pack_cards = nil
+    G.GAME.PACK_INTERRUPT = nil
+    G.TAROT_INTERRUPT = nil
+    G.STATE = back
+    G.STATE_COMPLETE = false
+    if G.CONTROLLER and G.CONTROLLER.locks then
+      G.CONTROLLER.locks.use = false
+    end
+    if G.SETTINGS then G.SETTINGS.paused = false end
+    if G.OVERLAY_MENU then dismiss_blocking_overlay() end
+    -- use_card pushes the shop UI out of the way and stashes the original
+    -- offset in .py; put it back so the shop is visible again.
+    if G.shop and G.shop.alignment and G.shop.alignment.offset.py then
+      G.shop.alignment.offset.y = G.shop.alignment.offset.py
+      G.shop.alignment.offset.py = nil
+    end
+    if G.blind_select and G.blind_select.alignment and G.blind_select.alignment.offset.py then
+      G.blind_select.alignment.offset.y = G.blind_select.alignment.offset.py
+      G.blind_select.alignment.offset.py = nil
+    end
+    if G.round_eval and G.round_eval.alignment and G.round_eval.alignment.offset.py then
+      G.round_eval.alignment.offset.y = G.round_eval.alignment.offset.py
+      G.round_eval.alignment.offset.py = nil
+    end
+    _G._pack_stall_time = nil
+  end)
+  if ok then
+    print("[DecideX Pack Watchdog] abandoned wedged pack, returned to state " .. tostring(G.STATE))
+  end
+  return ok
+end
+
+--[[
+  Dump the state of the event queues. Used by the pack watchdog to explain
+  *why* the pack UI never appeared, so the production logs carry the answer
+  instead of just the symptom.
+]]
+local function event_queue_diagnostics()
+  local parts = {}
+  if G and G.E_MANAGER and G.E_MANAGER.queues then
+    for name, q in pairs(G.E_MANAGER.queues) do
+      local n = 0
+      if type(q) == 'table' then n = #q end
+      parts[#parts + 1] = tostring(name) .. "=" .. tostring(n)
+    end
+  end
+  table.sort(parts)
+  return table.concat(parts, ",")
+end
+
+--[[
+  Watchdog for the booster-pack states.
+
+  Detects "we are in a pack state but the pack UI never appeared" and tries,
+  in order:
+    1. dismiss a modal overlay that paused the game (this is the common
+       cause: an unlock popup freezes the game mid-pack),
+    2. rebuild the pack UIBox directly, bypassing the event queue,
+    3. abandon the pack and go back to the shop.
+
+  Returns true when it took a recovery action.
+]]
+local function pack_stall_watchdog()
+  if not is_pack_state() then
+    _G._pack_stall_time = nil
+    _G._pack_stall_handled = nil
+    return false
+  end
+
+  local now = (love.timer and love.timer.getTime()) or os.clock()
+
+  -- The pack UI is healthy as soon as G.pack_cards exists.
+  if G.pack_cards then
+    _G._pack_stall_time = nil
+    _G._pack_stall_handled = nil
+    return false
+  end
+
+  if not _G._pack_stall_time then
+    _G._pack_stall_time = now
+    return false
+  end
+
+  local stalled_for = now - _G._pack_stall_time
+  if stalled_for < 4.0 then return false end
+
+  -- Only act once per stall episode.
+  if _G._pack_stall_handled then return false end
+  _G._pack_stall_handled = true
+
+  print("[DecideX Pack Watchdog] pack stalled for " .. string.format("%.1f", stalled_for) ..
+        "s (state=" .. tostring(G.STATE) .. ", paused=" .. tostring(G.SETTINGS and G.SETTINGS.paused) ..
+        ", overlay=" .. tostring(not not G.OVERLAY_MENU) ..
+        ", state_complete=" .. tostring(G.STATE_COMPLETE) ..
+        ", pack_size=" .. tostring(G.GAME and G.GAME.pack_size) ..
+        ", queues=" .. event_queue_diagnostics() .. ")")
+
+  -- 1. A modal overlay pauses the game and freezes every timer.
+  if G.OVERLAY_MENU or (G.SETTINGS and G.SETTINGS.paused) then
+    dismiss_blocking_overlay()
+    if G.SETTINGS then G.SETTINGS.paused = false end
+    -- Give the game a few frames to recover before forcing anything.
+    _G._pack_stall_time = now
+    _G._pack_stall_handled = nil
+    return true
+  end
+
+  -- 2. Rebuild the pack UI directly.
+  if rebuild_pack_ui() then
+    _G._pack_stall_time = nil
+    _G._pack_stall_handled = nil
+    return true
+  end
+
+  -- 3. Give up on this pack and keep the run alive.
+  abandon_pack()
+  _G._pack_stall_handled = nil
+  _G._pack_stall_time = nil
+  return true
 end
 
 local function force_advance_to_shop()
@@ -525,40 +834,60 @@ local function find_skip_blind_button()
     return nil
   end
   if not (G.blind_select and not G.blind_select.REMOVED) then return nil end
+  -- The game holds this lock for 2.5s after a skip; respect it so we do not
+  -- dispatch a second skip while the blind-select transition is animating.
+  if G.CONTROLLER and G.CONTROLLER.locks and G.CONTROLLER.locks.skip_blind then
+    return nil
+  end
   local on_deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or "Small"
   if on_deck == "Boss" then return nil end
 
   local opt = G.blind_select_opts and G.blind_select_opts[string.lower(on_deck)]
   if not opt then return nil end
 
-  local skip_btn = nil
+  -- G.FUNCS.skip_blind(e) dereferences e.UIBox:get_UIE_by_ID('tag_container')
+  -- (functions/button_callbacks.lua:2739), so e MUST be the real UIElement.
+  -- The clickable node is the tag_<blind> node's second child, whose
+  -- config.button the game sets to 'skip_blind' for the on-deck blind only
+  -- (functions/button_callbacks.lua:2641). Handing the game a synthetic
+  -- table here crashes with "attempt to index field 'UIBox' (a nil value)".
+  local tag_node = nil
   if opt.get_UIE_by_ID then
-    pcall(function() skip_btn = opt:get_UIE_by_ID('skip_blind_button') end)
-    if skip_btn then return skip_btn, on_deck end
-    if opt.tag and opt.tag.key then
-      pcall(function() skip_btn = opt:get_UIE_by_ID('tag_' .. opt.tag.key) end)
-      if skip_btn then return skip_btn, on_deck end
-    end
+    pcall(function() tag_node = opt:get_UIE_by_ID('tag_' .. on_deck) end)
   end
+  if not tag_node then
+    pcall(function()
+      tag_node = find_button_by_button_name(opt, 'skip_blind')
+    end)
+  end
+  if not tag_node then return nil, on_deck end
 
-  local function search_btn(node)
-    if not node then return nil end
-    if node.config and (node.config.button == 'skip_blind' or node.config.id == 'skip_blind_button') then
-      return node
-    end
-    if node.children then
-      for _, child in ipairs(node.children) do
-        local found = search_btn(child)
-        if found then return found end
+  -- tag_node is the 'tag_<blind>' container; its clickable child carries the
+  -- 'skip_blind' button. Accept either the container's child or the node
+  -- itself when the button is attached directly.
+  local skip_btn = nil
+  if tag_node.config and tag_node.config.button == 'skip_blind' then
+    skip_btn = tag_node
+  elseif tag_node.children then
+    for _, child in ipairs(tag_node.children) do
+      if child.config and child.config.button == 'skip_blind' then
+        skip_btn = child
+        break
       end
     end
-    return nil
   end
-  pcall(function() skip_btn = search_btn(opt) end)
-  if skip_btn then return skip_btn, on_deck end
+  if not skip_btn then return nil, on_deck end
 
-  local tag_obj = opt.tag or (opt.config and opt.config.tag)
-  return { config = { id = 'skip_blind_button', button = 'skip_blind', ref_table = tag_obj or opt } }, on_deck
+  -- The game resolves 'tag_container' through e.UIBox, so the node must
+  -- belong to a live UIBox that owns the tag container.
+  if not (skip_btn.UIBox and skip_btn.UIBox.get_UIE_by_ID) then
+    return nil, on_deck
+  end
+  local tag_container = nil
+  pcall(function() tag_container = skip_btn.UIBox:get_UIE_by_ID('tag_container') end)
+  if not tag_container then return nil, on_deck end
+
+  return skip_btn, on_deck
 end
 
 local function get_blind_tag_info()
@@ -718,6 +1047,11 @@ local function build_state_json(actual)
   local parts = {}
   parts[#parts + 1] = '"hand":' .. jtable(map(hand, card_json))
   parts[#parts + 1] = '"blind":' .. jmap(b)
+  -- Expose the blind currently on deck so the client can tell a successful
+  -- skip (Small -> Big) apart from a still-running transition, without
+  -- waiting for the generic 4.5s self-heal timeout.
+  local blind_on_deck = (G.GAME and (G.GAME.blind_on_deck or (G.GAME.round_resets and G.GAME.round_resets.blind_on_deck))) or ""
+  parts[#parts + 1] = '"blind_on_deck":' .. jstr(tostring(blind_on_deck))
   parts[#parts + 1] = '"jokers":' .. jtable(map(jokers, joker_json))
   parts[#parts + 1] = '"consumables":' .. jtable(map(cons, consumable_json))
   parts[#parts + 1] = '"hands_left":' .. jstr(tonumber(cr.hands_left) or 0)
@@ -817,7 +1151,21 @@ local function build_state_json(actual)
   end
   local pack_cards = is_pack_state and area_cards(G.pack_cards) or {}
   parts[#parts + 1] = '"pack_cards":' .. jtable(map(pack_cards, shop_card_json))
-  local can_skip_booster = not not (is_pack_state and (find_uie_by_id('skip_booster') or (G.FUNCS and G.FUNCS.can_skip_booster)))
+  -- Mirror G.FUNCS.can_skip_booster(): the pack skip button only exists when
+  -- the pack has cards and the current pack allows skipping. For Tarot and
+  -- Spectral packs a card must be picked first, so skipping is not offered.
+  local can_skip_booster = false
+  if is_pack_state then
+    local skip_btn = find_button_by_button_name(G.booster_pack, 'skip_booster')
+    if skip_btn and skip_btn.config and skip_btn.config.button == 'skip_booster' then
+      can_skip_booster = true
+    else
+      local pack_has_cards = (G.pack_cards and G.pack_cards.cards and G.pack_cards.cards[1]) ~= nil
+      local state_allows_skip = (G.STATE == G.STATES.PLANET_PACK or G.STATE == G.STATES.STANDARD_PACK or
+        G.STATE == G.STATES.BUFFOON_PACK or (G.hand and (G.hand.cards[1] or (G.hand.config.card_limit <= 0))))
+      can_skip_booster = not not (pack_has_cards and state_allows_skip)
+    end
+  end
   parts[#parts + 1] = '"can_skip_booster":' .. (can_skip_booster and "true" or "false")
 
   local won = (G.GAME and G.GAME.won) or false
@@ -1027,6 +1375,10 @@ local function check_and_emit_state()
 
   local state_changed = (G.STATE ~= LAST_STATE_NUM)
   if state_changed then
+    print("[DecideX State] " .. state_name_of(LAST_STATE_NUM) .. " -> " .. current_state_name() ..
+      " (state_complete=" .. tostring(G.STATE_COMPLETE) ..
+      ", on_deck=" .. tostring(G.GAME and G.GAME.blind_on_deck) ..
+      ", facing=" .. tostring(G.GAME and G.GAME.facing_blind) .. ")")
     LAST_STATE_NUM = G.STATE
   end
 
@@ -1411,7 +1763,10 @@ local function decidex_execute_inner(action, args)
 
   if action == "select_blind" then
     if not (G and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then
-      return false, "not in BLIND_SELECT"
+      return false, "not in BLIND_SELECT (actual=" .. current_state_name() ..
+        ", facing=" .. tostring(G.GAME and G.GAME.facing_blind) ..
+        ", blind_select_ui=" .. tostring(G.blind_select ~= nil and not G.blind_select.REMOVED) ..
+        ", state_complete=" .. tostring(G.STATE_COMPLETE) .. ")"
     end
     local now = (love.timer and love.timer.getTime()) or os.clock()
     if _G._last_select_blind_time and (now - _G._last_select_blind_time > 4.0) then
@@ -1498,6 +1853,10 @@ local function decidex_execute_inner(action, args)
     if not btn then
       return false, "skip_blind button not found (boss or not ready)"
     end
+    -- Stamp the time so the 4s staleness reset in find_*_blind_button can
+    -- clear this latch. Without it the latch would stay true forever and
+    -- wedge can_select_blind / can_skip_blind.
+    _G._last_select_blind_time = (love.timer and love.timer.getTime()) or os.clock()
     _G._select_blind_in_flight = true
     if G.FUNCS and G.FUNCS.skip_blind then
       local ok, err = pcall(G.FUNCS.skip_blind, btn)
@@ -1505,6 +1864,10 @@ local function decidex_execute_inner(action, args)
         _G._select_blind_in_flight = nil
         return false, "skip_blind error: " .. tostring(err)
       end
+      -- The game's skip_blind does NOT set G.GAME.facing_blind; it advances
+      -- blind_on_deck instead. Release the latch right away and let the
+      -- blind_on_deck change drive the next decision.
+      _G._select_blind_in_flight = nil
       return true, "skipped blind " .. tostring(on_deck)
     end
     _G._select_blind_in_flight = nil
@@ -1529,30 +1892,31 @@ local function decidex_execute_inner(action, args)
     local c = area.cards[idx]
     if not c then return false, "card not found at index " .. tostring(idx) end
 
-    -- Handle Booster pack purchase and opening
+    -- Handle Booster pack purchase and opening.
+    -- The shop's "open" button is wired to button='open_booster', but no
+    -- G.FUNCS.open_booster exists: can_open() rewrites config.button to
+    -- 'use_card' at runtime. So use_card is the only real dispatch path.
+    -- buy_from_shop must NOT be used here: check_for_buy_space() rejects
+    -- Booster cards (ability.set is neither Voucher/Enhanced/Default/Joker
+    -- nor consumeable), and its fallback branch would emplace the pack into
+    -- G.jokers instead of opening it.
     if area_name == "shop_booster" or area_name == "shop_boosters" or (c.ability and c.ability.set == "Booster") then
       local available_money = (G.GAME and G.GAME.dollars and (G.GAME.dollars - (G.GAME.bankrupt_at or 0))) or 0
       if c.cost and c.cost > 0 and c.cost > available_money then
         return false, "cannot afford booster pack: cost=" .. tostring(c.cost) .. ", available=" .. tostring(available_money)
       end
-      if G.FUNCS and G.FUNCS.buy_from_shop then
-        local btn = { config = { ref_table = c, id = 'buy_button' } }
-        local ok, err = pcall(G.FUNCS.buy_from_shop, btn)
-        if ok then return true, "opened booster pack via buy_from_shop" end
-      end
-      if c.open then
-        if c.cost and c.cost > 0 and ease_dollars then
-          pcall(function() ease_dollars(-c.cost) end)
-        elseif c.cost and c.cost > 0 and G.GAME and G.GAME.dollars then
-          G.GAME.dollars = G.GAME.dollars - c.cost
-        end
-        local ok, err = pcall(function() c:open() end)
-        if ok then return true, "opened booster pack directly" end
-      end
       if G.FUNCS and G.FUNCS.use_card then
+        -- Card:open() charges the cost itself via ease_dollars(-self.cost)
+        -- (card.lua:1716); charging here as well would double-charge.
         local btn = { config = { ref_table = c, button = 'use_card' } }
         local ok, err = pcall(G.FUNCS.use_card, btn)
         if ok then return true, "opened booster pack via use_card" end
+        return false, "use_card failed for booster: " .. tostring(err)
+      end
+      if c.open then
+        local ok, err = pcall(function() c:open() end)
+        if ok then return true, "opened booster pack directly" end
+        return false, "booster open failed: " .. tostring(err)
       end
       return false, "failed to open booster pack"
     end
@@ -1578,9 +1942,13 @@ local function decidex_execute_inner(action, args)
     -- Standard card / joker / consumable purchase
     if G.FUNCS and G.FUNCS.buy_from_shop then
       local btn = { config = { ref_table = c, id = 'buy_button' } }
-      local ok, err = pcall(G.FUNCS.buy_from_shop, btn)
-      if ok then return true, "bought card" end
-      return false, tostring(err or "buy_from_shop failed")
+      local ok, res = pcall(G.FUNCS.buy_from_shop, btn)
+      -- buy_from_shop returns false when check_for_buy_space() refuses the
+      -- purchase (joker/consumable slots are full). pcall alone would treat
+      -- that as success.
+      if not ok then return false, "buy_from_shop error: " .. tostring(res) end
+      if res == false then return false, "no space to buy " .. tostring(c.name or "card") end
+      return true, "bought card"
     end
     return false, "no buy_from_shop func"
   end
@@ -1589,10 +1957,29 @@ local function decidex_execute_inner(action, args)
     if G.STATES and G.STATE ~= G.STATES.SHOP then
       return false, "not in SHOP"
     end
+    -- The shop reroll button is declared with button='reroll_shop' but has
+    -- no id, so get_UIE_by_ID can never find it. Locate it by button name
+    -- so can_reroll() can gate it properly.
+    local btn = find_button_by_button_name(G.shop, 'reroll_shop')
+    if not btn then
+      btn = find_uie_by_id('reroll_shop_button')
+    end
+    -- can_reroll() disables the button (config.button = nil) when the player
+    -- cannot afford the reroll. Reproduce that gate here: without it the
+    -- bridge happily rerolls into negative money.
+    local reroll_cost = (G.GAME and G.GAME.current_round and G.GAME.current_round.reroll_cost) or 0
+    local available = (G.GAME and G.GAME.dollars and (G.GAME.dollars - (G.GAME.bankrupt_at or 0))) or 0
+    if reroll_cost > 0 and available < reroll_cost then
+      return false, "cannot afford reroll: cost=" .. tostring(reroll_cost) .. ", available=" .. tostring(available)
+    end
+    if G.CONTROLLER and G.CONTROLLER.locks and G.CONTROLLER.locks.shop_reroll then
+      return false, "shop reroll already in progress"
+    end
     if G.FUNCS and G.FUNCS.reroll_shop then
-      local btn = find_uie_by_id('reroll_shop_button') or { config = {} }
+      if not btn then btn = { config = {} } end
       local ok, err = pcall(G.FUNCS.reroll_shop, btn)
-      return ok, tostring(err or "rerolled shop")
+      if not ok then return false, "reroll_shop error: " .. tostring(err) end
+      return true, "rerolled shop"
     end
     return false, "no reroll_shop func"
   end
@@ -1602,7 +1989,7 @@ local function decidex_execute_inner(action, args)
       if G.STATES and G.STATE == G.STATES.BLIND_SELECT then
         return true, "already in BLIND_SELECT"
       end
-      return false, "not in SHOP"
+      return false, "not in SHOP (actual=" .. current_state_name() .. ")"
     end
     local now = (love.timer and love.timer.getTime()) or os.clock()
     _G._shop_toggle_count = (_G._shop_toggle_count or 0) + 1
@@ -1643,6 +2030,26 @@ local function decidex_execute_inner(action, args)
     return false, "no toggle_shop func"
   end
 
+  if action == "force_leave_pack" then
+    -- Escape hatch for a booster pack that never produced its UI. The
+    -- autopilot calls this when the pack has been stuck for too long.
+    if not is_pack_state() then
+      return false, "not in a pack state"
+    end
+    if G.OVERLAY_MENU or (G.SETTINGS and G.SETTINGS.paused) then
+      dismiss_blocking_overlay()
+    end
+    if rebuild_pack_ui() then
+      _G._pack_stall_time = nil
+      _G._pack_stall_handled = nil
+      return true, "rebuilt pack UI"
+    end
+    if abandon_pack() then
+      return true, "abandoned wedged pack"
+    end
+    return false, "could not leave pack"
+  end
+
   if action == "cash_out" then
     if G.STATES and G.STATE ~= G.STATES.ROUND_EVAL and G.STATE ~= G.STATES.HAND_PLAYED then
       return false, "not in ROUND_EVAL"
@@ -1681,14 +2088,20 @@ local function decidex_execute_inner(action, args)
   end
 
   if action == "skip_booster" then
+    -- The pack skip button is declared with button='skip_booster' but has
+    -- no id, so find it by button name inside G.booster_pack.
+    local btn = find_button_by_button_name(G.booster_pack, 'skip_booster')
+    if not btn then btn = find_uie_by_id('skip_booster') end
     if G.FUNCS and G.FUNCS.skip_booster then
-      local btn = find_uie_by_id('skip_booster') or { config = { button = 'skip_booster' } }
+      if not btn then btn = { config = { button = 'skip_booster' } } end
       local ok, err = pcall(G.FUNCS.skip_booster, btn)
       if ok then return true, "skipped booster via G.FUNCS.skip_booster" end
+      return false, "skip_booster error: " .. tostring(err)
     end
     if G.FUNCS and G.FUNCS.end_consumeable then
       local ok, err = pcall(G.FUNCS.end_consumeable)
       if ok then return true, "skipped booster via G.FUNCS.end_consumeable" end
+      return false, "end_consumeable error: " .. tostring(err)
     end
     return false, "no skip_booster or end_consumeable func"
   end
@@ -1901,14 +2314,27 @@ end
 _G.DECIDEX_EXECUTE = decidex_execute
 rawset(_G, "DECIDEX_EXECUTE", decidex_execute)
 
-local function decidex_step(dt)
-  if G and not G.DECIDEX_EXECUTE then
-    G.DECIDEX_EXECUTE = decidex_execute
-  end
-  if G and G.SETTINGS and G.SETTINGS.GAMESPEED and G.SETTINGS.GAMESPEED < 4 then
-    G.SETTINGS.GAMESPEED = 4
-  end
+--[[
+  Frame-loop crash guard.
 
+  Any Lua error that escapes into love.update — the game's own update code,
+  a half-removed UIBox, the overlay dismissal path — used to kill the whole
+  WASM mainloop: the game froze on the current frame, and every JS->Lua eval
+  timed out with no diagnostics ("Lua action ... acknowledgement timed out").
+  Suppress the error, report it at a throttled rate, and keep the frame loop
+  and the bridge eval channel alive so the watchdogs can still drive a
+  recovery.
+]]
+local _decidex_frame_err_count = 0
+local function report_frame_error(tag, err)
+  _decidex_frame_err_count = _decidex_frame_err_count + 1
+  local n = _decidex_frame_err_count
+  if n <= 5 or n % 300 == 0 then
+    print(string.format("[DecideX Frame Guard] %s error #%d suppressed: %s", tag, n, tostring(err)))
+  end
+end
+
+local function decidex_maintenance()
   -- Auto-suppress tutorial popups, locks and pauses, and disable heavy synchronous saves
   if G then
     G.F_SKIP_TUTORIAL = true
@@ -1931,6 +2357,13 @@ local function decidex_step(dt)
       G.SETTINGS.tutorial_complete = true
       if G.SETTINGS.paused and (G.OVERLAY_TUTORIAL or not G.OVERLAY_MENU) then
         G.SETTINGS.paused = false
+      end
+      -- A modal overlay (unlock popup, achievement card, ...) pauses the
+      -- game. The autopilot never clicks through it, and a paused game
+      -- freezes every timer, so the run would hang forever. Dismiss it
+      -- ourselves and resume.
+      if G.SETTINGS.paused and G.OVERLAY_MENU and not G.OVERLAY_TUTORIAL then
+        dismiss_blocking_overlay()
       end
       if G.SETTINGS.tutorial_progress then
         G.SETTINGS.tutorial_progress.completed_parts = G.SETTINGS.tutorial_progress.completed_parts or {}
@@ -1985,10 +2418,28 @@ local function decidex_step(dt)
     pcall(install_emanager_crash_guard)
   end
 
+  -- Booster-pack watchdog: recover from a pack whose UI never appeared.
+  pcall(pack_stall_watchdog)
+
   if not _G._decidex_step_logged then
     _G._decidex_step_logged = true
     print("[DecideX Web] DECIDEX_STEP actively ticking in game loop")
   end
+end
+
+local function decidex_step(dt)
+  if G and not G.DECIDEX_EXECUTE then
+    G.DECIDEX_EXECUTE = decidex_execute
+  end
+  if G and G.SETTINGS and G.SETTINGS.GAMESPEED and G.SETTINGS.GAMESPEED < 4 then
+    G.SETTINGS.GAMESPEED = 4
+  end
+
+  -- Maintenance must never block the eval channel below: an error here
+  -- (e.g. a broken overlay mid-dismissal) used to stop the bridge from
+  -- consuming commands, and every JS dispatch then timed out.
+  local ok_maint, err_maint = pcall(decidex_maintenance)
+  if not ok_maint then report_frame_error("maintenance", err_maint) end
 
   -- 1. Check for incoming commands from JS via virtual FS
   local f = io.open("/tmp/balatro_eval.lua", "r")
@@ -2038,13 +2489,23 @@ local function decidex_step(dt)
   end
 end
 
-_G.DECIDEX_STEP = decidex_step
+local function safe_decidex_step(dt)
+  local ok, err = pcall(decidex_step, dt)
+  if not ok then report_frame_error("step", err) end
+end
+
+-- Expose the guarded wrapper (also used by the game-loop hook injected by
+-- build.py): a bridge error must never be able to kill the frame.
+_G.DECIDEX_STEP = safe_decidex_step
 
 -- Also hook love.update as fallback
 local orig_update = love.update
 love.update = function(dt)
-  if orig_update then orig_update(dt) end
-  decidex_step(dt)
+  if orig_update then
+    local ok, err = pcall(orig_update, dt)
+    if not ok then report_frame_error("game update", err) end
+  end
+  safe_decidex_step(dt)
 end
 
 print("[DecideX Web] decidex_bridge.lua initialized")

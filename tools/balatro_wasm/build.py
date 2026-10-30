@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -26,6 +27,43 @@ DEFAULT_EXE = r"E:\game\gamebox\Balatro v1.0.1\Balatro.exe"
 TOOLS_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = TOOLS_DIR / "web" / "balatro.love"
 PATCHES_DIR = TOOLS_DIR / "patches"
+
+# Every copy of the DecideX bridge that must stay byte-identical.
+BRIDGE_COPIES = [
+    PATCHES_DIR / "decidex_bridge.lua",
+    TOOLS_DIR / "web" / "decidex_bridge.lua",
+    TOOLS_DIR.parent / "balatro_bridge" / "decidex-bridge.lua",
+]
+
+
+def check_bridge_copies_in_sync() -> None:
+    """Fail the build when the DecideX bridge copies have drifted apart.
+
+    The bridge lives in three directories for convenience (build input, web
+    asset, real-machine install). They used to be edited independently, which
+    let a crash fix sit in one copy while production kept running the old
+    one. Treating drift as a build error keeps that class of bug out.
+    """
+    canonical = BRIDGE_COPIES[0]
+    if not canonical.exists():
+        raise FileNotFoundError(f"Canonical bridge missing: {canonical}")
+    canonical_hash = hashlib.sha256(canonical.read_bytes()).hexdigest()
+
+    drifted = []
+    for copy_path in BRIDGE_COPIES[1:]:
+        if not copy_path.exists():
+            drifted.append(f"  - {copy_path}: MISSING")
+            continue
+        copy_hash = hashlib.sha256(copy_path.read_bytes()).hexdigest()
+        if copy_hash != canonical_hash:
+            drifted.append(f"  - {copy_path}: {copy_hash[:16]} != {canonical_hash[:16]}")
+
+    if drifted:
+        raise RuntimeError(
+            "DecideX bridge copies have drifted apart. Sync them with:\n"
+            + f"  copy {canonical} -> <target>\n"
+            + "\n".join(drifted)
+        )
 
 
 def patch_hologram_shader(content: str) -> str:
@@ -56,10 +94,14 @@ def patch_globals(content: str) -> str:
     return content
 
 
-def patch_main(content: str) -> str:
+def patch_main(content: str, require_update_hook: bool = True) -> str:
     """
     Prepend web_patches and decidex_bridge requires to main.lua,
     and disable Steam/luasteam initialization that calls love.event.quit().
+
+    The DecideX game-loop hook is injected after the game's own G:update(dt)
+    call. Set require_update_hook=False only for unit-test fixtures that do
+    not contain a love.update function.
     """
     prefix = (
         '-- [[ DecideX WebAssembly Injections ]]\n'
@@ -86,10 +128,55 @@ def patch_main(content: str) -> str:
         'G:start_up()',
         'print("[Balatro Trace] 5. calling G:start_up()")\nG:start_up()\nprint("[Balatro Trace] 6. G:start_up() completed")'
     )
-    content = content.replace(
-        'function love.update( dt )',
-        'function love.update( dt )\n    if _G.DECIDEX_STEP then _G.DECIDEX_STEP(dt) end'
+    # The DecideX bridge must observe the game's state AFTER the game has
+    # processed the frame. Running it before G:update makes every emitted
+    # snapshot one frame stale: the bridge reads G.STATE before the game
+    # advances it, so a transition (e.g. SHOP -> BLIND_SELECT scheduled via
+    # an E_MANAGER 'after' event with delay 0.5) is reported late or missed
+    # entirely. The client then keeps acting on a stale snapshot and its
+    # action is rejected by the bridge's state guard ("not in BLIND_SELECT"),
+    # which used to end in a 12-strike auto-pause that halted the whole run.
+    #
+    # The match is deliberately regex-based and whitespace tolerant: the
+    # upstream main.lua indents G:update(dt) with spaces, and a literal
+    # "\tG:update(dt)\nend" needle silently matches nothing (which leaves
+    # the bridge with no game-loop hook at all).
+    update_fn = re.search(
+        r"(function\s+love\.update\s*\(\s*dt\s*\).*?)(?=\nfunction\s|\Z)",
+        content,
+        re.DOTALL,
     )
+    if not update_fn:
+        if require_update_hook:
+            raise RuntimeError("patch_main: could not locate love.update in main.lua")
+        return content
+    body = update_fn.group(1)
+    if "DECIDEX_STEP" in body:
+        # Already hooked (patch_main is idempotent). Leave it alone.
+        return content
+    if "G:update(dt)" not in body:
+        if require_update_hook:
+            raise RuntimeError("patch_main: love.update does not call G:update(dt)")
+        return content
+    # Insert immediately after the game's own update call, keeping its
+    # indentation so the generated Lua stays readable in the packed archive.
+    patched_body, n = re.subn(
+        r"^([ \t]*)G:update\(dt\)[ \t]*$",
+        lambda m: (
+            m.group(0)
+            + "\n"
+            + m.group(1)
+            + "if _G.DECIDEX_STEP then _G.DECIDEX_STEP(dt) end"
+        ),
+        body,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if n != 1:
+        if require_update_hook:
+            raise RuntimeError("patch_main: failed to insert the DECIDEX_STEP hook")
+        return content
+    content = content[: update_fn.start(1)] + patched_body + content[update_fn.end(1) :]
 
     # Completely bypass luasteam / Steamworks init on web
     content = content.replace(
@@ -478,6 +565,13 @@ def build_balatro_love(
         if not p_path.exists():
             raise FileNotFoundError(f"Required patch missing: {p_path}")
 
+    # The DecideX bridge is kept in three places so it can be inspected from
+    # the web tier and from a real-machine install. They must stay byte
+    # identical; otherwise a fix lands in one copy and the running game keeps
+    # using a stale bridge. This drift is silent and was the root cause of a
+    # long-running production incident.
+    check_bridge_copies_in_sync()
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
 
@@ -562,10 +656,38 @@ def build_balatro_love(
             sha.update(chunk)
     stats["output_sha256"] = sha.hexdigest()
 
+    # 5. Refresh the single-entry wrapper archive served as balatro.love.zip.
+    # Leaving it stale ships the previous build to anyone whose CDN path
+    # resolves to the file rather than the serve.py alias.
+    wrapper_path = output_path.with_name(output_path.name + ".zip")
+    if verbose:
+        print(f"[*] Refreshing wrapper archive: {wrapper_path}")
+    with zipfile.ZipFile(wrapper_path, "w", compression=zipfile.ZIP_DEFLATED) as z_out:
+        z_out.write(output_path, arcname=output_path.name)
+    stats["wrapper_size"] = wrapper_path.stat().st_size
+    stats["wrapper_sha256"] = hashlib.sha256(wrapper_path.read_bytes()).hexdigest()
+
+    # 6. Refresh release-assets.json so the shipped digests always describe
+    # the build that is actually on disk. A stale manifest makes
+    # serve.py --release-check fail the deploy for the wrong reason.
+    manifest_path = TOOLS_DIR / "release-assets.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for entry in manifest.get("assets", []):
+            asset_path = output_path.parent / str(entry.get("filename", ""))
+            if asset_path.is_file():
+                entry["sha256"] = hashlib.sha256(asset_path.read_bytes()).hexdigest()
+                entry["min_size"] = min(int(entry.get("min_size", 0)), asset_path.stat().st_size)
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        if verbose:
+            print(f"[*] Refreshed release manifest: {manifest_path}")
+
     if verbose:
         print("[+] Build successful!")
         print(f"    - Output: {output_path} ({stats['output_size'] / (1024*1024):.2f} MB)")
         print(f"    - SHA256: {stats['output_sha256']}")
+        print(f"    - Wrapper: {wrapper_path} ({stats['wrapper_size'] / (1024*1024):.2f} MB)")
         print(f"    - Files processed: {stats['files_processed']} (patched: {stats['files_patched']}, injected: {stats['files_injected']})")
 
     return stats

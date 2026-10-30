@@ -2,22 +2,30 @@ import asyncio
 import os
 from playwright.async_api import async_playwright
 
+# Some workstations resolve public hostnames through a TUN-mode proxy
+# (Clash Verge fake-IP DNS). curl honours it, Chromium does not, so the
+# browser needs the mixed proxy passed explicitly.
+PROXY = os.environ.get("BALATRO_TEST_PROXY", "http://127.0.0.1:7897")
+
 async def run():
     print("[Real Online Test] Testing 100% direct https://balatro.mangoqwq.com (NO route interception)...", flush=True)
     profile_dir = os.path.abspath("tools/balatro_wasm/test_browser_profile")
     os.makedirs(profile_dir, exist_ok=True)
+    launch_kwargs = dict(
+        user_data_dir=profile_dir,
+        headless=True,
+        viewport={"width": 1920, "height": 1080},
+        args=[
+            '--no-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu-watchdog',
+            '--enable-webgl'
+        ],
+    )
+    if PROXY:
+        launch_kwargs["proxy"] = {"server": PROXY}
     async with async_playwright() as p:
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=profile_dir,
-            headless=True,
-            viewport={"width": 1920, "height": 1080},
-            args=[
-                '--no-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu-watchdog',
-                '--enable-webgl'
-            ]
-        )
+        context = await p.chromium.launch_persistent_context(**launch_kwargs)
         page = context.pages[0] if context.pages else await context.new_page()
 
         page.on('pageerror', lambda err: print(f"[PageError] {err}", flush=True))
