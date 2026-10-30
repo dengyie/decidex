@@ -32,7 +32,7 @@ BLIND_ORDER = {"Small": 1, "Big": 2, "Boss": 3}
 # isStateMismatch patterns in tools/balatro_wasm/web/app.js.
 TRANSIENT_INFO_RE = re.compile(
     r"debounced|not ready|animating|in progress|busy|locked|waiting|"
-    r"already in play|no-op|not set|not in (BLIND_SELECT|SHOP|ROUND_EVAL|"
+    r"already in play|blocks play|no-op|not set|not in (BLIND_SELECT|SHOP|ROUND_EVAL|"
     r"SELECTING_HAND|HAND_PLAYED|new_round)",
     re.IGNORECASE,
 )

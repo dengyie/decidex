@@ -3565,7 +3565,7 @@ end
       // failure used to burn the 12-strike budget and auto-pause the run.
       const isStateMismatch = /not in (BLIND_SELECT|SHOP|ROUND_EVAL|SELECTING_HAND|HAND_PLAYED|new_round)/i.test(errStr);
       const isTransient = isStateMismatch ||
-        /not ready|animating|debounced|in progress|busy|locked|waiting|already in play|no-op|not set/i.test(errStr);
+        /not ready|animating|debounced|in progress|busy|locked|waiting|already in play|blocks play|no-op|not set/i.test(errStr);
       if (isTransient) {
         console.log(`[AutoPilot] Dispatch transient wait for ${action}: ${errStr}`);
         if (action === "select_blind" || action === "skip_blind") {
