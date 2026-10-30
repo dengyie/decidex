@@ -565,6 +565,12 @@ local function rebuild_pack_ui()
       pcall(function() G.booster_pack:remove() end)
       G.booster_pack = nil
     end
+    -- The factory reassigns G.pack_cards; an orphaned area from an earlier
+    -- episode would leak into G.I.CARD and error every frame.
+    if G.pack_cards then
+      pcall(function() G.pack_cards:remove() end)
+      G.pack_cards = nil
+    end
     local definition = factory()
     G.booster_pack = UIBox{
       definition = definition,
@@ -600,7 +606,13 @@ local function abandon_pack()
       pcall(function() G.booster_pack:remove() end)
       G.booster_pack = nil
     end
-    G.pack_cards = nil
+    -- Removing only the reference would leak the CardArea into G.I.CARD/
+    -- MOVEABLES, where it keeps aligning to a dead major and errors every
+    -- frame (moveable.lua:152) for the rest of the run. Remove it properly.
+    if G.pack_cards then
+      pcall(function() G.pack_cards:remove() end)
+      G.pack_cards = nil
+    end
     G.GAME.PACK_INTERRUPT = nil
     G.TAROT_INTERRUPT = nil
     G.STATE = back
@@ -648,6 +660,44 @@ local function event_queue_diagnostics()
   end
   table.sort(parts)
   return table.concat(parts, ",")
+end
+
+--[[
+  Repair a nil G.STATE mid-run.
+
+  Vanilla restore events can assign nil to G.STATE: use_card queues
+  `G.STATE = prev_state` (button_callbacks.lua:2248) and end_consumeable
+  queues `G.STATE = G.GAME.PACK_INTERRUPT` (button_callbacks.lua:2597) —
+  when those delayed events fire AFTER a DecideX recovery path already
+  cleared the captured field (abandon_pack nils PACK_INTERRUPT), G.STATE
+  becomes nil. Game:update dispatches on G.STATE, so a nil state matches
+  no branch: nothing ever sets it again, check_and_emit_state returns
+  early (no snapshot), and the autopilot freezes on the last stale
+  snapshot with the blind-select UI stuck on screen.
+
+  Repair by inferring the state from whatever UI is still visible. Only
+  nil is repaired; delete_run's deliberate -1 limbo is left alone.
+]]
+local function repair_nil_state()
+  if not (G and G.GAME and G.STATES) then return false end
+  if G.STATE ~= nil then return false end
+  local target = nil
+  if G.blind_select and not G.blind_select.REMOVED then
+    target = G.STATES.BLIND_SELECT
+  elseif G.shop and not G.shop.REMOVED then
+    target = G.STATES.SHOP
+  elseif G.round_eval and not G.round_eval.REMOVED then
+    target = G.STATES.ROUND_EVAL
+  elseif G.booster_pack and not G.booster_pack.REMOVED then
+    target = G.GAME.PACK_INTERRUPT or G.STATES.SHOP
+  elseif G.hand and G.hand.cards and #G.hand.cards > 0 then
+    target = G.STATES.SELECTING_HAND
+  end
+  if not target then return false end
+  G.STATE = target
+  G.STATE_COMPLETE = false
+  print("[DecideX Frame Guard] repaired nil G.STATE -> " .. state_name_of(target))
+  return true
 end
 
 --[[
@@ -2417,6 +2467,10 @@ local function decidex_maintenance()
   if not _G._decidex_event_handle_guarded and Event then
     pcall(install_emanager_crash_guard)
   end
+
+  -- A nil G.STATE mid-run freezes the whole state machine (see
+  -- repair_nil_state); infer it back from the visible UI.
+  pcall(repair_nil_state)
 
   -- Booster-pack watchdog: recover from a pack whose UI never appeared.
   pcall(pack_stall_watchdog)

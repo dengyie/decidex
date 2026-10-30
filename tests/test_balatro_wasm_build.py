@@ -143,9 +143,18 @@ def test_patch_main_places_decidex_hook_after_game_update():
     )
     patched = patch_main(original)
     update_idx = patched.index("function love.update( dt )")
-    game_update_idx = patched.index("G:update(dt)", update_idx)
+    game_update_idx = patched.index("pcall(G.update, G, dt)", update_idx)
     hook_idx = patched.index("_G.DECIDEX_STEP(dt)", update_idx)
     assert game_update_idx < hook_idx, "DECIDEX_STEP hook must run after G:update(dt)"
+
+    # G:update must be pcall-wrapped: love.run's outer xpcall prints
+    # "[BALATRO FRAME ERROR]" and continues, but it unwinds straight past
+    # the step hook, so a persistent error inside G:update (crashed event
+    # cleanup, half-removed Moveable) used to starve the bridge forever
+    # while the game kept erroring every frame.
+    assert "local _dx_update_ok, _dx_update_err = pcall(G.update, G, dt)" in patched
+    suppress_idx = patched.index("G:update error #%d suppressed", update_idx)
+    assert hook_idx < suppress_idx, "the hook must run before the error report"
 
     # The hook must live inside love.update, not after love.draw.
     draw_idx = patched.index("function love.draw()")
@@ -169,7 +178,10 @@ def test_patch_main_hook_tolerates_indentation_styles():
         assert patched.count("_G.DECIDEX_STEP(dt)") == 1, (
             f"hook not injected for indent {indent!r}"
         )
-        assert patched.index("G:update(dt)") < patched.index("_G.DECIDEX_STEP(dt)")
+        assert patched.count("pcall(G.update, G, dt)") == 1, (
+            f"G:update not pcall-wrapped for indent {indent!r}"
+        )
+        assert patched.index("pcall(G.update, G, dt)") < patched.index("_G.DECIDEX_STEP(dt)")
 
 
 def test_patch_main_requires_update_hook_in_build_path():
@@ -750,6 +762,41 @@ def test_autopilot_escapes_a_wedged_booster_pack():
     assert "executeForceLeavePack()" in pack_branch
     # The escape hatch must not fire before the pack had a fair chance.
     assert "timeInPack > 20000" in pack_branch
+
+
+def test_bridge_repairs_nil_state_midrun():
+    """A nil G.STATE mid-run must be repaired from the visible UI.
+
+    Vanilla restore events assign `G.STATE = prev_state` (use_card) and
+    `G.STATE = G.GAME.PACK_INTERRUPT` (end_consumeable) from delayed events;
+    when they fire after a DecideX recovery path cleared the captured field,
+    G.STATE becomes nil. Game:update dispatches on G.STATE, so nil matches
+    no branch and nothing ever sets it again -- the emit gate returns early
+    and the autopilot freezes on its last snapshot.
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    assert "local function repair_nil_state()" in content
+    # Repair only fires inside a run (G.GAME present) and only for nil.
+    body = content.split("local function repair_nil_state()", 1)[1]
+    body = body.split("\nend", 1)[0]
+    assert 'if not (G and G.GAME and G.STATES) then return false end' in body
+    assert 'if G.STATE ~= nil then return false end' in body
+    # Every visible-UI fallback must map to a real state.
+    for ui, state in (
+        ("G.blind_select", "G.STATES.BLIND_SELECT"),
+        ("G.shop", "G.STATES.SHOP"),
+        ("G.round_eval", "G.STATES.ROUND_EVAL"),
+        ("G.booster_pack", "G.GAME.PACK_INTERRUPT or G.STATES.SHOP"),
+        ("G.hand", "G.STATES.SELECTING_HAND"),
+    ):
+        assert ui in body and state in body
+    # delete_run's deliberate -1 limbo must never be touched.
+    assert "-1" not in body
+    # The repair must run from the maintenance path (pcall'd).
+    maint = content.split("local function decidex_maintenance()", 1)[1]
+    maint = maint.split("\nend", 1)[0]
+    assert "pcall(repair_nil_state)" in maint
 
 
 def test_bridge_frame_loop_crash_guard():

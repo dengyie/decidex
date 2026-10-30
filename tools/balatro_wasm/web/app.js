@@ -466,14 +466,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
-  const EXPECTED_LOVE_SIZE = 56349344;
+  const EXPECTED_LOVE_SIZE = 56350207;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v92";
+  const ASSET_VERSION = "v96";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=92";
-  const ASSET_WASM_URL = "love.wasm.bin?v=92";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=96";
+  const ASSET_WASM_URL = "love.wasm.bin?v=96";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -2761,9 +2761,13 @@ end
     if (!card) return false;
     const name = card.name || "";
     const sname = state.state_name;
-    const jCount = (state.jokers || []).length;
+    // Prefer the bridge's authoritative counts: the jokers/consumables
+    // arrays can undercount (a serialization fallback or a joker mid-
+    // animation), which made the client take a joker the bridge then
+    // rejected with "joker slots full" five times in a row.
+    const jCount = Number(state.jokers_count ?? (state.jokers || []).length);
     const jMax = Number(state.joker_slots) || 5;
-    const cCount = (state.consumables || []).length;
+    const cCount = Number(state.consumables_count ?? (state.consumables || []).length);
     const cMax = Number(state.consumable_slots) || 2;
     const handLen = (state.hand || []).length;
 
@@ -3565,7 +3569,7 @@ end
       // failure used to burn the 12-strike budget and auto-pause the run.
       const isStateMismatch = /not in (BLIND_SELECT|SHOP|ROUND_EVAL|SELECTING_HAND|HAND_PLAYED|new_round)/i.test(errStr);
       const isTransient = isStateMismatch ||
-        /not ready|animating|debounced|in progress|busy|locked|waiting|already in play|blocks play|no-op|not set/i.test(errStr);
+        /not ready|animating|debounced|in progress|busy|locked|waiting|already in play|blocks play|slots full|pack card not found|no-op|not set/i.test(errStr);
       if (isTransient) {
         console.log(`[AutoPilot] Dispatch transient wait for ${action}: ${errStr}`);
         if (action === "select_blind" || action === "skip_blind") {

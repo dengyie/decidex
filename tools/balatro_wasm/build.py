@@ -158,15 +158,25 @@ def patch_main(content: str, require_update_hook: bool = True) -> str:
         if require_update_hook:
             raise RuntimeError("patch_main: love.update does not call G:update(dt)")
         return content
-    # Insert immediately after the game's own update call, keeping its
-    # indentation so the generated Lua stays readable in the packed archive.
+    # Wrap the game's own update in pcall so a persistent error inside
+    # G:update (crashed event cleanup, half-removed Moveable) can no longer
+    # starve the bridge: love.run's outer xpcall prints "[BALATRO FRAME
+    # ERROR]" and continues the loop, but it unwinds straight past the
+    # step hook, which left the bridge dead while the game kept erroring
+    # every frame. The step still runs AFTER the game advanced (or tried
+    # to), preserving snapshot freshness on healthy frames.
     patched_body, n = re.subn(
         r"^([ \t]*)G:update\(dt\)[ \t]*$",
         lambda m: (
-            m.group(0)
-            + "\n"
-            + m.group(1)
-            + "if _G.DECIDEX_STEP then _G.DECIDEX_STEP(dt) end"
+            m.group(1) + "local _dx_update_ok, _dx_update_err = pcall(G.update, G, dt)"
+            "\n" + m.group(1) + "if _G.DECIDEX_STEP then _G.DECIDEX_STEP(dt) end"
+            "\n" + m.group(1) + "if not _dx_update_ok then"
+            "\n" + m.group(1) + "  _G._decidex_update_err_count = (_G._decidex_update_err_count or 0) + 1"
+            "\n" + m.group(1) + "  local _dx_n = _G._decidex_update_err_count"
+            "\n" + m.group(1) + "  if _dx_n <= 5 or _dx_n % 300 == 0 then"
+            "\n" + m.group(1) + "    print(string.format('[DecideX Frame Guard] G:update error #%d suppressed: %s', _dx_n, tostring(_dx_update_err)))"
+            "\n" + m.group(1) + "  end"
+            "\n" + m.group(1) + "end"
         ),
         body,
         count=1,
