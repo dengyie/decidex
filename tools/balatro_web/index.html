@@ -282,42 +282,200 @@
   .auto-rec-toggle:hover { background:rgba(95,208,138,.2); }
 
   .cmp-table-wrap { max-height:240px; overflow-y:auto; }
+
+  :root {
+    --console-bg:#0d1412; --console-panel:#141d19; --console-line:#34433b;
+    --console-text:#e9eee8; --console-dim:#a3b0a7; --console-gold:#e7bd66;
+  }
+  body { background:var(--console-bg); color:var(--console-text); }
+  body::after { display:none; }
+  .console-header {
+    position:sticky; top:0; z-index:20; display:grid;
+    grid-template-columns:minmax(180px,.7fr) minmax(0,2fr) auto;
+    grid-template-areas:"brand controls account" "status status status";
+    align-items:center; gap:7px 18px; padding:10px clamp(16px,2vw,30px) 8px;
+    border-bottom:1px solid var(--console-line); background:rgba(13,20,18,.97);
+    box-shadow:0 5px 18px rgba(0,0,0,.18); backdrop-filter:blur(12px);
+  }
+  .header-brand { grid-area:brand; min-width:0; }
+  .header-brand h1 { margin:0; color:var(--console-text); font-size:17px; }
+  .header-brand h1 span { color:var(--console-gold); }
+  .header-caption { display:block; margin-top:1px; color:#8f9c93; font-size:9px; line-height:1.2; }
+  .header-controls { grid-area:controls; min-width:0; display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
+  .control-field { display:flex; min-width:0; align-items:center; gap:6px; color:var(--console-dim); font-size:11px; white-space:nowrap; }
+  .control-field select { min-width:0; max-width:230px; }
+  .action-controls { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  .action-controls button { min-height:34px; white-space:nowrap; }
+  .execute-control { color:#c7f0d6; background:#205d40; border:1px solid #347653; font-weight:700; }
+  .execute-control:hover { background:#28724d; }
+  .header-account { grid-area:account; display:flex; align-items:center; justify-content:flex-end; gap:8px; white-space:nowrap; }
+  #authState { font-size:11px; }
+  #logoutBtn { min-height:30px; padding:4px 9px; font-size:11px; }
+  .header-home-link { color:var(--dim,#a3b0a7); font-size:11px; text-decoration:none; white-space:nowrap; }
+  .header-home-link:hover { color:var(--text,#e9eee8); text-decoration:underline; }
+  .console-status { grid-area:status; min-width:0; margin:0!important; color:var(--console-dim)!important; font-size:11px!important; overflow-wrap:anywhere; }
+  .workspace {
+    width:min(1640px,100%); margin:0 auto; padding:12px clamp(12px,1.6vw,24px) 24px;
+    display:grid; grid-template-columns:minmax(0,1.45fr) minmax(350px,.88fr);
+    align-items:start; gap:12px;
+  }
+  .game-column,.inspector-column { display:grid; min-width:0; gap:12px; }
+  .inspector-column { align-content:start; }
+  .live-wrap { width:100%; max-width:none; margin:0; padding:0; }
+  .panel { min-width:0; padding:11px; border:1px solid var(--console-line); border-radius:7px; background:var(--console-panel); }
+  .panel h3 { color:#d8c181; font-size:11px; letter-spacing:.06em; }
+  .live-panel { padding:0; overflow:hidden; }
+  .live-panel h3 { display:flex; align-items:center; gap:7px; min-height:38px; margin:0; padding:8px 12px; border-bottom:1px solid var(--console-line); }
+  .live-label { margin-left:auto; color:var(--console-dim); font-size:10px; font-weight:500; letter-spacing:0; }
+  .feed-wrap { width:100%; aspect-ratio:16/10; max-height:62vh; border-radius:0; }
+  .live-panel img { width:min(100%,calc(62vh * 1.6)); max-height:62vh; border-radius:0; }
+  .live-toolbar { min-width:0; min-height:42px; margin:0; padding:6px 10px; gap:8px; flex-wrap:wrap; border-top:1px solid var(--console-line); }
+  #playToggle { flex:0 0 auto; min-height:30px; }
+  #ctrlHint { min-width:0; flex:1 1 180px; }
+  #liveMetrics { margin-left:auto; color:#a7d9b5!important; font:11px/1.4 ui-monospace,Consolas,monospace!important; }
+  .table { padding:12px; }
+  .topbar { justify-content:flex-start; gap:7px; }
+  .stat { background:#101714; border-color:rgba(230,240,232,.12); }
+  .blind-chip { box-shadow:0 4px 12px rgba(0,0,0,.25),inset 0 0 12px rgba(0,0,0,.35); }
+  .scoreboard { flex-wrap:wrap; gap:8px; }
+  .snap-list-wrap { max-height:235px; padding-right:2px; }
+  .snap-card { border-radius:5px; }
+  .snap-card:hover { transform:none; }
+  .advisor-panel,.timeline-panel,.comparison-panel { margin:0!important; }
+  .advisor-panel { scroll-margin-top:120px; }
+  .rec-hero-card { border-radius:6px; box-shadow:none; background:#101714; }
+  .cmp-table-wrap { max-height:280px; overflow:auto; }
+  .cmp-table-wrap table { min-width:410px; }
+  select,button,input { font:inherit; }
+  select,button { color:var(--console-text); border-color:var(--console-line); border-radius:5px; }
+  select { background:#1a2520; }
+  button { background:#1a2520; }
+  button:hover { border-color:#82917f; }
+  button.primary { color:#21190c; background:var(--console-gold); border:1px solid var(--console-gold); }
+  button.primary:hover { background:#f0cf82; }
+  button:focus-visible,select:focus-visible,input:focus-visible,.snap-card:focus-visible,.card.interactive:focus-visible {
+    outline:2px solid #f2d48a; outline-offset:2px;
+  }
+  .auto-rec-toggle { border-radius:5px; }
+  .muted { color:var(--console-dim); }
+  @media(max-width:1180px) and (min-width:821px) {
+    .console-header { grid-template-columns:minmax(150px,.55fr) minmax(0,2fr) auto; gap:7px 12px; }
+    .header-controls { gap:6px; }
+    .control-field { gap:4px; }
+    .control-field select { max-width:190px; }
+    .workspace { grid-template-columns:minmax(0,1.25fr) minmax(310px,.9fr); }
+    .action-controls { gap:4px; }
+    .action-controls button { padding-inline:8px; font-size:12px; }
+  }
+  @media(max-width:820px) {
+    .console-header { position:relative; grid-template-columns:minmax(0,1fr) auto; grid-template-areas:"brand account" "controls controls" "status status"; }
+    .header-controls { justify-content:flex-start; }
+    .workspace { grid-template-columns:minmax(0,1fr); }
+    .inspector-column { grid-template-columns:minmax(0,1fr) minmax(0,1fr); align-items:start; }
+    .timeline-panel { grid-column:1/-1; }
+    .comparison-panel { grid-column:1/-1; }
+  }
+  @media(max-width:600px) {
+    .console-header { gap:8px; padding:9px 11px 8px; }
+    .header-brand h1 { font-size:15px; }
+    .header-caption { font-size:8px; }
+    .header-account { gap:5px; }
+    #authState { max-width:150px; white-space:normal; text-align:right; }
+    .header-controls { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:7px; }
+    .control-field { display:grid; grid-template-columns:auto minmax(0,1fr); width:100%; font-size:10px; }
+    .control-field select { width:100%; max-width:none; min-height:34px; padding:5px 6px; font-size:11px; }
+    .action-controls { grid-column:1/-1; display:grid; width:100%; grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .action-controls button { width:100%; min-width:0; padding:6px 5px; font-size:12px; }
+    #runAll { grid-column:1/-1; }
+    .auto-rec-toggle { grid-column:1/-1; width:100%; justify-content:center; }
+    .console-status { font-size:10px!important; }
+    .workspace { gap:9px; padding:9px 9px 18px; }
+    .game-column,.inspector-column { gap:9px; }
+    .inspector-column { grid-template-columns:minmax(0,1fr); }
+    .timeline-panel,.comparison-panel { grid-column:auto; }
+    .panel { padding:9px; }
+    .live-panel { padding:0; }
+    .live-panel h3 { min-height:35px; padding:7px 9px; }
+    .live-label { font-size:9px; }
+    .feed-wrap { aspect-ratio:16/10; max-height:none; }
+    .live-panel img { max-height:none; }
+    .live-toolbar { align-items:center; padding:6px 8px; }
+    #ctrlHint { flex-basis:145px; font-size:11px; }
+    #liveMetrics { margin-left:0; font-size:10px!important; }
+    .table { padding:9px; }
+    .topbar { gap:6px; }
+    .blind-chip { width:94px; height:94px; }
+    .stat { min-width:58px; padding-inline:7px; }
+    .scoreboard { gap:5px; }
+    .orb { width:62px; height:62px; font-size:16px; }
+    .score-total { min-width:104px; padding:10px; font-size:20px; }
+    .playzone { min-height:86px; flex-wrap:wrap; }
+    .hand-actions { gap:6px; }
+    .act-btn { padding:7px 9px; font-size:12px; }
+    .jcard { width:76px; height:108px; }
+    .shop-header { align-items:flex-start; flex-wrap:wrap; gap:8px; }
+    .shop-header>div:last-child { flex-wrap:wrap; justify-content:flex-end; }
+    .snap-list-wrap { max-height:260px; }
+  }
+  @media(max-width:380px) {
+    .header-brand h1 { font-size:14px; }
+    .header-account { flex-direction:column; align-items:flex-end; }
+    .header-controls { grid-template-columns:minmax(0,1fr); }
+    .action-controls { grid-column:auto; }
+    #runAll { grid-column:1/-1; }
+    .auto-rec-toggle { grid-column:auto; }
+    #ctrlHint { flex-basis:120px; }
+    .blind-chip { width:84px; height:84px; border-width:4px; }
+  }
+  @media(prefers-reduced-motion:reduce) {
+    *,*::before,*::after { scroll-behavior:auto!important; animation-duration:.01ms!important; animation-iteration-count:1!important; transition-duration:.01ms!important; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <h1>🃏 DecideX 小丑牌顾问</h1>
-  <select id="gameSel"></select>
-  <select id="provSel">
-    <option value="heuristic">启发式(计分模拟)</option>
-    <option value="model">真实模型(Jev/Drex 四级路由)</option>
-  </select>
-  <button id="recBtn" class="primary">推荐</button>
-  <button id="execBtn" class="primary" style="background:#27ae60; border-color:#229954;" title="在游戏中执行当前推荐动作">⚡ 执行推荐</button>
-  <button id="runAll">🤖 自动跑整局</button>
-  <label class="auto-rec-toggle" title="手牌变动时自动计算推荐与概率"><input type="checkbox" id="autoAdvisorCheck" checked> <span>实时顾问跟随</span></label>
-  <span id="authState" class="off">未登录</span>
-  <button id="logoutBtn">退出</button>
-  <span id="stats"></span>
+<header class="console-header">
+  <div class="header-brand">
+    <h1>🃏 DecideX <span>小丑牌顾问</span></h1>
+    <span class="header-caption">BALATRO LIVE CONSOLE</span>
+  </div>
+  <div class="header-controls">
+    <label class="control-field">对局<select id="gameSel" aria-label="选择对局"></select></label>
+    <label class="control-field">引擎<select id="provSel" aria-label="选择推荐引擎">
+      <option value="heuristic">启发式(计分模拟)</option>
+      <option value="model">真实模型(Jev/Drex 四级路由)</option>
+    </select></label>
+    <div class="action-controls">
+      <button id="recBtn" class="primary">推荐</button>
+      <button id="execBtn" class="execute-control" title="在游戏中执行当前推荐动作">⚡ 执行推荐</button>
+      <button id="runAll">🤖 自动跑整局</button>
+    </div>
+    <label class="auto-rec-toggle" title="手牌变动时自动计算推荐与概率"><input type="checkbox" id="autoAdvisorCheck" checked> <span>实时顾问跟随</span></label>
+  </div>
+  <div class="header-account">
+    <span id="authState" class="off" role="status" aria-live="polite">未登录</span>
+    <button id="logoutBtn" type="button">退出</button>
+    <a class="header-home-link" href="/">工具目录</a>
+  </div>
+  <div id="stats" class="console-status" role="status" aria-live="polite"></div>
 </header>
 
-<div class="live-wrap">
-  <div class="panel live-panel" id="livePanel">
-    <h3><span class="live-dot"></span> 游戏实况 · LIVE(广州CVM 真机)</h3>
+<main class="workspace" aria-label="Balatro 实时游戏与决策控制台">
+  <section class="game-column" aria-label="实时画面与牌桌状态">
+    <div class="live-wrap">
+      <section class="panel live-panel" id="livePanel" aria-labelledby="liveTitle">
+    <h3 id="liveTitle"><span class="live-dot"></span> 游戏实况 <span class="live-label">LIVE · 广州 CVM</span></h3>
     <div class="feed-wrap" id="feedWrap">
-      <img id="liveFeed" alt="live">
+      <img id="liveFeed" alt="Balatro 实时画面">
     </div>
     <div class="live-toolbar">
-      <button id="playToggle">操作:开</button>
-      <span id="ctrlHint">直接点击画面即可操作游戏（已启用零延迟极速反馈）</span>
-      <span id="liveMetrics" style="margin-left:auto; font-family:monospace; font-size:11px; color:#5fd08a;"></span>
+      <button id="playToggle" type="button" aria-pressed="true">操作:开</button>
+      <span id="ctrlHint">画面点击与键盘输入已启用</span>
+      <span id="liveMetrics" role="status" aria-live="polite">等待实时画面…</span>
     </div>
-  </div>
-</div>
+      </section>
+    </div>
 
-<div class="layout">
-  <div>
-    <div class="panel table">
+    <section class="panel table" aria-label="当前牌桌状态与操作">
       <div class="topbar">
         <div class="blind-chip" id="blindChip">
           <div class="nm" id="blindName">-</div>
@@ -370,24 +528,24 @@
         </div>
         <div class="shop-cards" id="shopCards"></div>
       </div>
-    </div>
-  </div>
+    </section>
+  </section>
 
-  <div>
+  <aside class="inspector-column" aria-label="决策时间线与顾问分析">
     <!-- 决策点历史/快照浏览面板 -->
-    <div class="panel">
+    <section class="panel timeline-panel" aria-labelledby="timelineTitle">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-        <h3 style="margin:0;">🎯 决策点时间轴</h3>
+        <h3 id="timelineTitle" style="margin:0;">🎯 决策点时间轴</h3>
         <span id="snapCount" style="font-size:11px; color:var(--dim);"></span>
       </div>
       <div class="snap-list-wrap" id="snapList"><div class="muted">加载中…</div></div>
-    </div>
+    </section>
 
     <!-- AI 决策顾问与概率可视化看板 -->
-    <div class="panel" style="margin-top:12px;" id="advisorPanel">
+    <section class="panel advisor-panel" id="advisorPanel" aria-labelledby="advisorTitle">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-        <h3 style="margin:0;">💡 AI 推荐与概率洞察</h3>
-        <span id="advisorStatus" class="advisor-status idle">就绪</span>
+        <h3 id="advisorTitle" style="margin:0;">💡 AI 推荐与概率洞察</h3>
+        <span id="advisorStatus" class="advisor-status idle" role="status" aria-live="polite">就绪</span>
       </div>
 
       <!-- 推荐核心卡片 -->
@@ -408,13 +566,13 @@
         </div>
         <div id="legal"></div>
       </div>
-    </div>
+    </section>
 
     <!-- 顾问 vs 玩家 复盘面板 -->
-    <div class="panel" style="margin-top:12px">
+    <section class="panel comparison-panel" aria-labelledby="comparisonTitle">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-        <h3 style="margin:0;">📊 顾问 vs 玩家 (整局复盘)</h3>
-        <button id="btnReplayRefresh" class="util-btn" style="padding:2px 8px; font-size:11px;">开始比对</button>
+        <h3 id="comparisonTitle" style="margin:0;">📊 顾问 vs 玩家 (整局复盘)</h3>
+        <button id="btnReplayRefresh" class="util-btn" type="button" style="padding:2px 8px; font-size:11px;">开始比对</button>
       </div>
       <div class="cmp-table-wrap">
         <table id="cmpTable">
@@ -422,9 +580,9 @@
           <tbody><tr><td colspan="3" class="muted" style="text-align:center; padding:12px;">点「跑整局」或「开始比对」进行离线推演。</td></tr></tbody>
         </table>
       </div>
-    </div>
-  </div>
-</div>
+    </section>
+  </aside>
+</main>
 
 <script src="/viz.js"></script>
 <script>
@@ -1402,7 +1560,7 @@ $('liveFeed').addEventListener('dblclick', (ev) => {
 });
 
 document.addEventListener('keydown', async (ev) => {
-  if (!PLAY_MODE || ev.target.tagName === 'INPUT' || ev.target.tagName === 'SELECT') return;
+  if (!PLAY_MODE || ev.target.closest('button, a, input, select, textarea, [contenteditable="true"]')) return;
   const k = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
   const send = k.length === 1 ? k : KEY_SEND[k];
   if (!send) return;
@@ -1414,8 +1572,10 @@ document.addEventListener('keydown', async (ev) => {
 $('playToggle').onclick = () => {
   PLAY_MODE = !PLAY_MODE;
   $('playToggle').textContent = PLAY_MODE ? '操作:开' : '操作:关';
+  $('playToggle').setAttribute('aria-pressed', String(PLAY_MODE));
   $('playToggle').className = PLAY_MODE ? 'on' : 'off';
   $('livePanel').classList.toggle('playable', PLAY_MODE);
+  $('ctrlHint').textContent = PLAY_MODE ? '画面点击与键盘输入已启用' : '操作已暂停；画面仅用于观察';
 };
 $('livePanel').classList.add('playable');
 

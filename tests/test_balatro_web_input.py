@@ -29,6 +29,11 @@ USER = "operator"
 PASSWORD = "operator-pw"
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, new_url):
+        return None
+
+
 @pytest.fixture
 def server(monkeypatch):
     """Live handler on a random port with xdotool stubbed and a known secret."""
@@ -224,6 +229,15 @@ def _get(base, path, cookie=None):
         return e.code, e.read(), e.headers
 
 
+def _head(base, path):
+    req = urllib.request.Request(base + path, method="HEAD")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, r.read(), r.headers
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), e.headers
+
+
 def test_login_page_served_with_query_string(server):
     """The 401 flow redirects to /login?next=%2F; a query string must not 404."""
     base, _ = server
@@ -231,12 +245,57 @@ def test_login_page_served_with_query_string(server):
     assert code == 200
     assert headers["Content-Type"].startswith("text/html")
     assert b"loginForm" in body
+    assert b'href="/"' in body
 
 
 def test_index_served_with_query_string(server):
     base, _ = server
-    code, body, _ = _get(base, "/?x=1")
-    assert code == 200 and b"__GAME_DIMS__" not in body
+    code, body, _ = _get(base, "/?source=test")
+    assert code == 200
+    assert b'id="toolDirectory"' in body
+    assert b'href="/play"' in body
+    assert b'href="/stream"' in body
+    assert "工具目录".encode("utf-8") in body
+    assert b"__GAME_DIMS__" not in body
+    assert b'<canvas id="canvas"' not in body
+
+
+def test_explicit_play_and_stream_routes(server):
+    base, _ = server
+    code, body, headers = _get(base, "/play")
+    assert code == 200
+    assert headers["Content-Type"].startswith("text/html")
+    assert b'<canvas id="canvas"' in body
+    assert b'href="/"' in body
+
+    code, body, _ = _get(base, "/stream")
+    assert code == 200
+    assert b'id="livePanel"' in body
+    assert b'href="/"' in body
+    assert b"__GAME_DIMS__" not in body
+
+
+def test_play_trailing_slash_redirects_to_canonical_resource_base(server):
+    base, _ = server
+    req = urllib.request.Request(base + "/play/", method="GET")
+    opener = urllib.request.build_opener(_NoRedirectHandler())
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        opener.open(req, timeout=5)
+    assert exc.value.code == 308
+    assert exc.value.headers.get("Location") == "/play"
+
+
+def test_portal_stays_available_without_wasm_build(server, monkeypatch, tmp_path):
+    base, _ = server
+    monkeypatch.setattr(app, "WASM_WEB_DIR", tmp_path / "missing-wasm")
+
+    code, body, _ = _get(base, "/")
+    assert code == 200 and b'id="toolDirectory"' in body
+    code, body, _ = _get(base, "/play")
+    assert code == 503 and b"WASM build is unavailable" in body
+    code, body, headers = _head(base, "/play")
+    assert code == 503 and body == b""
+    assert headers.get("Content-Length") == "0"
 
 
 # ---- open-redirect guard (_safe_next_path) ----------------------------------

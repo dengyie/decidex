@@ -975,11 +975,23 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path = self.path.split("?", 1)[0]
             if path in ("/", "/index.html"):
-                wasm_index = WASM_WEB_DIR / "index.html"
-                if wasm_index.is_file():
-                    return self._send_file(wasm_index, "text/html; charset=utf-8", 0, is_head=True)
-                page = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+                page = (Path(__file__).parent / "portal.html").read_text(encoding="utf-8")
                 return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+            if path == "/play/":
+                self.send_response(308)
+                self.send_header("Location", "/play")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if path == "/play":
+                wasm_index = WASM_WEB_DIR / "index.html"
+                if not wasm_index.is_file():
+                    self.send_response(503)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                return self._send_file(wasm_index, "text/html; charset=utf-8", 0, is_head=True)
             if path in ("/viz.js", "/viz.css"):
                 name = Path(path).name
                 target = SHARED_DIR / name
@@ -1017,14 +1029,15 @@ class Handler(BaseHTTPRequestHandler):
             # so /login?next=%2F (the 401 redirect target) is served, not 404'd.
             path = self.path.split("?", 1)[0]
             if path in ("/", "/index.html"):
-                wasm_index = WASM_WEB_DIR / "index.html"
-                if wasm_index.is_file():
-                    return self._send_file(wasm_index, "text/html; charset=utf-8", cache_seconds=0)
-                page = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
-                # Inject the real game screen size so the page's click-coordinate
-                # mapping can never drift from the server's xdotool clamp.
-                page = page.replace("__GAME_DIMS__", f"{GAME_W}x{GAME_H}")
+                page = (Path(__file__).parent / "portal.html").read_text(encoding="utf-8")
                 return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+            if path == "/play/":
+                return self._send(308, b"", "text/plain; charset=utf-8", extra={"Location": "/play"})
+            if path == "/play":
+                wasm_index = WASM_WEB_DIR / "index.html"
+                if not wasm_index.is_file():
+                    return self._send(503, b"Balatro WASM build is unavailable.", "text/plain; charset=utf-8")
+                return self._send_file(wasm_index, "text/html; charset=utf-8", cache_seconds=0)
             if path in ("/stream", "/stream/", "/stream/index.html"):
                 page = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
                 page = page.replace("__GAME_DIMS__", f"{GAME_W}x{GAME_H}")
