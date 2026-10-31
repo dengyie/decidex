@@ -769,6 +769,41 @@ def test_autopilot_escapes_a_wedged_booster_pack():
     assert "timeInPack > 20000" in pack_branch
 
 
+def test_bridge_guards_can_skip_booster_and_pack_ui_invariants():
+    """The can_skip_booster storm and the rebuild/late-factory loop.
+
+    The pack UI polls can_skip_booster every frame; CardArea:remove() sets
+    .cards = nil, so a stale G.pack_cards global made the vanilla predicate
+    (button_callbacks.lua:2118) error 3600 frames in a row (~1 minute of
+    frozen pack UI). And a queued vanilla factory event firing after the
+    watchdog rebuilt a pack replaces the healthy UI with a fresh EMPTY
+    area (the card-creation events already fired), re-wedging the pack.
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    # Predicate guard: self-heals a removed/stale area instead of erroring.
+    assert "local function install_can_skip_booster_guard()" in content
+    guard = content.split("local function install_can_skip_booster_guard()", 1)[1].split(chr(10) + "end", 1)[0]
+    assert "not G.pack_cards.cards or G.pack_cards.REMOVED" in guard
+    assert "G.pack_cards = nil" in guard
+    maint = content.split("local function decidex_maintenance()", 1)[1].split(chr(10) + "end", 1)[0]
+    assert "pcall(install_can_skip_booster_guard)" in maint
+
+    # Invariant sweep: single pack UI inside pack states, none outside.
+    assert "local function sweep_pack_ui_invariants()" in content
+    sweep = content.split("local function sweep_pack_ui_invariants()", 1)[1].split(chr(10) + "end", 1)[0]
+    assert "removed duplicate (orphaned) pack UIBox" in sweep
+    assert "removed pack UI outside a pack state" in sweep
+    assert "pcall(sweep_pack_ui_invariants)" in maint
+
+    # Rebuild escalation: a second stall in the same episode must abandon
+    # instead of rebuilding into another empty area.
+    wd = content.split("local function pack_stall_watchdog()", 1)[1].split(chr(10) + "local function ", 1)[0]
+    assert "rebuild already tried this episode; abandoning instead" in wd
+    assert "(_G._pack_rebuild_count or 0) < 1" in wd
+    assert "_G._pack_rebuild_count = nil" in wd
+
+
 def test_bridge_repairs_nil_state_midrun():
     """A nil G.STATE mid-run must be repaired from the visible UI.
 

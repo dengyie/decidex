@@ -701,6 +701,123 @@ local function repair_nil_state()
 end
 
 --[[
+  Guard G.FUNCS.can_skip_booster (button_callbacks.lua:2118).
+
+  The pack UI polls this button predicate EVERY FRAME. The vanilla body
+  indexes G.pack_cards.cards unguarded, and CardArea:remove() sets
+  .cards = nil — so as soon as the global points at a removed area (a
+  DecideX recovery raced a queued vanilla event), the predicate errors
+  every frame for as long as the UI lives: observed 3600+ consecutive
+  failed frames (~1 minute of frozen pack UI). Self-heal the stale global
+  and dump its identity once, so the true writer can be traced from the
+  production logs.
+]]
+local function install_can_skip_booster_guard()
+  if not (G and G.FUNCS and G.FUNCS.can_skip_booster) then return false end
+  if _G._decidex_can_skip_guarded then return false end
+  _G._decidex_can_skip_guarded = true
+  local orig = G.FUNCS.can_skip_booster
+  G.FUNCS.can_skip_booster = function(e)
+    if G.pack_cards and (not G.pack_cards.cards or G.pack_cards.REMOVED) then
+      local registered = false
+      pcall(function()
+        for _, v in pairs(G.I.CARDAREA or {}) do
+          if v == G.pack_cards then registered = true break end
+        end
+      end)
+      print(string.format(
+        "[DecideX Frame Guard] self-healed stale G.pack_cards (removed=%s, cards_nil=%s, in_cardarea_list=%s) — vanilla :2118 would have errored this frame",
+        tostring(G.pack_cards.REMOVED), tostring(G.pack_cards.cards == nil), tostring(registered)))
+      G.pack_cards = nil
+    end
+    return orig(e)
+  end
+  print("[DecideX Frame Guard] can_skip_booster stale-area guard installed")
+  return true
+end
+
+--[[
+  Guard Moveable.align_to_major (engine/moveable.lua:138-165).
+
+  A UIE/Moveable whose role.major was removed keeps erroring here EVERY
+  FRAME ("attempt to perform arithmetic on field 'y' (a nil value)") — and
+  each error aborts the whole G:update mid-frame, freezing every other
+  animation with it (observed 2700+ consecutive failed frames). On the
+  first error, detach the dead bond: the orphan has nothing valid to
+  align to anyway, and line 138 returns early once role.major is nil.
+]]
+local function install_align_to_major_guard()
+  if not (Moveable and Moveable.align_to_major) then return false end
+  if _G._decidex_align_guarded then return false end
+  _G._decidex_align_guarded = true
+  local orig = Moveable.align_to_major
+  local err_count = 0
+  Moveable.align_to_major = function(self, ...)
+    local ok, err = pcall(orig, self, ...)
+    if not ok then
+      err_count = err_count + 1
+      if self.role then self.role.major = nil end
+      if err_count <= 5 or err_count % 300 == 0 then
+        print(string.format(
+          "[DecideX Frame Guard] align_to_major error #%d healed (bond detached): %s",
+          err_count, tostring(err)))
+      end
+    end
+    return ok
+  end
+  print("[DecideX Frame Guard] align_to_major dead-bond guard installed")
+  return true
+end
+
+--[[
+  Pack-UI invariant sweep.
+
+  Two invariants the vanilla code relies on but our recovery paths can
+  violate through queued-event races:
+
+  1. A pack UI (G.booster_pack / G.pack_cards) never exists outside a pack
+     state. end_consumeable removes the UIBox 0.2s BEFORE restoring the
+     state, so a DecideX abandon that beat it left a window where a queued
+     vanilla factory event could build a fresh pack UI after we already
+     returned to the shop.
+  2. During a pack state there is exactly ONE pack UIBox. The queued
+     vanilla factory event can fire after our watchdog rebuilt the UI;
+     the game then overwrites G.booster_pack with a second UIBox whose
+     fresh G.pack_cards is EMPTY (the card-creation events fired long ago
+     into the previous area) — re-wedging the pack we just healed. The
+     orphaned duplicate is still drawn and still polls its buttons, so
+     remove it and keep only the live one.
+]]
+local function sweep_pack_ui_invariants()
+  if not (G and G.I and G.I.UIBOX) then return end
+  if is_pack_state() then
+    if G.booster_pack and not G.booster_pack.REMOVED then
+      for i = #G.I.UIBOX, 1, -1 do
+        local ub = G.I.UIBOX[i]
+        if ub and ub ~= G.booster_pack and not ub.REMOVED then
+          local has_skip = false
+          pcall(function() has_skip = find_button_by_button_name(ub, 'skip_booster') ~= nil end)
+          if has_skip then
+            pcall(function() ub:remove() end)
+            print("[DecideX Pack Watchdog] removed duplicate (orphaned) pack UIBox")
+          end
+        end
+      end
+    end
+  elseif G.booster_pack or G.pack_cards then
+    if G.booster_pack then
+      pcall(function() G.booster_pack:remove() end)
+      G.booster_pack = nil
+    end
+    if G.pack_cards then
+      pcall(function() G.pack_cards:remove() end)
+      G.pack_cards = nil
+    end
+    print("[DecideX Pack Watchdog] removed pack UI outside a pack state")
+  end
+end
+
+--[[
   Watchdog for the booster-pack states.
 
   Detects "we are in a pack state but the pack UI never appeared" and tries,
@@ -716,6 +833,7 @@ local function pack_stall_watchdog()
   if not is_pack_state() then
     _G._pack_stall_time = nil
     _G._pack_stall_handled = nil
+    _G._pack_rebuild_count = nil
     return false
   end
 
@@ -725,6 +843,7 @@ local function pack_stall_watchdog()
   if G.pack_cards then
     _G._pack_stall_time = nil
     _G._pack_stall_handled = nil
+    _G._pack_rebuild_count = nil
     return false
   end
 
@@ -757,11 +876,22 @@ local function pack_stall_watchdog()
     return true
   end
 
-  -- 2. Rebuild the pack UI directly.
-  if rebuild_pack_ui() then
-    _G._pack_stall_time = nil
-    _G._pack_stall_handled = nil
-    return true
+  -- 2. Rebuild the pack UI directly — but only ONCE per pack episode.
+  -- The card-creation events fire into whatever area is current at their
+  -- run time, so a SECOND rebuild produces a permanently empty area and
+  -- the pack re-wedges forever (each rebuild also races the queued
+  -- vanilla factory event, which then replaces the rebuild with yet
+  -- another empty area). After the first rebuild fails to stick, the
+  -- only sane move is to abandon the pack.
+  if (_G._pack_rebuild_count or 0) < 1 then
+    if rebuild_pack_ui() then
+      _G._pack_rebuild_count = (_G._pack_rebuild_count or 0) + 1
+      _G._pack_stall_time = nil
+      _G._pack_stall_handled = nil
+      return true
+    end
+  else
+    print("[DecideX Pack Watchdog] rebuild already tried this episode; abandoning instead")
   end
 
   -- 3. Give up on this pack and keep the run alive.
@@ -2468,9 +2598,20 @@ local function decidex_maintenance()
     pcall(install_emanager_crash_guard)
   end
 
+  -- can_skip_booster is polled every frame by the pack UI; a stale
+  -- G.pack_cards global used to error it 3600 frames in a row.
+  pcall(install_can_skip_booster_guard)
+
+  -- A Moveable aligned to a dead major aborts G:update every frame.
+  pcall(install_align_to_major_guard)
+
   -- A nil G.STATE mid-run freezes the whole state machine (see
   -- repair_nil_state); infer it back from the visible UI.
   pcall(repair_nil_state)
+
+  -- Pack UI invariants (no pack UI outside pack states, no duplicate
+  -- pack UIBoxes during one).
+  pcall(sweep_pack_ui_invariants)
 
   -- Booster-pack watchdog: recover from a pack whose UI never appeared.
   pcall(pack_stall_watchdog)
