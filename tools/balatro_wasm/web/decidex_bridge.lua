@@ -649,6 +649,12 @@ local function abandon_pack()
       end
     end)
     _G._pack_stall_time = nil
+    -- Exit latch: a stuck select_pack_card retry landing right after the
+    -- abandon re-enters the pack state with another fresh empty area
+    -- (the cards are gone) and re-wedges it. Pack actions are refused
+    -- for a short window after an abandon.
+    local now3 = (love.timer and love.timer.getTime()) or os.clock()
+    _G._decidex_pack_exit_until = now3 + 3.0
   end)
   if ok then
     print("[DecideX Pack Watchdog] abandoned wedged pack, returned to state " .. tostring(G.STATE))
@@ -2400,6 +2406,10 @@ local function decidex_execute_inner(action, args)
   end
 
   if action == "select_pack_card" then
+    local now_gate = (love.timer and love.timer.getTime()) or os.clock()
+    if _G._decidex_pack_exit_until and now_gate < _G._decidex_pack_exit_until then
+      return false, "pack exit in progress"
+    end
     if not (G.pack_cards and G.pack_cards.cards) then
       return false, "no pack_cards"
     end

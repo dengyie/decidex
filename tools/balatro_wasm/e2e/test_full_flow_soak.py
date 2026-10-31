@@ -62,7 +62,7 @@ TRANSIENT_INFO_RE = re.compile(
     r"debounced|not ready|animating|in progress|busy|locked|waiting|"
     r"already in play|blocks play|slots full|pack card not found|no-op|not set|"
     r"not in (BLIND_SELECT|SHOP|ROUND_EVAL|SELECTING_HAND|HAND_PLAYED|new_round)|"
-    r"blind already selected|already in run",
+    r"blind already selected|already in run|no pack_cards|not in a pack state|no space to buy",
     re.IGNORECASE,
 )
 
