@@ -466,14 +466,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
-  const EXPECTED_LOVE_SIZE = 56351892;
+  const EXPECTED_LOVE_SIZE = 56352866;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v98";
+  const ASSET_VERSION = "v100";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=98";
-  const ASSET_WASM_URL = "love.wasm.bin?v=98";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=100";
+  const ASSET_WASM_URL = "love.wasm.bin?v=100";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3569,7 +3569,7 @@ end
       // failure used to burn the 12-strike budget and auto-pause the run.
       const isStateMismatch = /not in (BLIND_SELECT|SHOP|ROUND_EVAL|SELECTING_HAND|HAND_PLAYED|new_round)/i.test(errStr);
       const isTransient = isStateMismatch ||
-        /not ready|animating|debounced|in progress|busy|locked|waiting|already in play|blocks play|slots full|pack card not found|no-op|not set/i.test(errStr);
+        /not ready|animating|debounced|in progress|busy|locked|waiting|already in play|blocks play|slots full|pack card not found|no-op|not set|acknowledgement timed out/i.test(errStr);
       if (isTransient) {
         console.log(`[AutoPilot] Dispatch transient wait for ${action}: ${errStr}`);
         if (action === "select_blind" || action === "skip_blind") {

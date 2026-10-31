@@ -565,12 +565,8 @@ local function rebuild_pack_ui()
       pcall(function() G.booster_pack:remove() end)
       G.booster_pack = nil
     end
-    -- The factory reassigns G.pack_cards; an orphaned area from an earlier
-    -- episode would leak into G.I.CARD and error every frame.
-    if G.pack_cards then
-      pcall(function() G.pack_cards:remove() end)
-      G.pack_cards = nil
-    end
+    -- The factory reassigns G.pack_cards itself; do NOT remove the old
+    -- area (see abandon_pack — vanilla semantics keep it alive and empty).
     local definition = factory()
     G.booster_pack = UIBox{
       definition = definition,
@@ -606,36 +602,52 @@ local function abandon_pack()
       pcall(function() G.booster_pack:remove() end)
       G.booster_pack = nil
     end
-    -- Removing only the reference would leak the CardArea into G.I.CARD/
-    -- MOVEABLES, where it keeps aligning to a dead major and errors every
-    -- frame (moveable.lua:152) for the rest of the run. Remove it properly.
-    if G.pack_cards then
-      pcall(function() G.pack_cards:remove() end)
-      G.pack_cards = nil
+    -- Every later step must run even if an earlier cleanup line errored:
+    -- a half-abandoned pack wedges both the game and the autopilot.
+    local function step(name, fn)
+      local s_ok, s_err = pcall(fn)
+      if not s_ok then
+        print("[DecideX Pack Watchdog] abandon step " .. name .. " failed: " .. tostring(s_err))
+      end
     end
-    G.GAME.PACK_INTERRUPT = nil
-    G.TAROT_INTERRUPT = nil
-    G.STATE = back
-    G.STATE_COMPLETE = false
-    if G.CONTROLLER and G.CONTROLLER.locks then
-      G.CONTROLLER.locks.use = false
-    end
-    if G.SETTINGS then G.SETTINGS.paused = false end
-    if G.OVERLAY_MENU then dismiss_blocking_overlay() end
+    -- Drop the reference WITHOUT removing the area: vanilla never removes
+    -- G.pack_cards, and a removed area (.cards = nil) poisons every queued
+    -- use_card restore event that still holds it (button_callbacks.lua:2283
+    -- crashes + the can_skip_booster stale-global). An alive empty area
+    -- updates cheaply and harmlessly; the align_to_major guard covers any
+    -- layout fallout.
+    step("pack_cards_ref", function() G.pack_cards = nil end)
+    step("pack_interrupt", function() G.GAME.PACK_INTERRUPT = nil end)
+    step("tarot_interrupt", function() G.TAROT_INTERRUPT = nil end)
+    step("state", function()
+      G.STATE = back
+      G.STATE_COMPLETE = false
+    end)
+    step("locks", function()
+      if G.CONTROLLER and G.CONTROLLER.locks then
+        G.CONTROLLER.locks.use = false
+      end
+    end)
+    step("unpause", function()
+      if G.SETTINGS then G.SETTINGS.paused = false end
+      if G.OVERLAY_MENU then dismiss_blocking_overlay() end
+    end)
     -- use_card pushes the shop UI out of the way and stashes the original
     -- offset in .py; put it back so the shop is visible again.
-    if G.shop and G.shop.alignment and G.shop.alignment.offset.py then
-      G.shop.alignment.offset.y = G.shop.alignment.offset.py
-      G.shop.alignment.offset.py = nil
-    end
-    if G.blind_select and G.blind_select.alignment and G.blind_select.alignment.offset.py then
-      G.blind_select.alignment.offset.y = G.blind_select.alignment.offset.py
-      G.blind_select.alignment.offset.py = nil
-    end
-    if G.round_eval and G.round_eval.alignment and G.round_eval.alignment.offset.py then
-      G.round_eval.alignment.offset.y = G.round_eval.alignment.offset.py
-      G.round_eval.alignment.offset.py = nil
-    end
+    step("offsets", function()
+      if G.shop and G.shop.alignment and G.shop.alignment.offset.py then
+        G.shop.alignment.offset.y = G.shop.alignment.offset.py
+        G.shop.alignment.offset.py = nil
+      end
+      if G.blind_select and G.blind_select.alignment and G.blind_select.alignment.offset.py then
+        G.blind_select.alignment.offset.y = G.blind_select.alignment.offset.py
+        G.blind_select.alignment.offset.py = nil
+      end
+      if G.round_eval and G.round_eval.alignment and G.round_eval.alignment.offset.py then
+        G.round_eval.alignment.offset.y = G.round_eval.alignment.offset.py
+        G.round_eval.alignment.offset.py = nil
+      end
+    end)
     _G._pack_stall_time = nil
   end)
   if ok then
@@ -693,7 +705,12 @@ local function repair_nil_state()
   elseif G.hand and G.hand.cards and #G.hand.cards > 0 then
     target = G.STATES.SELECTING_HAND
   end
-  if not target then return false end
+  if not target then
+    -- No visible UI matched: the run was mid-restore (the nil write came
+    -- from a restore event whose captured field was already consumed).
+    -- The restore target itself is the best guess, else the shop.
+    target = G.TAROT_INTERRUPT or (G.GAME and G.GAME.PACK_INTERRUPT) or G.STATES.SHOP
+  end
   G.STATE = target
   G.STATE_COMPLETE = false
   print("[DecideX Frame Guard] repaired nil G.STATE -> " .. state_name_of(target))
@@ -746,6 +763,34 @@ end
   first error, detach the dead bond: the orphan has nothing valid to
   align to anyway, and line 138 returns early once role.major is nil.
 ]]
+--[[
+  De-duplicate G.FUNCS.end_consumeable.
+
+  end_consumeable queues the delayed state-restore event
+  (`G.STATE = G.GAME.PACK_INTERRUPT` at +0.4s) and clears PACK_INTERRUPT
+  inside it. The autopilot can legitimately race "use last pack card"
+  against "skip pack", queueing end_consumeable twice; the second
+  restore event then reads the already-cleared PACK_INTERRUPT and writes
+  nil into G.STATE (observed: repair_nil_state firing 10+ times over 15s
+  as staggered duplicate restores kept re-nil-ing it).
+]]
+local function install_end_consumeable_dedup()
+  if not (G and G.FUNCS and G.FUNCS.end_consumeable) then return false end
+  if _G._decidex_end_consumeable_dedup then return false end
+  _G._decidex_end_consumeable_dedup = true
+  local orig = G.FUNCS.end_consumeable
+  G.FUNCS.end_consumeable = function(e, delayfac)
+    local now = (love.timer and love.timer.getTime()) or os.clock()
+    if _G._decidex_last_end_consumeable and (now - _G._decidex_last_end_consumeable) < 1.5 then
+      return nil
+    end
+    _G._decidex_last_end_consumeable = now
+    return orig(e, delayfac)
+  end
+  print("[DecideX Frame Guard] end_consumeable dedup installed")
+  return true
+end
+
 local function install_align_to_major_guard()
   if not (Moveable and Moveable.align_to_major) then return false end
   if _G._decidex_align_guarded then return false end
@@ -839,13 +884,37 @@ local function pack_stall_watchdog()
 
   local now = (love.timer and love.timer.getTime()) or os.clock()
 
-  -- The pack UI is healthy as soon as G.pack_cards exists.
+  -- The pack UI is healthy as soon as G.pack_cards exists AND holds the
+  -- pack's cards. An EMPTY area for >12s is a dead end, not health: when
+  -- the watchdog rebuild raced the queued card-creation events, those
+  -- events fired into the nil global and the pack's cards are gone for
+  -- good — no amount of waiting or re-rebuilding fills it again. Escape
+  -- by abandoning the pack so the run keeps moving.
   if G.pack_cards then
     _G._pack_stall_time = nil
     _G._pack_stall_handled = nil
-    _G._pack_rebuild_count = nil
+    local now2 = (love.timer and love.timer.getTime()) or os.clock()
+    local empty = not (G.pack_cards.cards and G.pack_cards.cards[1])
+    if not empty then
+      _G._pack_empty_time = nil
+      _G._pack_empty_handled = nil
+      return false
+    end
+    if not _G._pack_empty_time then
+      _G._pack_empty_time = now2
+      return false
+    end
+    if now2 - _G._pack_empty_time > 12.0 and not _G._pack_empty_handled then
+      _G._pack_empty_handled = true
+      print("[DecideX Pack Watchdog] pack area empty for 12s (creation events lost); abandoning")
+      abandon_pack()
+      _G._pack_empty_time = nil
+      return true
+    end
     return false
   end
+  _G._pack_empty_time = nil
+  _G._pack_empty_handled = nil
 
   if not _G._pack_stall_time then
     _G._pack_stall_time = now
@@ -2604,6 +2673,10 @@ local function decidex_maintenance()
 
   -- A Moveable aligned to a dead major aborts G:update every frame.
   pcall(install_align_to_major_guard)
+
+  -- Duplicate pack exits queue duplicate state-restore events that write
+  -- nil into G.STATE (staggered over seconds).
+  pcall(install_end_consumeable_dedup)
 
   -- A nil G.STATE mid-run freezes the whole state machine (see
   -- repair_nil_state); infer it back from the visible UI.
