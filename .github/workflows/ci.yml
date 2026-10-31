@@ -54,6 +54,9 @@ jobs:
           username: ${{ secrets.PROD_USER }}
           key: ${{ secrets.PROD_SSH_KEY }}
           port: ${{ secrets.PROD_PORT || 22 }}
+          # The remote verification suite runs the full pytest matrix on a
+          # small box; the action's 10m default kills it mid-run.
+          command_timeout: 30m
           script: |
             set -e
             echo "🚀 Starting automated deployment for DecideX..."
