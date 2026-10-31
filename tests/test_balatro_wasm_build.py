@@ -399,10 +399,6 @@ def test_path_traversal_security_defense():
     assert legit_file is not None and legit_file.name == "app.js"
     assert "javascript" in ctype
 
-    legit_love, ctype_love = Handler._resolve_wasm_file("balatro.love.zip")
-    assert legit_love is not None and legit_love.name == "balatro.love"
-    assert ctype_love == "application/octet-stream"
-
     # Malicious traversal attempts must be strictly rejected (returning None, "")
     traversal_payloads = [
         "../app.py",
@@ -418,6 +414,15 @@ def test_path_traversal_security_defense():
         target, ctype = Handler._resolve_wasm_file(payload)
         assert target is None, f"Payload '{payload}' must be rejected by path traversal defense"
         assert ctype == ""
+
+    # The zip URL aliases to the raw love; assert only where the
+    # externally provisioned asset exists (CI checks out git files only).
+    legit_love, ctype_love = Handler._resolve_wasm_file("balatro.love.zip")
+    if DEFAULT_OUTPUT.exists():
+        assert legit_love is not None and legit_love.name == "balatro.love"
+        assert ctype_love == "application/octet-stream"
+    else:
+        assert legit_love is None and ctype_love == ""
 
 
 def test_lua_bridge_enhanced_state_signature_and_guards():
