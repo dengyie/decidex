@@ -49,7 +49,10 @@ DWELL_BUDGETS = {
     "DRAW_TO_HAND": 30,
     "HAND_PLAYED": 60,
     "ROUND_EVAL": 60,
-    "PLAY_TAROT": 45,
+    # Same settlement-animation family as HAND_PLAYED/ROUND_EVAL; deep-ante
+    # joker/tarot chains legitimately take 46s+ (soak20 801s self-recovered
+    # at exactly 46s), so 45s flagged a healthy recovery as a stall.
+    "PLAY_TAROT": 60,
     "SHOP": 60,
     "TAROT_PACK": 75,
     "PLANET_PACK": 75,
@@ -199,7 +202,10 @@ class Soak:
 
                 dwell = time.monotonic() - state_since
                 budget = DWELL_BUDGETS.get(sname, DEFAULT_BUDGET)
-                if dwell > budget and not self.stall_dumped:
+                # 10% grace so a budget-line dwell (76s vs 75, 46s vs 45)
+                # is not reported as a stall: the budgets mean "wedged",
+                # and soaks 20/21 both self-recovered 1s past the line.
+                if dwell > budget * 1.1 and not self.stall_dumped:
                     self.stall_dumped = True
                     js_pack_n = len((st.get("pack_cards") or [])) if isinstance(st.get("pack_cards"), list) else "?"
                     note = f"state={sname} dwell={dwell:.0f}s budget={budget}s js_snapshot_pack_n={js_pack_n}"

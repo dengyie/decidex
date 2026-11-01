@@ -929,3 +929,103 @@ def test_lua_bridge_blocks_stay_balanced():
 
     for path in build_mod.BRIDGE_COPIES:
         assert mod.check(str(path)) == 0, f"unbalanced Lua blocks in {path}"
+
+
+def test_transient_rejection_clears_inflight_lock():
+    """v109: a transient dispatch rejection must clear the in-flight lock for
+    play/discard too. The bridge's transient windows are short (discard
+    debounce 1.5s, in-progress gate 5s) while keeping the lock stranded the
+    action until the interval watchdog force-cleared it at 8s/15s -- the
+    40+ "discard stuck for ~8s" idle locks per soak in v108.
+    """
+    js_content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    assert "the interval watchdog then reported" in js_content
+    # The transient branch clears unconditionally, blind actions keep only
+    # their own sent-flag reset.
+    assert "this._actionInFlight = null;" in js_content
+    assert 'if (action === "select_blind" || action === "skip_blind") {' in js_content
+
+
+def test_play_discard_wait_gates_aligned_with_bridge_latches():
+    """v109: the executeStep wait gates and lifecycle fallbacks must stay in
+    the same range as the bridge's own reject windows (play 5s latch gate,
+    discard 1.5s debounce + 5s in-progress gate) so a retry happens from the
+    normal cooldown path instead of the watchdog force-clear.
+    """
+    js_content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    assert 'this._actionInFlight === "play" && (now - (this._lastPlayActionTime || 0) < 6000)' in js_content
+    assert 'this._actionInFlight === "discard" && (now - (this._lastDiscardActionTime || 0) < 5500)' in js_content
+    assert "now - (this._lastPlayActionTime || 0) > 6000" in js_content
+    assert "now - (this._lastDiscardActionTime || 0) > 5500" in js_content
+    # The interval watchdog budgets must match (no more 15s/8s stranding).
+    assert '(this._actionInFlight === "play") ? 6500 : ((this._actionInFlight === "discard") ? 6000 : 3800)' in js_content
+
+
+def test_pack_selection_emits_content_progress():
+    """v109: pack card selection must release the in-flight lock via content
+    progress. Two halves: the bridge includes the highlighted flag in both
+    the pack signature (snapshot emission) and shop_card_json (the snapshot
+    payload); app.js diffs consecutive snapshots and unlocks non-combat
+    in-flight actions when the selection signature flips.
+    """
+    bridge = Path(build_mod.BRIDGE_COPIES[0]).read_text(encoding="utf-8")
+    # signature carries the highlight bit
+    assert 'i .. ":" .. cname .. ":" .. hl' in bridge
+    assert "local hl = (c.highlighted and 1 or 0)" in bridge
+    # snapshot payload carries the highlight flag (single-quoted Lua string,
+    # built via chr(39) to keep this file free of nested quote gymnastics)
+    assert chr(39) + '"highlighted":' + chr(39) + ' .. (c.highlighted and "true" or "false")' in bridge
+
+    js_content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    assert "onContentProgress" in js_content
+    assert "(c.highlighted ? 1 : 0)" in js_content
+
+
+def test_pack_ui_sweep_never_removes_pack_cards_area():
+    """v109: the outside-a-pack-state sweep must drop the G.pack_cards
+    reference without CardArea:remove(), which nils .cards and poisons every
+    queued use_card restore event still holding the area
+    (button_callbacks.lua:2283 crashed 18+ times per soak). abandon_pack
+    already documents this exact vanilla-semantics constraint.
+    """
+    bridge = Path(build_mod.BRIDGE_COPIES[0]).read_text(encoding="utf-8")
+    sweep = bridge[bridge.index("local function sweep_pack_ui_invariants"):]
+    sweep = sweep[:sweep.index("end\n\n--[[") if "end\n\n--[[" in sweep else len(sweep)]
+    # No :remove() on pack_cards inside the sweep anymore; reference drop only.
+    assert "G.pack_cards:remove()" not in sweep
+    assert "Drop the reference WITHOUT removing the area" in sweep
+
+
+def test_draw_to_hand_tracks_hand_count_not_queue_noise():
+    """v109: the DRAW_TO_HAND escape must arm on hand-COUNT progress, not
+    queue-length activity. The base queue churns on unrelated background
+    events during post-pack chaos (base=30-38 observed mid-stall), which
+    kept the old queue-progress timer refreshed while zero cards were dealt
+    for 49s (soak19 986s stall: STATE=3, STATE_COMPLETE=true, hand=0).
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+    assert "_last_draw_hand_count" in content
+    assert "_last_draw_hand_progress" in content
+    assert "re-triggering draw_from_deck_to_hand" in content
+    # Latch hygiene: both new latches reset when the state exits.
+    tail = content[content.index("G.STATES.DRAW_TO_HAND then"):]
+    tail = tail[:tail.index("\n  end", tail.index("_last_draw_queue_progress = nil"))]
+    assert "_last_draw_hand_count = nil" in tail
+    assert "_last_draw_hand_progress = nil" in tail
+
+
+def test_pack_select_arms_watchdog_and_breaks_futile_retries():
+    """v109: select_pack_card must (a) arm the watchdog clock per attempt --
+    the dispatch path never refreshed _lastProgressTimestamp, so repeated
+    slots-full rejections accumulated an ever-staler anchor (4.2s -> 9.8s
+    warnings in soak21) -- and (b) stop retrying the same refused selection:
+    three consecutive slots-full transient rejections trip a breaker that
+    skips the pack instead of churning.
+    """
+    js_content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    assert "instead of each attempt getting its own window" in js_content
+    assert "this._packSelectFullStreak = (this._packSelectFullStreak || 0) + 1" in js_content
+    assert "forcing pack skip" in js_content
+    assert "_skipCurrentPack && state.can_skip_booster" in js_content
+    # The breaker must reset per pack episode, keyed by state name.
+    assert "_packStateSeen" in js_content

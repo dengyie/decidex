@@ -466,14 +466,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
-  const EXPECTED_LOVE_SIZE = 56354005;
+  const EXPECTED_LOVE_SIZE = 56354783;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v108";
+  const ASSET_VERSION = "v109";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=108";
-  const ASSET_WASM_URL = "love.wasm.bin?v=108";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=109";
+  const ASSET_WASM_URL = "love.wasm.bin?v=109";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -2806,6 +2806,23 @@ end
     window._lastDecidexState = state;
     window._lastDecidexStateCount = (window._lastDecidexStateCount || 0) + 1;
 
+    // Content-level change detection: several actions complete WITHOUT the
+    // state name or hand counters changing (pack card selection flips
+    // highlighted; shop toggles reflow the shop). The bridge now emits a
+    // snapshot whenever the pack signature changes, so a snapshot whose
+    // pack_cards selection differs from the previous one IS progress and
+    // must release the in-flight lock instead of idling to the watchdog.
+    try {
+      const prev = window._lastRawDecidexState;
+      if (prev && window.AutoPilot && typeof window.AutoPilot.onContentProgress === "function") {
+        const sig = (arr) => (arr || []).map((c) => (c.highlighted ? 1 : 0)).join("");
+        if (JSON.stringify(sig(prev.pack_cards)) !== JSON.stringify(sig(state.pack_cards))) {
+          window.AutoPilot.onContentProgress("pack_selection");
+        }
+      }
+      window._lastRawDecidexState = state;
+    } catch (_) {}
+
     // 1. Immediately notify AutoPilot so state transitions are NEVER blocked by early returns!
     if (window.AutoPilot && typeof window.AutoPilot.onStateUpdated === "function") {
       window.AutoPilot.onStateUpdated(state);
@@ -3449,7 +3466,12 @@ end
         if (["HAND_PLAYED", "DRAW_TO_HAND", "NEW_ROUND"].includes(curStateName)) {
           this._lastProgressTimestamp = now;
         }
-        const maxStuckTime = (this._actionInFlight === "play") ? 15000 : ((this._actionInFlight === "discard") ? 8000 : 3800);
+        // Aligned with the executeStep wait gates (play 6s / discard 5.5s)
+        // and the bridge latches (play 15s latch but 5s reject window,
+        // discard 5s in-progress gate + 1.5s debounce): the force-clear
+        // must fire AFTER a legitimate animation window, never as the
+        // routine unlock path it used to be when set to 15s/8s.
+        const maxStuckTime = (this._actionInFlight === "play") ? 6500 : ((this._actionInFlight === "discard") ? 6000 : 3800);
         if (now - this._lastProgressTimestamp > maxStuckTime) {
           if (this._actionInFlight) {
             if ((this._actionInFlight === "select_blind" || this._actionInFlight === "skip_blind") && curStateName === "BLIND_SELECT") {
@@ -3512,6 +3534,20 @@ end
       this._busyTimestamp = Date.now();
     },
 
+    // Content-level progress: an action completed inside the same state
+    // (pack card selection now emits a snapshot with flipped "highlighted"
+    // flags). Same release discipline as the stateChanged path below:
+    // combat lifecycles (play/discard) keep their animation witnessing.
+    onContentProgress(kind) {
+      if (!this.enabled) return;
+      if (this._actionInFlight && this._actionInFlight !== "play" && this._actionInFlight !== "discard") {
+        this._actionInFlight = null;
+        this.busy = false;
+        this.pendingState = null;
+      }
+      this._lastProgressTimestamp = Date.now();
+    },
+
     onActionResult(resultStr) {
       if (!this.enabled) return;
       const mAction = resultStr.match(/action=([^\s]+)/);
@@ -3572,15 +3608,35 @@ end
         /not ready|animating|debounced|in progress|busy|locked|waiting|already in play|blocks play|slots full|pack card not found|no pack_cards|not in a pack state|no space to buy|use_card failed|no-op|not set|acknowledgement timed out/i.test(errStr);
       if (isTransient) {
         console.log(`[AutoPilot] Dispatch transient wait for ${action}: ${errStr}`);
+        // Clear the in-flight lock for EVERY action on a transient rejection,
+        // play/discard included. The bridge's transient windows are short
+        // (discard debounce 1.5s, in-progress gate 5s), and the normal
+        // action cooldowns (2.5s/3s) already exceed them, so the next
+        // executeStep retries well inside the old 8s/15s dead wait — which
+        // the interval watchdog then reported as "stuck for 8045ms".
+        // Keeping the lock here stranded it with no retry until the
+        // watchdog force-clear.
+        this._actionInFlight = null;
         if (action === "select_blind" || action === "skip_blind") {
-          this._actionInFlight = null;
           this._blindActionSent = false;
-        } else if (action !== "play" && action !== "discard") {
-          this._actionInFlight = null;
         }
         this._busyTimestamp = null;
         this.pendingState = null;
         this.busy = false;
+        // Futile-retry circuit breaker: the same action rejected transiently
+        // three times in a row is not "waiting for readiness" anymore, it is
+        // a decision the game will keep refusing (e.g. selecting a joker
+        // into a full board — "joker slots full" x5 in soak17/soak21). Give
+        // up on the current pack decision so the pack-skip path can take
+        // over instead of churning until the watchdog escalates.
+        if (action === "select_pack_card" && errMsg.includes("slots full")) {
+          this._packSelectFullStreak = (this._packSelectFullStreak || 0) + 1;
+          if (this._packSelectFullStreak >= 3) {
+            this._packSelectFullStreak = 0;
+            this._skipCurrentPack = true;
+            console.warn("[AutoPilot] select_pack_card kept hitting slots-full; forcing pack skip");
+          }
+        }
         if (isStateMismatch) {
           // Ask the bridge for a fresh snapshot so the next decision is made
           // against the game's real state instead of the stale one.
@@ -3671,8 +3727,10 @@ end
           this._actionInFlight = null;
           this._playSawHandPlayed = false;
           this.busy = false;
-        } else if (now - (this._lastPlayActionTime || 0) > 15000) {
-          // Hard watchdog fallback (15s)
+        } else if (now - (this._lastPlayActionTime || 0) > 6000) {
+          // Hard watchdog fallback, aligned with the 6s executeStep gate:
+          // a full hand-resolution rarely exceeds this at GAMESPEED 4, and
+          // if it does the bridge latch (5s) has already opened the retry.
           this._actionInFlight = null;
           this._playSawHandPlayed = false;
           this.busy = false;
@@ -3691,7 +3749,7 @@ end
             this._discardSawDraw = false;
             this.busy = false;
           }
-        } else if (now - (this._lastDiscardActionTime || 0) > 7000) {
+        } else if (now - (this._lastDiscardActionTime || 0) > 5500) {
           this._actionInFlight = null;
           this._discardSawDraw = false;
           this.busy = false;
@@ -3899,15 +3957,18 @@ end
             this.updateStatus(`等待手牌发全 (${state.hand.length}/${expected})...`, true);
             executedAction = false;
             unlockCooldownMs = 300;
-          } else if (this._actionInFlight === "play" && (now - (this._lastPlayActionTime || 0) < 15000)) {
+          } else if (this._actionInFlight === "play" && (now - (this._lastPlayActionTime || 0) < 6000)) {
             this._handIncompleteSince = null;
-            // A play was dispatched and is animating; wait up to 15.0s
+            // A play was dispatched and its ack arrived (the lock survives);
+            // the bridge clears its own latch at 5s, so waiting past 6s only
+            // delays the retry the watchdog would otherwise force at 15s.
             this.updateStatus("出牌结算中...", true);
             executedAction = false;
             unlockCooldownMs = 400;
-          } else if (this._actionInFlight === "discard" && (now - (this._lastDiscardActionTime || 0) < 8000)) {
+          } else if (this._actionInFlight === "discard" && (now - (this._lastDiscardActionTime || 0) < 5500)) {
             this._handIncompleteSince = null;
-            // A discard was dispatched and is drawing; wait up to 8.0s
+            // Same as play: the lock surviving means the ack arrived; the
+            // bridge debounce is 1.5s, so retry after 5.5s instead of 8s.
             this.updateStatus("弃牌处理中...", true);
             executedAction = false;
             unlockCooldownMs = 400;
@@ -4154,7 +4215,21 @@ end
           }
         } else if (["TAROT_PACK", "PLANET_PACK", "SPECTRAL_PACK", "STANDARD_PACK", "BUFFOON_PACK"].includes(sname)) {
           const packCards = state.pack_cards || [];
-          if (packCards.length > 0) {
+          // A fresh pack episode clears the slots-full circuit breaker; a
+          // tripped one skips this pack immediately (the breaker is only set
+          // after the same selection was refused three times).
+          if (this._packStateSeen !== sname) {
+            this._packStateSeen = sname;
+            this._packSelectFullStreak = 0;
+            this._skipCurrentPack = false;
+          }
+          if (this._skipCurrentPack && state.can_skip_booster) {
+            this.updateStatus("跳过补充包（选择被持续拒绝）...", true);
+            console.log("[AutoPilot] Skipping pack after repeated slots-full rejections");
+            window.executeSkipBooster();
+            executedAction = true;
+            unlockCooldownMs = 600;
+          } else if (packCards.length > 0) {
             this._packEnterTime = null;
             let bestCard = null;
             if (sname === "PLANET_PACK") {
@@ -4290,6 +4365,12 @@ end
               this.updateStatus(`补充包选择: ${bestCard.name || '卡牌'}${targetDesc}`, true);
               console.log("[AutoPilot] Selecting pack card:", bestCard.name, "at index", bestCard.index || 1, "targets:", targetIndices);
               window.executeSelectPackCard(bestCard.index || 1, targetIndices);
+              // Arm the watchdog clock for this attempt: play/discard set it
+              // explicitly, but this path never did, so repeated transient
+              // rejections ("joker slots full") accumulated stuck-time from
+              // an ever-staler anchor (4.2s -> 5.3s -> ... -> 9.8s in soak21)
+              // instead of each attempt getting its own window.
+              this._lastProgressTimestamp = Date.now();
               executedAction = true;
               unlockCooldownMs = 600;
             } else if (state.can_skip_booster) {

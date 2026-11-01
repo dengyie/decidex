@@ -254,7 +254,8 @@ local function shop_card_json(c, idx)
       '"enhancement":' .. jstr(enh),
       '"seal":' .. jstr(seal),
       '"extra":' .. serialize_extra(c.ability and c.ability.extra),
-      '"index":' .. jstr(idx)
+      '"index":' .. jstr(idx),
+      '"highlighted":' .. (c.highlighted and "true" or "false")
     }
     return "{" .. table.concat(parts, ",") .. "}"
   end)
@@ -861,7 +862,11 @@ local function sweep_pack_ui_invariants()
       G.booster_pack = nil
     end
     if G.pack_cards then
-      pcall(function() G.pack_cards:remove() end)
+      -- Drop the reference WITHOUT removing the area, same semantics as
+      -- abandon_pack: CardArea:remove() nils .cards, and any queued
+      -- use_card restore event still holding this area then crashes on
+      -- area.cards[1] (button_callbacks.lua:2283) — 18+ Event Guard drops
+      -- per soak traced exactly here. An alive empty area is harmless.
       G.pack_cards = nil
     end
     print("[DecideX Pack Watchdog] removed pack UI outside a pack state")
@@ -1557,6 +1562,34 @@ local function check_and_emit_state()
       _G._last_draw_queue_progress = now
     end
 
+    -- Draw-progress stall: the queue-length timer above only measures
+    -- queue ACTIVITY, and the base queue churns on unrelated background
+    -- events (observed base=30-38 during a stall), so the 12s escape never
+    -- armed while zero cards were dealt for 49s (soak19 986s: STATE=3,
+    -- STATE_COMPLETE=true, hand=0). Track the hand COUNT itself: if the
+    -- dealing made no progress for 12s and the hand is not full, re-trigger
+    -- the draw regardless of queue noise.
+    if dhf_drawn ~= (_G._last_draw_hand_count or -1) then
+      _G._last_draw_hand_count = dhf_drawn
+      _G._last_draw_hand_progress = now
+    end
+    if (now - (_G._last_draw_hand_progress or now) > 12.0) and dhf_drawn < dhf_limit then
+      _G._last_draw_hand_progress = now
+      if G.deck and G.deck.cards and #G.deck.cards > 0 then
+        print("[DecideX Bridge] Watchdog: DRAW_TO_HAND dealing stalled (hand=" ..
+          tostring(dhf_drawn) .. "/" .. tostring(dhf_limit) ..
+          ", queue=" .. tostring(base_len) .. "); re-triggering draw_from_deck_to_hand")
+        pcall(function() G.FUNCS.draw_from_deck_to_hand(nil) end)
+      else
+        print("[DecideX Bridge] Watchdog: DRAW_TO_HAND dealing stalled with empty deck; advancing to SELECTING_HAND")
+        G.STATE = G.STATES.SELECTING_HAND
+        G.STATE_COMPLETE = false
+        if G.GAME and G.GAME.blind and G.GAME.blind.drawn_to_hand then
+          pcall(function() G.GAME.blind:drawn_to_hand() end)
+        end
+      end
+    end
+
     local time_since_progress = now - (_G._last_draw_queue_progress or now)
     if base_len == 0 then
       if not _G._draw_empty_time then _G._draw_empty_time = now end
@@ -1590,6 +1623,8 @@ local function check_and_emit_state()
     _G._draw_hand_full_time = nil
     _G._last_draw_queue_len = nil
     _G._last_draw_queue_progress = nil
+    _G._last_draw_hand_count = nil
+    _G._last_draw_hand_progress = nil
   end
 
   -- Lifecycle reset rules: Only release in-flight combat locks when safely back in SELECTING_HAND
@@ -1841,10 +1876,16 @@ local function check_and_emit_state()
          G.STATE == G.STATES.SPECTRAL_PACK or G.STATE == G.STATES.STANDARD_PACK or 
          G.STATE == G.STATES.BUFFOON_PACK then
     local p_cards = (G.pack_cards and G.pack_cards.cards) or {}
+    -- Highlight state MUST be part of the signature: select_pack_card flips
+    -- c.highlighted without changing the card count or names, and without it
+    -- no [DECIDEX_STATE] snapshot is emitted after a successful selection --
+    -- the AutoPilot's state-change unlock never fires and every selection
+    -- idled until the 3.8s watchdog force-clear (6-9 idle locks per soak).
     local pack_sig_parts = { tostring(#p_cards) }
     for i, c in ipairs(p_cards) do
       local cname = (c.ability and c.ability.name) or ""
-      pack_sig_parts[#pack_sig_parts + 1] = i .. ":" .. cname
+      local hl = (c.highlighted and 1 or 0)
+      pack_sig_parts[#pack_sig_parts + 1] = i .. ":" .. cname .. ":" .. hl
     end
     local cur_pack_sig = table.concat(pack_sig_parts, "|")
     if cur_pack_sig ~= LAST_PACK_SIG or state_changed then
