@@ -1512,6 +1512,14 @@ local function check_and_emit_state()
     _G._last_base_queue_progress = nil
   end
 
+  -- Latch hygiene: _facing_blind_since is only meaningful inside
+  -- BLIND_SELECT; resetting it here (rather than inside the select gate's
+  -- guard) removes the cross-episode stale timestamp that made the first
+  -- select after a stuck episode clear a legitimately fresh flag.
+  if G.STATE ~= G.STATES.BLIND_SELECT then
+    _G._facing_blind_since = nil
+  end
+
   if G.STATE == G.STATES.DRAW_TO_HAND then
     _G._hand_discard_saw_draw = true
     if not _G._draw_to_hand_enter_time then
@@ -1579,6 +1587,7 @@ local function check_and_emit_state()
   else
     _G._draw_to_hand_enter_time = nil
     _G._draw_empty_time = nil
+    _G._draw_hand_full_time = nil
     _G._last_draw_queue_len = nil
     _G._last_draw_queue_progress = nil
   end

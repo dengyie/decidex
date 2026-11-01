@@ -769,6 +769,29 @@ def test_autopilot_escapes_a_wedged_booster_pack():
     assert "timeInPack > 20000" in pack_branch
 
 
+def test_bridge_latch_hygiene_resets_per_episode():
+    """Cross-episode stale latches must reset on state exit, not on re-use.
+
+    Two latch-discipline bugs of the same family: _facing_blind_since only
+    reset inside the select gate's guard (so the timestamp survived into the
+    NEXT blind select and immediately cleared a legitimately fresh flag,
+    double-selecting it), and _draw_hand_full_time never reset when the
+    state left DRAW_TO_HAND.
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    # The facing_blind timestamp must reset outside BLIND_SELECT, from the
+    # maintenance path (which runs every frame regardless of dispatches).
+    reset_block = content.split(
+        "-- Latch hygiene: _facing_blind_since is only meaningful inside", 1)[1].split(chr(10) + "end", 1)[0]
+    assert "if G.STATE ~= G.STATES.BLIND_SELECT then" in reset_block
+    assert "_G._facing_blind_since = nil" in reset_block
+
+    # The hand-full latch must reset when DRAW_TO_HAND is left.
+    else_branch = content.split(chr(10) + "  else" + chr(10) + "    _G._draw_to_hand_enter_time = nil", 1)[1].split(chr(10) + "  end", 1)[0]
+    assert "_G._draw_hand_full_time = nil" in else_branch
+
+
 def test_bridge_guards_can_skip_booster_and_pack_ui_invariants():
     """The can_skip_booster storm and the rebuild/late-factory loop.
 
