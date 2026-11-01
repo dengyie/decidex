@@ -1520,6 +1520,29 @@ local function check_and_emit_state()
       _G._last_draw_queue_progress = now
     end
 
+    -- Queue-progress-agnostic escape: post pack-exit chaos keeps the event
+    -- queue churning (refreshing the progress timer) while the state never
+    -- advances - observed 30s DRAW_TO_HAND stalls with a full hand. Once
+    -- the hand is full, the draw is DONE regardless of queue activity.
+    local dhf_limit = (G.hand and G.hand.config and G.hand.config.card_limit) or 8
+    local dhf_drawn = (G.hand and G.hand.cards and #G.hand.cards) or 0
+    if dhf_drawn >= dhf_limit then
+      if not _G._draw_hand_full_time then _G._draw_hand_full_time = now end
+      if now - _G._draw_hand_full_time > 20.0 then
+        _G._draw_hand_full_time = nil
+        _G._draw_to_hand_enter_time = nil
+        print("[DecideX Bridge] Watchdog: hand full for 20s in DRAW_TO_HAND, advancing to SELECTING_HAND")
+        G.STATE = G.STATES.SELECTING_HAND
+        G.STATE_COMPLETE = false
+        if G.GAME and G.GAME.blind and G.GAME.blind.drawn_to_hand then
+          pcall(function() G.GAME.blind:drawn_to_hand() end)
+        end
+        return
+      end
+    else
+      _G._draw_hand_full_time = nil
+    end
+
     local base_len = (G.E_MANAGER and G.E_MANAGER.queues and G.E_MANAGER.queues.base and #G.E_MANAGER.queues.base) or 0
     if base_len ~= _G._last_draw_queue_len then
       _G._last_draw_queue_len = base_len

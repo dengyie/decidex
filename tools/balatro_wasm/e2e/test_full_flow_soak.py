@@ -158,8 +158,7 @@ class Soak:
                             ' .. " interrupts=" .. tostring(G.GAME and G.GAME.PACK_INTERRUPT) .. "," .. tostring(G.TAROT_INTERRUPT)' +
                             ' .. " pack_n=" .. tostring(G.pack_cards and G.pack_cards.cards and #G.pack_cards.cards)' +
                             ' .. " pack_removed=" .. tostring(G.pack_cards and G.pack_cards.REMOVED)' +
-                            ' .. " js_pack_n=" .. tostring(window._lastDecidexState && (window._lastDecidexState.pack_cards || []).length)' +
-                            ' .. " js_count=" .. tostring(window._decidexStateCount));');
+                            ');');
                     };
                 }"""
             )
@@ -202,7 +201,8 @@ class Soak:
                 budget = DWELL_BUDGETS.get(sname, DEFAULT_BUDGET)
                 if dwell > budget and not self.stall_dumped:
                     self.stall_dumped = True
-                    note = f"state={sname} dwell={dwell:.0f}s budget={budget}s"
+                    js_pack_n = len((st.get("pack_cards") or [])) if isinstance(st.get("pack_cards"), list) else "?"
+                    note = f"state={sname} dwell={dwell:.0f}s budget={budget}s js_snapshot_pack_n={js_pack_n}"
                     self.stalls.append((f"{t:.0f}s", note))
                     print(f"[Soak] *** STALL *** {t:.0f}s {note}", flush=True)
                     await page.evaluate("() => window.__soakDump && window.__soakDump()")
