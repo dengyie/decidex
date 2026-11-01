@@ -2034,7 +2034,28 @@ local function decidex_execute_inner(action, args)
       _G._select_blind_in_flight = nil
     end
     if (G.GAME and G.GAME.facing_blind) or _G._select_blind_in_flight then
-      return true, "blind already selected (animating)"
+      -- A stale facing_blind ("select accepted, blind starting") wedges the
+      -- select: its clearing event can crash (Event Guard drops it) and
+      -- nothing re-fires, so the autopilot waits on "already selected"
+      -- while the blind-select UI sits there for a minute (observed 45-60s
+      -- at antes 5-6, always self-recovering late). If the blind-select UI
+      -- is STILL up with facing_blind set for >10s, the start never
+      -- happened - clear the stale flag and select again.
+      if G.GAME and G.GAME.facing_blind and G.blind_select and not G.blind_select.REMOVED then
+        if not _G._facing_blind_since then
+          _G._facing_blind_since = now
+        elseif now - _G._facing_blind_since > 10.0 then
+          _G._facing_blind_since = nil
+          _G._select_blind_in_flight = nil
+          G.GAME.facing_blind = nil
+          print("[DecideX Frame Guard] cleared stale facing_blind after 10s stuck in BLIND_SELECT")
+        end
+      else
+        _G._facing_blind_since = nil
+      end
+      if (G.GAME and G.GAME.facing_blind) or _G._select_blind_in_flight then
+        return true, "blind already selected (animating)"
+      end
     end
     if _G._last_select_blind_time and (now - _G._last_select_blind_time < 1.0) then
       return true, "select_blind debounced"
