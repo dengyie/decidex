@@ -885,6 +885,12 @@ local function pack_stall_watchdog()
     _G._pack_stall_time = nil
     _G._pack_stall_handled = nil
     _G._pack_rebuild_count = nil
+    -- The empty-escape latch MUST reset here too: it used to reset only
+    -- when an area became non-empty, so after one escape the latch stayed
+    -- set and every LATER pack with lost creation events wedged forever
+    -- (observed in soak7: escape fired twice, then never again).
+    _G._pack_empty_time = nil
+    _G._pack_empty_handled = nil
     return false
   end
 

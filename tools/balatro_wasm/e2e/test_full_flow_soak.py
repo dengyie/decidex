@@ -41,7 +41,10 @@ MAX_SECONDS = int(os.environ.get("BALATRO_SOAK_MAX_SECONDS", "2400"))
 # budgets only trip when something is genuinely wedged.
 DWELL_BUDGETS = {
     "MENU": 45,
-    "BLIND_SELECT": 45,
+    # Blind select legitimately takes 45-46s when the event queue is still
+    # draining a busy transition (observed self-recovering in soak8b/soak6
+    # with no intervention); 60s avoids flagging that as a stall.
+    "BLIND_SELECT": 60,
     "SELECTING_HAND": 90,
     "DRAW_TO_HAND": 30,
     "HAND_PLAYED": 60,
@@ -107,12 +110,24 @@ class Soak:
 
     async def run(self):
         async with async_playwright() as p:
-            b = await p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--enable-webgl"],
-            )
-            context = await b.new_context(viewport={"width": 1920, "height": 1080})
-            page = context.pages[0] if context.pages else await context.new_page()
+            launch_args = ["--no-sandbox", "--disable-dev-shm-usage", "--enable-webgl"]
+            # A persistent profile caches the 53.7MB game package across
+            # runs; essential against production, where a cold download
+            # competes with a flaky Cloudflare edge.
+            profile_dir = os.environ.get("BALATRO_SOAK_PROFILE", "")
+            if profile_dir:
+                os.makedirs(profile_dir, exist_ok=True)
+                b = await p.chromium.launch_persistent_context(
+                    user_data_dir=profile_dir,
+                    headless=True,
+                    viewport={"width": 1920, "height": 1080},
+                    args=launch_args,
+                )
+                page = b.pages[0] if b.pages else await b.new_page()
+            else:
+                b = await p.chromium.launch(headless=True, args=launch_args)
+                context = await b.new_context(viewport={"width": 1920, "height": 1080})
+                page = context.pages[0] if context.pages else await context.new_page()
             page.on("console", self.on_console)
             page.on("pageerror", lambda e: (self.page_errors.append(str(e)[:200]),
                                             print(f"[PageError] {e}", flush=True)))
