@@ -65,7 +65,7 @@ TRANSIENT_INFO_RE = re.compile(
     r"debounced|not ready|animating|in progress|busy|locked|waiting|"
     r"already in play|blocks play|slots full|pack card not found|no-op|not set|"
     r"not in (BLIND_SELECT|SHOP|ROUND_EVAL|SELECTING_HAND|HAND_PLAYED|new_round)|"
-    r"blind already selected|already in run|no pack_cards|not in a pack state|no space to buy",
+    r"blind already selected|already in run|no pack_cards|not in a pack state|no space to buy|use_card failed",
     re.IGNORECASE,
 )
 
@@ -155,7 +155,11 @@ class Soak:
                             ' .. " overlay=" .. tostring(not not G.OVERLAY_MENU)' +
                             ' .. " booster=" .. tostring(G.booster_pack ~= nil) .. " pack_cards=" .. tostring(G.pack_cards ~= nil)' +
                             ' .. " hand=" .. tostring(G.hand and G.hand.cards and #G.hand.cards)' +
-                            ' .. " interrupts=" .. tostring(G.GAME and G.GAME.PACK_INTERRUPT) .. "," .. tostring(G.TAROT_INTERRUPT))');
+                            ' .. " interrupts=" .. tostring(G.GAME and G.GAME.PACK_INTERRUPT) .. "," .. tostring(G.TAROT_INTERRUPT)' +
+                            ' .. " pack_n=" .. tostring(G.pack_cards and G.pack_cards.cards and #G.pack_cards.cards)' +
+                            ' .. " pack_removed=" .. tostring(G.pack_cards and G.pack_cards.REMOVED)' +
+                            ' .. " js_pack_n=" .. tostring(window._lastDecidexState && (window._lastDecidexState.pack_cards || []).length)' +
+                            ' .. " js_count=" .. tostring(window._decidexStateCount));');
                     };
                 }"""
             )

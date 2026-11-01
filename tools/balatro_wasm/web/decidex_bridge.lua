@@ -2321,11 +2321,12 @@ local function decidex_execute_inner(action, args)
     if G.OVERLAY_MENU or (G.SETTINGS and G.SETTINGS.paused) then
       dismiss_blocking_overlay()
     end
-    if rebuild_pack_ui() then
-      _G._pack_stall_time = nil
-      _G._pack_stall_handled = nil
-      return true, "rebuilt pack UI"
-    end
+    -- This is an ESCAPE hatch: the autopilot only calls it when the pack
+    -- is a dead end. Rebuilding here used to "succeed" with a fresh EMPTY
+    -- area (the card-creation events had already fired into the nil
+    -- global), so the abandon step below was never reached and the JS
+    -- retried force_leave every 20s against the same dead end - forever.
+    -- Leave means leave.
     if abandon_pack() then
       return true, "abandoned wedged pack"
     end
