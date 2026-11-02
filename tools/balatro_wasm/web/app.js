@@ -468,12 +468,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56356620;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v115";
+  const ASSET_VERSION = "v116";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=115";
-  const ASSET_WASM_URL = "love.wasm.bin?v=115";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=116";
+  const ASSET_WASM_URL = "love.wasm.bin?v=116";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3980,6 +3980,11 @@ end
       this._lastHandLen = handLen;
 
       if (this.busy) {
+        // Queue the newest snapshot only: replaying an OLDER one after the
+        // busy window re-processes a state the game has long left (observed
+        // live: a pack snapshot from 436s earlier drove force_leave against
+        // a round that had already moved on).
+        this.pendingStateCount = window._lastDecidexStateCount || 0;
         this.pendingState = state;
         return;
       }
@@ -4749,8 +4754,14 @@ end
             this.updateStatus("运行中", true);
             if (this.pendingState) {
               const nextState = this.pendingState;
+              const queuedCount = this.pendingStateCount || 0;
               this.pendingState = null;
-              this.onStateUpdated(nextState);
+              // Drop stale replays: if any newer snapshot arrived while the
+              // step ran, the queued one describes a state the game has
+              // already left; processing it acts on the past.
+              if ((window._lastDecidexStateCount || 0) - queuedCount <= 1) {
+                this.onStateUpdated(nextState);
+              }
             }
           }
         }, delay);

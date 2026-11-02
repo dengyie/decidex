@@ -144,7 +144,7 @@ async def run():
             if any(k in t for k in ("LONG DT", "AudioContext", "GL_INVALID", "favicon",
                                     "Download the React DevTools")):
                 return
-            print(f"[C] {t[:400]}", flush=True)
+            print(f"[C] {t[:2000]}", flush=True)
 
         page.on("console", on_console)
         page.on("pageerror", lambda e: print(f"[PageError] {e}", flush=True))

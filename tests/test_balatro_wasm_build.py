@@ -1272,3 +1272,15 @@ def test_pack_epoch_and_hand_sig_emission():
     # pack emit must include the hand signature
     assert "pack_sig_parts[#pack_sig_parts + 1] = \"H\" .. tostring(#h_cards)" in bridge
     assert "h\" .. i .. \":\" .. r" in bridge
+
+
+def test_stale_pending_state_replay_guard():
+    """The busy-window state replay re-processed snapshots the game had long
+    left (production: a pack snapshot from 436s earlier drove force_leave
+    against a live round). Replays must be dropped when any newer snapshot
+    arrived while the step ran.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "this.pendingStateCount = window._lastDecidexStateCount || 0;" in content
+    assert "(window._lastDecidexStateCount || 0) - queuedCount <= 1" in content
