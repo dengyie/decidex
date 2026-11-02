@@ -468,12 +468,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56355805;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v112";
+  const ASSET_VERSION = "v113";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=112";
-  const ASSET_WASM_URL = "love.wasm.bin?v=112";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=113";
+  const ASSET_WASM_URL = "love.wasm.bin?v=113";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -4418,6 +4418,20 @@ end
             this._packSigSince = null;
           }
           this._inPackState = true;
+          // Hard episode cap: ANY pack state that outlives 75s is abandoned
+          // no matter what the snapshots showed. The empty-pack timer and
+          // the no-progress breaker below both reset when cards flicker in
+          // and out of the snapshot (half-created packs after recovery
+          // races), which let one production probe episode drag 106s. The
+          // soak's own stall budget for pack states is 75s: match it.
+          if (this._stateEnterTime && now - this._stateEnterTime > 75000) {
+            this.updateStatus("补充包超时上限，强制脱离...", true);
+            console.warn("[AutoPilot] Pack episode exceeded 75s; forcing leave");
+            window.executeForceLeavePack();
+            executedAction = true;
+            unlockCooldownMs = 1200;
+            return;
+          }
           // No-progress breaker: a pack whose content signature (names +
           // highlighted bits) has not changed for 45s is wedged regardless of
           // how healthy it looks — the bridge watchdog ignores non-empty

@@ -1219,3 +1219,15 @@ def test_bridge_watchdog_abandons_poisoned_pack():
     assert 'expected = "Standard"' in bridge
     assert 'expected = "Joker"' in bridge
     assert "poisoned pack" in bridge
+
+
+def test_pack_hard_episode_cap():
+    """Cards flickering in and out of the snapshot reset both the empty-pack
+    timer and the no-progress breaker (one production episode dragged 106s).
+    A pack state that outlives 75s -- the soak's own stall budget -- must be
+    force-left unconditionally.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "Pack episode exceeded 75s; forcing leave" in content
+    assert "now - this._stateEnterTime > 75000" in content
