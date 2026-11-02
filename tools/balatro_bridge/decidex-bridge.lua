@@ -1475,6 +1475,14 @@ local function build_state_json(actual)
   -- Spectral packs a card must be picked first, so skipping is not offered.
   local can_skip_booster = false
   if is_pack_state then
+    -- Epoch: bump whenever the pack AREA identity changes. Every freshly
+    -- created pack gets a new CardArea, so each episode is unambiguously
+    -- numbered for the client's per-episode latches -- immune to skipped
+    -- JS steps, state flicker, and stale timers.
+    if G.pack_cards ~= _G._decidex_epoch_area then
+      _G._decidex_epoch_area = G.pack_cards
+      _G._decidex_pack_epoch = (_G._decidex_pack_epoch or 0) + 1
+    end
     local skip_btn = find_button_by_button_name(G.booster_pack, 'skip_booster')
     if skip_btn and skip_btn.config and skip_btn.config.button == 'skip_booster' then
       can_skip_booster = true
@@ -1486,6 +1494,7 @@ local function build_state_json(actual)
     end
   end
   parts[#parts + 1] = '"can_skip_booster":' .. (can_skip_booster and "true" or "false")
+  parts[#parts + 1] = '"pack_epoch":' .. tostring(_G._decidex_pack_epoch or 0)
 
   local won = (G.GAME and G.GAME.won) or false
   parts[#parts + 1] = '"won":' .. (won and "true" or "false")
@@ -1939,6 +1948,21 @@ local function check_and_emit_state()
       local cname = (c.ability and c.ability.name) or ""
       local hl = (c.highlighted and 1 or 0)
       pack_sig_parts[#pack_sig_parts + 1] = i .. ":" .. cname .. ":" .. hl
+    end
+    -- The hand MUST be part of the signature too: cards can be drawn into
+    -- G.hand DURING a pack (recovery draws, queued blind-start draws), and
+    -- without a re-emit the client keeps the entry snapshot -- where the
+    -- hand was empty. Every hand-consuming pack card (Cryptid, Medium,
+    -- Familiar/Grim/Incantation...) is then judged unusable against a hand
+    -- that actually holds 8 cards, and the pack wedges in
+    -- "waiting for readiness" until a generic timeout.
+    local h_cards = (G.hand and G.hand.cards) or {}
+    pack_sig_parts[#pack_sig_parts + 1] = "H" .. tostring(#h_cards)
+    for i, c in ipairs(h_cards) do
+      local r = c.base and c.base.value or ""
+      local s = c.base and c.base.suit or ""
+      local enh = (c.ability and c.ability.name) or ""
+      pack_sig_parts[#pack_sig_parts + 1] = "h" .. i .. ":" .. r .. ":" .. s .. ":" .. enh .. ":" .. (c.highlighted and "1" or "0")
     end
     local cur_pack_sig = table.concat(pack_sig_parts, "|")
     if cur_pack_sig ~= LAST_PACK_SIG or state_changed then

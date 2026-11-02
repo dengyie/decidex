@@ -1229,8 +1229,8 @@ def test_pack_hard_episode_cap():
     """
     content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
 
-    assert "Pack episode exceeded 75s; forcing leave" in content
-    assert "now - this._stateEnterTime > 75000" in content
+    assert "Pack episode exceeded 75s (epoch" in content
+    assert "now - this._packEpochSince > 75000" in content
 
 
 def test_force_end_round_escape_hatch():
@@ -1248,3 +1248,27 @@ def test_force_end_round_escape_hatch():
     assert 'if action == "force_end_round" then' in bridge
     assert "actions still available" in bridge
     assert "pcall(end_round)" in bridge
+
+
+def test_pack_epoch_and_hand_sig_emission():
+    """Two production stalls traced to per-episode and staleness bugs:
+    (a) the client cannot tell pack episodes apart by JS-side state names
+    (steps skipped while busy leaked _packEnterTime across packs, insta-
+    abandoning freshly bought packs) -- the bridge must number episodes by
+    pack-area identity (pack_epoch); (b) cards can be drawn into the hand
+    DURING a pack and the pack-state emit must re-fire on hand changes, or
+    the client judges every hand-consuming card unusable against a stale
+    empty-hand snapshot (v114 spectral-pack stall: snapshot hand=0, real
+    G.hand=8).
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    bridge = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    assert '"pack_epoch":' in bridge
+    assert "_G._decidex_epoch_area" in bridge
+    assert "epoch !== this._packEpoch" in content
+    assert "Pack episode exceeded 75s (epoch" in content
+    assert "now - this._packEpochSince > 75000" in content
+    # pack emit must include the hand signature
+    assert "pack_sig_parts[#pack_sig_parts + 1] = \"H\" .. tostring(#h_cards)" in bridge
+    assert "h\" .. i .. \":\" .. r" in bridge

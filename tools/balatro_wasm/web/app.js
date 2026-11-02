@@ -466,14 +466,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
-  const EXPECTED_LOVE_SIZE = 56356170;
+  const EXPECTED_LOVE_SIZE = 56356620;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v114";
+  const ASSET_VERSION = "v115";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=114";
-  const ASSET_WASM_URL = "love.wasm.bin?v=114";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=115";
+  const ASSET_WASM_URL = "love.wasm.bin?v=115";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -4434,30 +4434,34 @@ end
           }
         } else if (["TAROT_PACK", "PLANET_PACK", "SPECTRAL_PACK", "STANDARD_PACK", "BUFFOON_PACK"].includes(sname)) {
           const packCards = state.pack_cards || [];
-          // A FRESH pack episode (previous step was not a pack state) resets
-          // every pack latch. The old `_packStateSeen !== sname` check missed
-          // two consecutive packs of the same type (the shop in between never
-          // updates that key), which leaked `_packEnterTime` across episodes:
-          // the next pack inherited a 60s-old timer and was force-left
-          // instantly, throwing away freshly bought packs.
-          if (!this._inPackState) {
+          // A FRESH pack episode is keyed on the bridge's pack_epoch (bumped
+          // whenever the pack CardArea identity changes) -- not on JS-side
+          // transition detection, which misses episodes whenever steps are
+          // skipped while busy or a same-type pack follows (the old
+          // `_packStateSeen !== sname` check leaked `_packEnterTime` across
+          // episodes: the next pack inherited a 60s-old timer and was
+          // force-left instantly, throwing away freshly bought packs).
+          const epoch = Number(state.pack_epoch) || 0;
+          if (epoch !== this._packEpoch) {
+            this._packEpoch = epoch;
             this._packSelectFailStreak = 0;
             this._skipCurrentPack = false;
             this._packEnterTime = null;
             this._packLastSig = null;
             this._packSigSince = null;
+            this._packEpochSince = now;
           }
-          this._inPackState = true;
-          // Hard episode cap: ANY pack state that outlives 75s is abandoned
-          // no matter what the snapshots showed. The empty-pack timer and
-          // the no-progress breaker below both reset when cards flicker in
-          // and out of the snapshot (half-created packs after recovery
-          // races), which let one production probe episode drag 106s. The
-          // soak's own stall budget for pack states is 75s: match it.
-          if (this._stateEnterTime && now - this._stateEnterTime > 75000) {
+          // Hard episode cap: ANY pack episode that outlives 75s is
+          // abandoned no matter what the snapshots showed. The empty-pack
+          // timer and the no-progress breaker below both reset when cards
+          // flicker in and out of the snapshot (half-created packs after
+          // recovery races), which let one production probe episode drag
+          // 106s. The soak's own stall budget for pack states is 75s.
+          if (this._packEpochSince && now - this._packEpochSince > 75000) {
             this.updateStatus("补充包超时上限，强制脱离...", true);
-            console.warn("[AutoPilot] Pack episode exceeded 75s; forcing leave");
+            console.warn("[AutoPilot] Pack episode exceeded 75s (epoch", epoch, "); forcing leave");
             window.executeForceLeavePack();
+            this._packEpochSince = now;
             executedAction = true;
             unlockCooldownMs = 1200;
             return;
