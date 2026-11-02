@@ -30,9 +30,43 @@ BASE_URL = os.environ.get("PROBE_URL", "https://balatro.mangoqwq.com/")
 MIN_GAMES = int(os.environ.get("PROBE_MIN_GAMES", "2"))
 MAX_SECONDS = int(os.environ.get("PROBE_MAX_SECONDS", "2400"))
 HEADLESS = os.environ.get("PROBE_HEADLESS", "1") != "0"
+# Low-power defaults: the game renders on a SOFTWARE rasterizer in headless
+# mode (SwiftShader) at 4x game speed -- a 1920x1080 viewport burned a whole
+# core on raster work alone. 1024x576 is 72% fewer pixels; the probe is
+# state-driven and never inspects pixels, the screenshots only need to be
+# legible for a human.
+_VP = os.environ.get("PROBE_VIEWPORT", "1024x576")
+VIEWPORT = {"width": int(_VP.split("x")[0]), "height": int(_VP.split("x")[1])}
+POLL_SECONDS = float(os.environ.get("PROBE_POLL", "2"))
+DIAG_EVERY = float(os.environ.get("PROBE_DIAG_EVERY", "30"))
 
 SCREENSHOT_DIR = Path("tools/balatro_wasm/screenshots")
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Kills the console flood AT SOURCE: the bridge emits a multi-KB
+# [DECIDEX_STATE] JSON several times per second, and every emission cost a
+# CDP serialization + a Python handler + a log-file write -- on a long soak
+# that was hundreds of MB of pure I/O for data the probe never reads from
+# console lines (it polls window._lastDecidexState directly). Dropped lines
+# go into a small ring buffer so a stall dump can still show the last ones.
+CONSOLE_SHIM = """
+(() => {
+  const orig = console.log.bind(console);
+  const w = window.__dxShim = { dropped: 0, ring: [] };
+  console.log = function (...args) {
+    try {
+      const line = args.length === 1 ? String(args[0]) : args.join(' ');
+      if (line.startsWith('[DECIDEX_STATE]')) {
+        w.dropped++;
+        w.ring.push(line.slice(0, 400));
+        if (w.ring.length > 2) w.ring.shift();
+        return;
+      }
+    } catch (_) {}
+    orig(...args);
+  };
+})();
+"""
 
 DWELL_BUDGETS = {
     "MENU": 45,
@@ -70,8 +104,9 @@ JS_DIAG = """() => {
     busy_ms: ap._busyTimestamp ? Math.round(Date.now() - ap._busyTimestamp) : null,
     since_progress_ms: ap._lastProgressTimestamp ? Math.round(Date.now() - ap._lastProgressTimestamp) : null,
     skip_latch: !!ap._skipCurrentPack,
-    pack_seen: ap._packStateSeen || null,
-    pack_full_streak: ap._packSelectFullStreak || 0,
+    pack_epoch: st.pack_epoch,
+    states_dropped: (window.__dxShim || {}).dropped || 0,
+    last_states: ((window.__dxShim || {}).ring || []).map(s => s.slice(0, 90)),
     status: (document.getElementById('autopilot-status') || {}).textContent || ''
   });
 }"""
@@ -118,7 +153,7 @@ class Probe:
             print(f"[Probe] JS diag failed: {e}", flush=True)
         await page.evaluate(LUA_DUMP)
         try:
-            await page.screenshot(path=str(SCREENSHOT_DIR / f"probe_stall_{int(t)}.png"))
+            await page.screenshot(path=str(SCREENSHOT_DIR / f"probe_stall_{int(t)}.jpg"), type="jpeg", quality=55)
         except Exception:
             pass
 
@@ -126,17 +161,17 @@ class Probe:
 async def run():
     probe = Probe()
     async with async_playwright() as p:
-        launch_args = ["--no-sandbox", "--disable-dev-shm-usage", "--enable-webgl"]
+        launch_args = ["--no-sandbox", "--disable-dev-shm-usage", "--enable-webgl", "--mute-audio"]
         profile_dir = os.environ.get("PROBE_PROFILE", "")
         if profile_dir:
             os.makedirs(profile_dir, exist_ok=True)
             browser = await p.chromium.launch_persistent_context(
                 user_data_dir=profile_dir, headless=HEADLESS,
-                viewport={"width": 1920, "height": 1080}, args=launch_args)
+                viewport=VIEWPORT, args=launch_args)
             page = browser.pages[0] if browser.pages else await browser.new_page()
         else:
             browser = await p.chromium.launch(headless=HEADLESS, args=launch_args)
-            context = await browser.new_context(viewport={"width": 1920, "height": 1080})
+            context = await browser.new_context(viewport=VIEWPORT)
             page = context.pages[0] if context.pages else await context.new_page()
 
         def on_console(msg):
@@ -146,6 +181,7 @@ async def run():
                 return
             print(f"[C] {t[:2000]}", flush=True)
 
+        await page.add_init_script(CONSOLE_SHIM)
         page.on("console", on_console)
         page.on("pageerror", lambda e: print(f"[PageError] {e}", flush=True))
 
@@ -176,7 +212,7 @@ async def run():
         start = time.monotonic()
         last_diag = 0
         while time.monotonic() - start < MAX_SECONDS:
-            await asyncio.sleep(1)
+            await asyncio.sleep(POLL_SECONDS)
             t = time.monotonic() - start
             st = await page.evaluate("() => window._lastDecidexState")
             if not st:
@@ -191,7 +227,7 @@ async def run():
                 probe.prev_state = sname
                 probe.state_since = time.monotonic()
                 probe.stall_dumped = False
-            if t - last_diag >= 10:
+            if t - last_diag >= DIAG_EVERY:
                 last_diag = t
                 try:
                     print(f"[Probe:JS] {await page.evaluate(JS_DIAG)}", flush=True)

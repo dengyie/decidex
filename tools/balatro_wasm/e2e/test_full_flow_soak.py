@@ -25,7 +25,6 @@ Env:
 """
 
 import asyncio
-import json
 import os
 import re
 import time
@@ -35,6 +34,36 @@ from playwright.async_api import async_playwright
 BASE_URL = os.environ.get("BALATRO_SOAK_URL", "http://127.0.0.1:8099/")
 MIN_GAMES = int(os.environ.get("BALATRO_SOAK_MIN_GAMES", "2"))
 MAX_SECONDS = int(os.environ.get("BALATRO_SOAK_MAX_SECONDS", "2400"))
+
+# Headless Chromium rasterizes WebGL in software (SwiftShader), so the
+# cost of a soak run is roughly proportional to viewport pixels. 1024x576
+# is 72% fewer pixels than 1920x1080 and the game renders fine.
+_VP = os.environ.get("BALATRO_SOAK_VIEWPORT", "1024x576")
+VIEWPORT = {"width": int(_VP.split("x")[0]), "height": int(_VP.split("x")[1])}
+POLL_SECONDS = float(os.environ.get("BALATRO_SOAK_POLL", "2"))
+
+# The bridge emits a multi-KB [DECIDEX_STATE] JSON several times a second.
+# Mirroring it through CDP console events is pure overhead for the soak
+# (the state is read via page.evaluate), so drop it at the source and keep
+# only a tiny ring for post-mortem inspection.
+CONSOLE_SHIM = """
+(() => {
+  const orig = console.log.bind(console);
+  const w = window.__dxShim = { dropped: 0, ring: [] };
+  console.log = function (...args) {
+    try {
+      const line = args.length === 1 ? String(args[0]) : args.join(' ');
+      if (line.startsWith('[DECIDEX_STATE]')) {
+        w.dropped++;
+        w.ring.push(line.slice(0, 400));
+        if (w.ring.length > 2) w.ring.shift();
+        return;
+      }
+    } catch (_) {}
+    orig(...args);
+  };
+})();
+"""
 
 # Per-state dwell budgets (seconds) before a stall is declared. The
 # autopilot acts well inside these on a healthy run at GAMESPEED 4; the
@@ -90,13 +119,6 @@ class Soak:
     def on_console(self, msg):
         text = msg.text
         now = time.monotonic()
-        if "[DECIDEX_STATE]" in text:
-            try:
-                d = json.loads(text.split("[DECIDEX_STATE]", 1)[1].strip())
-                self.last_state = d
-            except Exception:
-                pass
-            return
         if "[DECIDEX_ACTION_RESULT]" in text and "ok=false" in text:
             info = text.split("info=", 1)[1] if "info=" in text else ""
             if not TRANSIENT_INFO_RE.search(info):
@@ -113,7 +135,8 @@ class Soak:
 
     async def run(self):
         async with async_playwright() as p:
-            launch_args = ["--no-sandbox", "--disable-dev-shm-usage", "--enable-webgl"]
+            launch_args = ["--no-sandbox", "--disable-dev-shm-usage", "--enable-webgl",
+                           "--mute-audio"]
             # A persistent profile caches the 53.7MB game package across
             # runs; essential against production, where a cold download
             # competes with a flaky Cloudflare edge.
@@ -123,14 +146,15 @@ class Soak:
                 b = await p.chromium.launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=True,
-                    viewport={"width": 1920, "height": 1080},
+                    viewport=VIEWPORT,
                     args=launch_args,
                 )
                 page = b.pages[0] if b.pages else await b.new_page()
             else:
                 b = await p.chromium.launch(headless=True, args=launch_args)
-                context = await b.new_context(viewport={"width": 1920, "height": 1080})
+                context = await b.new_context(viewport=VIEWPORT)
                 page = context.pages[0] if context.pages else await context.new_page()
+            await page.add_init_script(CONSOLE_SHIM)
             page.on("console", self.on_console)
             page.on("pageerror", lambda e: (self.page_errors.append(str(e)[:200]),
                                             print(f"[PageError] {e}", flush=True)))
@@ -172,7 +196,7 @@ class Soak:
             prev_state = None
             state_since = start
             while time.monotonic() - start < MAX_SECONDS:
-                await asyncio.sleep(1)
+                await asyncio.sleep(POLL_SECONDS)
                 t = time.monotonic() - start
                 st = await page.evaluate("() => window._lastDecidexState")
                 if not st:
