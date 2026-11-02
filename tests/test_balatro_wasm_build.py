@@ -1284,3 +1284,18 @@ def test_stale_pending_state_replay_guard():
 
     assert "this.pendingStateCount = window._lastDecidexStateCount || 0;" in content
     assert "(window._lastDecidexStateCount || 0) - queuedCount <= 1" in content
+
+
+def test_download_size_validated_with_cache_bust_retry():
+    """The CF edge caches every balatro.love.zip?v=N URL immutably for 7
+    days, and the first fetcher of a fresh version URL can race the origin
+    deploy -- the edge then serves the PREVIOUS version's love under the
+    new version's URL for a week (production probes booted the v110 bridge
+    for four straight releases). The download path must validate the size
+    and retry once with a one-shot cache buster.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "downloadLoveValidated" in content
+    assert "edge served a stale package, retrying with cache buster" in content
+    assert 'ASSET_LOVE_URL + "&bust=" + Date.now()' in content

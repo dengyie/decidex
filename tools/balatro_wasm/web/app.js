@@ -468,12 +468,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56356620;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v116";
+  const ASSET_VERSION = "v117";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=116";
-  const ASSET_WASM_URL = "love.wasm.bin?v=116";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=117";
+  const ASSET_WASM_URL = "love.wasm.bin?v=117";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -707,11 +707,34 @@ end
         return fullBuffer.buffer;
       }
 
-      lovePackageBuffer = await fetchWithResume(ASSET_LOVE_URL, EXPECTED_LOVE_SIZE, (loaded, total) => {
-        const pct = Math.min(85, Math.round((loaded / total) * 85));
-        progressBar.style.width = pct + "%";
-        statusText.textContent = `下载游戏包 (1/2): ${(loaded / (1024 * 1024)).toFixed(1)} MB / ${(total / (1024 * 1024)).toFixed(1)} MB (${pct}%)`;
-      });
+      async function downloadLoveValidated() {
+        let buf = await fetchWithResume(ASSET_LOVE_URL, EXPECTED_LOVE_SIZE, (loaded, total) => {
+          const pct = Math.min(85, Math.round((loaded / total) * 85));
+          progressBar.style.width = pct + "%";
+          statusText.textContent = `下载游戏包 (1/2): ${(loaded / (1024 * 1024)).toFixed(1)} MB / ${(total / (1024 * 1024)).toFixed(1)} MB (${pct}%)`;
+        });
+        // Post-download size validation. The Cloudflare edge caches every
+        // balatro.love.zip?v=N URL IMMUTABLY for 7 days, and the first
+        // fetcher of a fresh version URL can race the origin deploy (CI
+        // starts on push, the huawei deploy lands after it) -- the edge then
+        // serves the PREVIOUS version's love under the new version's URL
+        // for a week. The production probes booted the v110 bridge for four
+        // releases straight because of exactly this. A mismatched download
+        // is retried once with a one-shot cache buster (the origin ignores
+        // queries, so the buster forces a fresh edge lookup).
+        if (buf.byteLength !== EXPECTED_LOVE_SIZE) {
+          console.warn(`[DecideX Download] size mismatch (${buf.byteLength} != ${EXPECTED_LOVE_SIZE}); edge served a stale package, retrying with cache buster`);
+          statusText.textContent = "检测到边缘缓存版本过期，强制绕过重下...";
+          buf = await fetchWithResume(ASSET_LOVE_URL + "&bust=" + Date.now(), EXPECTED_LOVE_SIZE, (loaded, total) => {
+            const pct = Math.min(85, Math.round((loaded / total) * 85));
+            progressBar.style.width = pct + "%";
+            statusText.textContent = `绕过缓存重下游戏包: ${(loaded / (1024 * 1024)).toFixed(1)} MB / ${(total / (1024 * 1024)).toFixed(1)} MB (${pct}%)`;
+          });
+        }
+        return buf;
+      }
+
+      lovePackageBuffer = await downloadLoveValidated();
 
       // Tier 4: Download love.wasm (85% -> 98%) with Range resume
       statusText.textContent = "正在下载 WebAssembly 运行核心 (love.wasm 4.7MB)...";
