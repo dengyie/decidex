@@ -896,6 +896,7 @@ local function pack_stall_watchdog()
     -- (observed in soak7: escape fired twice, then never again).
     _G._pack_empty_time = nil
     _G._pack_empty_handled = nil
+    _G._pack_mismatch_time = nil
     return false
   end
 
@@ -913,6 +914,47 @@ local function pack_stall_watchdog()
     local now2 = (love.timer and love.timer.getTime()) or os.clock()
     local empty = not (G.pack_cards.cards and G.pack_cards.cards[1])
     if not empty then
+      -- Contents-vs-state mismatch: a healthy-looking pack whose cards
+      -- belong to the WRONG set. This is the poison an abandon leaves
+      -- behind: the queued vanilla open/create events for the abandoned
+      -- pack still fire and can pair the OLD contents with the NEW state
+      -- (probe_diag_v110: G.STATE=PLANET_PACK holding Grim/Incantation —
+      -- spectrals). The client then picks cards whose vanilla use crashes
+      -- on the empty shop hand. No amount of waiting fixes a poisoned
+      -- pack; abandon it so the run re-enters with a fresh one.
+      local expected = nil
+      if G.STATE == G.STATES.TAROT_PACK then expected = "Tarot"
+      elseif G.STATE == G.STATES.PLANET_PACK then expected = "Planet"
+      elseif G.STATE == G.STATES.SPECTRAL_PACK then expected = "Spectral"
+      elseif G.STATE == G.STATES.STANDARD_PACK then expected = "Standard"
+      elseif G.STATE == G.STATES.BUFFOON_PACK then expected = "Joker" end
+      local mismatch = false
+      if expected then
+        for _, pc in ipairs(G.pack_cards.cards) do
+          local pset = pc.ability and pc.ability.set
+          if expected == "Standard" then
+            if pset ~= "Enhanced" and pset ~= "Default" then mismatch = true break end
+          elseif pset ~= expected then
+            mismatch = true break
+          end
+        end
+      end
+      if mismatch then
+        if not _G._pack_mismatch_time then
+          _G._pack_mismatch_time = now2
+          return false
+        end
+        if now2 - _G._pack_mismatch_time > 2.0 then
+          print("[DecideX Pack Watchdog] " .. tostring(expected) ..
+                " state holds foreign-set contents (poisoned pack); abandoning")
+          _G._pack_mismatch_time = nil
+          _G._pack_empty_time = nil
+          abandon_pack()
+          return true
+        end
+        return false
+      end
+      _G._pack_mismatch_time = nil
       _G._pack_empty_time = nil
       _G._pack_empty_handled = nil
       return false
@@ -2535,6 +2577,21 @@ local function decidex_execute_inner(action, args)
       if #G.jokers.cards >= max_jokers and not (c.edition and c.edition.negative) then
         return false, "cannot select joker: joker slots full"
       end
+    end
+
+    -- Pre-validate cards that consume the hand itself BEFORE calling vanilla
+    -- use_card: vanilla removes the card from the pack area FIRST and only
+    -- then hits `pseudorandom_element(G.hand.cards)` inside
+    -- Familiar/Grim/Incantation ("interval is empty" when the hand is empty —
+    -- e.g. every pack opened from the shop), so each failed attempt still
+    -- eats one pack card. Sigil/Ouija convert the whole hand (no-op on empty;
+    -- Ouija also shrinks hand size). A clean rejection here lets the client
+    -- escalate to pack skip/leave instead of churning.
+    local cname = (c.ability and c.ability.name) or ""
+    local hand_needs_cards = ({ Familiar = true, Grim = true, Incantation = true,
+      Immolate = true, Cryptid = true, Sigil = true, Ouija = true })[cname]
+    if hand_needs_cards and (not (G.hand and G.hand.cards) or #G.hand.cards == 0) then
+      return false, cname .. " needs a non-empty hand (destroy/convert target)"
     end
 
     -- Target selection for targeted tarots/spectrals inside booster pack

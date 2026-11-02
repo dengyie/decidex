@@ -1,0 +1,219 @@
+"""Deep-diagnosis full-flow probe: drive AutoPilot through whole games while
+mirroring EVERY console line and sampling the JS autopilot's internal state,
+so a wedge carries its own explanation in the log.
+
+Unlike test_full_flow_soak.py (which only prints watchdog/state lines), this
+probe prints every [DECIDEX_ACTION_RESULT] (including transient rejections),
+every 10s a one-line JS internal snapshot (in-flight lock, busy, skip latches,
+pack signature), and on a stall dumps BOTH sides: the Lua SOAK-DUMP (bridge
+eval) and the JS snapshot plus a screenshot.
+
+Env:
+  PROBE_URL           target (default https://balatro.mangoqwq.com/)
+  PROBE_MIN_GAMES     completed games before success (default 2)
+  PROBE_MAX_SECONDS   wall-clock cap (default 2400)
+  PROBE_HEADLESS      "0" to run headed
+  PROBE_PROFILE       persistent-context user data dir; caches the 53.7MB
+                      game package per-origin across runs (essential against
+                      production, where every cold download competes with a
+                      flaky Cloudflare edge)
+"""
+
+import asyncio
+import os
+import time
+from pathlib import Path
+
+from playwright.async_api import async_playwright
+
+BASE_URL = os.environ.get("PROBE_URL", "https://balatro.mangoqwq.com/")
+MIN_GAMES = int(os.environ.get("PROBE_MIN_GAMES", "2"))
+MAX_SECONDS = int(os.environ.get("PROBE_MAX_SECONDS", "2400"))
+HEADLESS = os.environ.get("PROBE_HEADLESS", "1") != "0"
+
+SCREENSHOT_DIR = Path("tools/balatro_wasm/screenshots")
+SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+
+DWELL_BUDGETS = {
+    "MENU": 45,
+    "BLIND_SELECT": 60,
+    "SELECTING_HAND": 90,
+    "DRAW_TO_HAND": 30,
+    "HAND_PLAYED": 60,
+    "ROUND_EVAL": 60,
+    "PLAY_TAROT": 60,
+    "SHOP": 60,
+    "TAROT_PACK": 75,
+    "PLANET_PACK": 75,
+    "SPECTRAL_PACK": 75,
+    "STANDARD_PACK": 75,
+    "BUFFOON_PACK": 75,
+}
+DEFAULT_BUDGET = 75
+STALL_GRACE = 1.1
+
+JS_DIAG = """() => {
+  const ap = window.AutoPilot || {};
+  const st = window._lastDecidexState || {};
+  const packs = (st.pack_cards || []).map(c => (c.name || '?') + (c.highlighted ? '*' : ''));
+  return JSON.stringify({
+    t: Math.round(performance.now() / 1000),
+    state: st.state_name,
+    ante: st.ante, round: st.round, money: st.money,
+    hand: (st.hand || []).length,
+    consumables: (st.consumables || []).length + '/' + (st.consumable_slots || '?'),
+    jokers: (st.jokers || []).length + '/' + (st.joker_slots || '?'),
+    can_skip: st.can_skip_booster,
+    pack: packs.join('|'),
+    ap_enabled: !!ap.enabled, ap_busy: !!ap.busy,
+    inflight: ap._actionInFlight || null,
+    busy_ms: ap._busyTimestamp ? Math.round(Date.now() - ap._busyTimestamp) : null,
+    since_progress_ms: ap._lastProgressTimestamp ? Math.round(Date.now() - ap._lastProgressTimestamp) : null,
+    skip_latch: !!ap._skipCurrentPack,
+    pack_seen: ap._packStateSeen || null,
+    pack_full_streak: ap._packSelectFullStreak || 0,
+    status: (document.getElementById('autopilot-status') || {}).textContent || ''
+  });
+}"""
+
+LUA_DUMP = """() => {
+  window.__probeSeq = (window.__probeSeq || 900000) + 1;
+  const FS = window.Module && window.Module.FS;
+  if (!FS) return;
+  try { FS.unlink('/tmp/balatro_eval_ack.txt'); } catch (_) {}
+  FS.writeFile('/tmp/balatro_eval.lua', '-- DECIDEX_SEQ:' + window.__probeSeq +
+    '\\nprint("[LUA-DUMP] STATE=" .. tostring(G.STATE) .. " complete=" .. tostring(G.STATE_COMPLETE)' +
+    ' .. " paused=" .. tostring(G.SETTINGS and G.SETTINGS.paused)' +
+    ' .. " overlay=" .. tostring(not not G.OVERLAY_MENU)' +
+    ' .. " booster=" .. tostring(G.booster_pack ~= nil)' +
+    ' .. " pack_cards=" .. tostring(G.pack_cards and G.pack_cards.cards and #G.pack_cards.cards)' +
+    ' .. " pack_hl=" .. tostring(G.pack_cards and G.pack_cards.highlighted and #G.pack_cards.highlighted)' +
+    ' .. " pack_rem=" .. tostring(G.pack_cards and G.pack_cards.REMOVED)' +
+    ' .. " pack_intent=" .. tostring(G.pack_cards and G.pack_cards.config and G.pack_cards.config.card_limit)' +
+    ' .. " hand=" .. tostring(G.hand and G.hand.cards and #G.hand.cards)' +
+    ' .. " pkint=" .. tostring(G.GAME and G.GAME.PACK_INTERRUPT)' +
+    ' .. " tarint=" .. tostring(G.TAROT_INTERRUPT)' +
+    ' .. " exitlatch=" .. tostring(_G._decidex_pack_exit_until and (_G._decidex_pack_exit_until - (love.timer and love.timer.getTime() or 0)))' +
+    ' .. " stallt=" .. tostring(_G._pack_stall_time)' +
+    ' .. " queue=" .. (function() local p={} if G.E_MANAGER and G.E_MANAGER.queues then for k,v in pairs(G.E_MANAGER.queues) do if type(v)=="table" then p[#p+1]=k.."="..#v end end end return table.concat(p,",") end)()' +
+    ');');
+}"""
+
+
+class Probe:
+    def __init__(self):
+        self.games = 0
+        self.stalls = []
+        self.stall_dumped = False
+        self.prev_state = None
+        self.state_since = time.monotonic()
+
+    async def on_stall(self, page, sname, dwell, budget, t):
+        note = f"{t:.0f}s state={sname} dwell={dwell:.0f}s budget={budget}s"
+        self.stalls.append(note)
+        print(f"[Probe] *** STALL *** {note}", flush=True)
+        try:
+            print(f"[Probe] JS {await page.evaluate(JS_DIAG)}", flush=True)
+        except Exception as e:
+            print(f"[Probe] JS diag failed: {e}", flush=True)
+        await page.evaluate(LUA_DUMP)
+        try:
+            await page.screenshot(path=str(SCREENSHOT_DIR / f"probe_stall_{int(t)}.png"))
+        except Exception:
+            pass
+
+
+async def run():
+    probe = Probe()
+    async with async_playwright() as p:
+        launch_args = ["--no-sandbox", "--disable-dev-shm-usage", "--enable-webgl"]
+        profile_dir = os.environ.get("PROBE_PROFILE", "")
+        if profile_dir:
+            os.makedirs(profile_dir, exist_ok=True)
+            browser = await p.chromium.launch_persistent_context(
+                user_data_dir=profile_dir, headless=HEADLESS,
+                viewport={"width": 1920, "height": 1080}, args=launch_args)
+            page = browser.pages[0] if browser.pages else await browser.new_page()
+        else:
+            browser = await p.chromium.launch(headless=HEADLESS, args=launch_args)
+            context = await browser.new_context(viewport={"width": 1920, "height": 1080})
+            page = context.pages[0] if context.pages else await context.new_page()
+
+        def on_console(msg):
+            t = msg.text
+            if any(k in t for k in ("LONG DT", "AudioContext", "GL_INVALID", "favicon",
+                                    "Download the React DevTools")):
+                return
+            print(f"[C] {t[:400]}", flush=True)
+
+        page.on("console", on_console)
+        page.on("pageerror", lambda e: print(f"[PageError] {e}", flush=True))
+
+        await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=120_000)
+        launch_timeout = int(os.environ.get("PROBE_LAUNCH_TIMEOUT", "900")) * 1000
+        btn = await page.wait_for_selector("#btn-launch", state="visible", timeout=launch_timeout)
+        # The service worker serves the CACHED core (e.g. core-v110) on the
+        # first load after a deploy while installing the new one in the
+        # background — a probe that launches immediately plays the OLD
+        # assets and tests nothing. Reload once so the updated core takes
+        # control, then re-query the button (the reload detaches it).
+        await page.reload(wait_until="domcontentloaded")
+        btn = await page.wait_for_selector("#btn-launch", state="visible", timeout=launch_timeout)
+        core = await page.evaluate(
+            "() => { const r = performance.getEntriesByType('resource').map(e => e.name).filter(n => n.includes('app.js')).pop(); return r ? r.slice(r.length - 12) : 'app.js?not-found'; }"
+        )
+        print(f"[Probe] loaded core: {core}", flush=True)
+        await btn.click()
+        print("[Probe] launch clicked", flush=True)
+        await page.wait_for_selector("#splash-overlay", state="hidden", timeout=120_000)
+        for _ in range(30):
+            await asyncio.sleep(1)
+            if await page.evaluate("() => window._lastDecidexStateCount || 0"):
+                break
+        await page.evaluate("() => window.AutoPilot.toggle(true)")
+        print("[Probe] AutoPilot enabled", flush=True)
+
+        start = time.monotonic()
+        last_diag = 0
+        while time.monotonic() - start < MAX_SECONDS:
+            await asyncio.sleep(1)
+            t = time.monotonic() - start
+            st = await page.evaluate("() => window._lastDecidexState")
+            if not st:
+                continue
+            sname = st.get("state_name") or "UNKNOWN"
+            if sname != probe.prev_state:
+                print(f"[Probe] {t:6.0f}s -> {sname} ante={st.get('ante')} "
+                      f"round={st.get('round')} money={st.get('money')}", flush=True)
+                if sname in ("GAME_OVER", "GAME_WON"):
+                    probe.games += 1
+                    print(f"[Probe] === game {probe.games} completed ===", flush=True)
+                probe.prev_state = sname
+                probe.state_since = time.monotonic()
+                probe.stall_dumped = False
+            if t - last_diag >= 10:
+                last_diag = t
+                try:
+                    print(f"[Probe:JS] {await page.evaluate(JS_DIAG)}", flush=True)
+                except Exception as e:
+                    print(f"[Probe:JS] diag failed: {e}", flush=True)
+            dwell = time.monotonic() - probe.state_since
+            budget = DWELL_BUDGETS.get(sname, DEFAULT_BUDGET)
+            if dwell > budget * STALL_GRACE and not probe.stall_dumped:
+                probe.stall_dumped = True
+                await probe.on_stall(page, sname, dwell, budget, t)
+            if probe.games >= MIN_GAMES:
+                break
+
+        print(f"\n[Probe-RESULT] games={probe.games} stalls={len(probe.stalls)}", flush=True)
+        for s in probe.stalls:
+            print(f"  stall: {s}", flush=True)
+        ok = probe.games >= MIN_GAMES and not probe.stalls
+        print(f"[Probe-RESULT] {'PASS' if ok else 'FAIL'}", flush=True)
+        await browser.close()
+        if not ok:
+            raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    asyncio.run(run())

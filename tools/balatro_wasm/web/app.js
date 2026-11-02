@@ -466,14 +466,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
-  const EXPECTED_LOVE_SIZE = 56354960;
+  const EXPECTED_LOVE_SIZE = 56355805;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v110";
+  const ASSET_VERSION = "v112";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=110";
-  const ASSET_WASM_URL = "love.wasm.bin?v=110";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=112";
+  const ASSET_WASM_URL = "love.wasm.bin?v=112";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -2936,6 +2936,22 @@ end
     const cMax = Number(state.consumable_slots) || 2;
     const handLen = (state.hand || []).length;
 
+    // Hand-card consumers must be gated BEFORE the pack-state branches:
+    // recovery paths can put cards of any set into any pack state (a
+    // poisoned pack after an abandon race), and these cards crash inside
+    // vanilla when G.hand.cards is empty (pseudorandom_element -> math
+    // .random(0), "interval is empty") AFTER already removing themselves
+    // from the pack area -- a crash-retry loop that eats the pack one card
+    // at a time. Familiar/Grim/Incantation/Immolate destroy or copy random
+    // hand cards; Cryptid duplicates a random hand card; Sigil/Ouija
+    // convert the whole hand (useless on empty, and Ouija still shrinks
+    // hand size by 1). The Fool needs G.GAME.last_tarot_planet_used which
+    // the bridge does not emit -- skipping it beats a no-op pick.
+    if (["Familiar", "Grim", "Incantation", "Immolate", "Cryptid", "Sigil", "Ouija"].includes(name)) {
+      return handLen >= 1;
+    }
+    if (name === "The Fool") return false;
+
     if (card.set === "Joker" || sname === "BUFFOON_PACK") {
       return jCount < jMax || (card.edition && card.edition === "negative");
     }
@@ -3790,16 +3806,21 @@ end
         this.busy = false;
         // Futile-retry circuit breaker: the same action rejected transiently
         // three times in a row is not "waiting for readiness" anymore, it is
-        // a decision the game will keep refusing (e.g. selecting a joker
-        // into a full board — "joker slots full" x5 in soak17/soak21). Give
-        // up on the current pack decision so the pack-skip path can take
-        // over instead of churning until the watchdog escalates.
-        if (action === "select_pack_card" && errMsg.includes("slots full")) {
-          this._packSelectFullStreak = (this._packSelectFullStreak || 0) + 1;
-          if (this._packSelectFullStreak >= 3) {
-            this._packSelectFullStreak = 0;
+        // a decision the game will keep refusing. For select_pack_card this
+        // covers EVERY rejection class, not just slots-full: a poisoned pack
+        // (contents of the wrong set after an abandon race) makes the client
+        // pick cards whose vanilla use crashes ("use_card failed: ...
+        // interval is empty" — Grim/Incantation on an empty hand) and each
+        // crash still removes the card from the pack, so retrying forever
+        // eats the pack card by card (probe_diag_v110: 30s+ of pure churn;
+        // the v110 smoke's 83s TAROT_PACK stall). A state mismatch is NOT
+        // the pack's fault and must not consume strikes.
+        if (action === "select_pack_card" && !isStateMismatch) {
+          this._packSelectFailStreak = (this._packSelectFailStreak || 0) + 1;
+          if (this._packSelectFailStreak >= 3) {
+            this._packSelectFailStreak = 0;
             this._skipCurrentPack = true;
-            console.warn("[AutoPilot] select_pack_card kept hitting slots-full; forcing pack skip");
+            console.warn(`[AutoPilot] select_pack_card rejected 3x (${errStr.slice(0, 90)}); forcing pack leave`);
           }
         }
         if (isStateMismatch) {
@@ -3999,6 +4020,9 @@ end
           this._shopPurchasedBooster = false;
           this._shopAttemptedItems.clear();
           this._loggedShelf = false;
+        }
+        if (!["TAROT_PACK", "PLANET_PACK", "SPECTRAL_PACK", "STANDARD_PACK", "BUFFOON_PACK"].includes(sname)) {
+          this._inPackState = false;
         }
       }
 
@@ -4380,20 +4404,56 @@ end
           }
         } else if (["TAROT_PACK", "PLANET_PACK", "SPECTRAL_PACK", "STANDARD_PACK", "BUFFOON_PACK"].includes(sname)) {
           const packCards = state.pack_cards || [];
-          // A fresh pack episode clears the slots-full circuit breaker; a
-          // tripped one skips this pack immediately (the breaker is only set
-          // after the same selection was refused three times).
-          if (this._packStateSeen !== sname) {
-            this._packStateSeen = sname;
-            this._packSelectFullStreak = 0;
+          // A FRESH pack episode (previous step was not a pack state) resets
+          // every pack latch. The old `_packStateSeen !== sname` check missed
+          // two consecutive packs of the same type (the shop in between never
+          // updates that key), which leaked `_packEnterTime` across episodes:
+          // the next pack inherited a 60s-old timer and was force-left
+          // instantly, throwing away freshly bought packs.
+          if (!this._inPackState) {
+            this._packSelectFailStreak = 0;
             this._skipCurrentPack = false;
+            this._packEnterTime = null;
+            this._packLastSig = null;
+            this._packSigSince = null;
+          }
+          this._inPackState = true;
+          // No-progress breaker: a pack whose content signature (names +
+          // highlighted bits) has not changed for 45s is wedged regardless of
+          // how healthy it looks — the bridge watchdog ignores non-empty
+          // packs, and actions that "succeed" without changing anything
+          // never trip any rejection counter. Catch-all for future silent
+          // no-op classes (Event-Guard-dropped use events, etc.).
+          const packSig = packCards.map(c => `${c.name || "?"}${c.highlighted ? 1 : 0}`).join("|");
+          if (packSig !== this._packLastSig) {
+            this._packLastSig = packSig;
+            this._packSigSince = Date.now();
+          } else if (packCards.length > 0 && this._packSigSince && Date.now() - this._packSigSince > 45000) {
+            this.updateStatus("补充包无进展，强制脱离...", true);
+            console.warn("[AutoPilot] Pack unchanged for 45s (sig:", packSig, "); forcing leave");
+            window.executeForceLeavePack();
+            this._packLastSig = null;
+            this._packSigSince = null;
+            executedAction = true;
+            unlockCooldownMs = 1200;
+            return;
           }
           if (this._skipCurrentPack && state.can_skip_booster) {
             this.updateStatus("跳过补充包（选择被持续拒绝）...", true);
-            console.log("[AutoPilot] Skipping pack after repeated slots-full rejections");
+            console.log("[AutoPilot] Skipping pack after repeated select rejections");
             window.executeSkipBooster();
             executedAction = true;
             unlockCooldownMs = 600;
+          } else if (this._skipCurrentPack && !state.can_skip_booster && packCards.length > 0) {
+            // The skip button can be absent exactly when all picks are
+            // invalid (destroy-family spectrals in the shop, hand empty).
+            // Waiting can never improve that: abandon the pack.
+            this.updateStatus("补充包无法跳过，强制脱离...", true);
+            console.log("[AutoPilot] Pack unskippable after repeated select rejections; forcing leave");
+            window.executeForceLeavePack();
+            this._skipCurrentPack = false;
+            executedAction = true;
+            unlockCooldownMs = 1200;
           } else if (packCards.length > 0) {
             this._packEnterTime = null;
             let bestCard = null;
@@ -4530,6 +4590,10 @@ end
               this.updateStatus(`补充包选择: ${bestCard.name || '卡牌'}${targetDesc}`, true);
               console.log("[AutoPilot] Selecting pack card:", bestCard.name, "at index", bestCard.index || 1, "targets:", targetIndices);
               window.executeSelectPackCard(bestCard.index || 1, targetIndices);
+              // A dispatched selection counts as progress: the failure
+              // breaker counts consecutive REJECTIONS, so every new attempt
+              // starts from a clean slate.
+              this._packSelectFailStreak = 0;
               // Arm the watchdog clock for this attempt: play/discard set it
               // explicitly, but this path never did, so repeated transient
               // rejections ("joker slots full") accumulated stuck-time from

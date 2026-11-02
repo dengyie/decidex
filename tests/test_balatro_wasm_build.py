@@ -1017,13 +1017,14 @@ def test_pack_select_arms_watchdog_and_breaks_futile_retries():
     the dispatch path never refreshed _lastProgressTimestamp, so repeated
     slots-full rejections accumulated an ever-staler anchor (4.2s -> 9.8s
     warnings in soak21) -- and (b) stop retrying the same refused selection:
-    three consecutive slots-full transient rejections trip a breaker that
-    skips the pack instead of churning.
+    three consecutive transient rejections trip a breaker that leaves the
+    pack instead of churning (v111 widened slots-full to ALL rejection
+    classes -- poisoned packs crash every pick with "use_card failed").
     """
     js_content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
     assert "instead of each attempt getting its own window" in js_content
-    assert "this._packSelectFullStreak = (this._packSelectFullStreak || 0) + 1" in js_content
-    assert "forcing pack skip" in js_content
+    assert "this._packSelectFailStreak = (this._packSelectFailStreak || 0) + 1" in js_content
+    assert "forcing pack leave" in js_content
     assert "_skipCurrentPack && state.can_skip_booster" in js_content
     # The breaker must reset per pack episode, keyed by state name.
     assert "_packStateSeen" in js_content
@@ -1135,3 +1136,86 @@ def test_scoring_uses_leveled_hand_values_from_bridge():
     assert "hlvl > 1" in bridge
     assert "stateContext.hand_levels" in content
     assert "hand_levels[handName]" in content
+
+
+def test_pack_cards_hand_requirement_gated_before_pack_state():
+    """Familiar/Grim/Incantation/Immolate/Cryptid/Sigil/Ouija consume the
+    hand itself and crash inside vanilla when the hand is empty
+    (pseudorandom_element -> math.random(0)). The check must sit BEFORE the
+    pack-state branches: recovery paths can put foreign-set cards into any
+    pack state, and a SPECTRAL_PACK-gated check would miss them.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    fn_start = content.index("function canUsePackCard(")
+    fn_end = content.index("}", content.index('if (name === "The Fool") return false;', fn_start))
+    body = content[fn_start:fn_end]
+
+    for name in ("Familiar", "Grim", "Incantation", "Immolate", "Cryptid", "Sigil", "Ouija"):
+        assert name in body, f"{name} missing from canUsePackCard hand gate"
+    assert 'if (name === "The Fool") return false;' in body
+    # The hand gate must precede the first pack-state branch (BUFFOON_PACK).
+    assert body.index('["Familiar"') < body.index("BUFFOON_PACK")
+
+
+def test_pack_select_failure_breaker_covers_all_rejections():
+    """The pack selection circuit breaker must trip on ANY rejection class,
+    not just slots-full: a poisoned pack crashes every pick with
+    "use_card failed" (transient-classified), so a slots-full-gated counter
+    never trips and the client churns until the pack is eaten card by card.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert 'errMsg.includes("slots full")' not in content
+    assert "action === \"select_pack_card\" && !isStateMismatch" in content
+    assert "this._packSelectFailStreak >= 3" in content
+    assert "forcing pack leave" in content
+
+
+def test_pack_no_progress_breaker_forces_leave():
+    """A pack whose content signature never changes is wedged even when
+    every action 'succeeds' (the bridge watchdog ignores non-empty packs).
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "45000" in content
+    assert "packSig" in content
+    assert content.count("window.executeForceLeavePack()") >= 3
+
+
+def test_pack_unskippable_escalates_to_force_leave():
+    """When the breaker trips but can_skip_booster is false (destroy-family
+    picks in the shop, hand empty), waiting can never improve the situation:
+    the pack must be abandoned instead of retried forever.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "this._skipCurrentPack && !state.can_skip_booster && packCards.length > 0" in content
+
+
+def test_bridge_select_pack_card_prevalidates_hand_consumers():
+    """The bridge must reject hand-consuming pack cards on an empty hand
+    BEFORE vanilla use_card: vanilla removes the card from the pack area
+    before crashing, so every failed attempt eats one pack card.
+    """
+    bridge = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    assert "hand_needs_cards" in bridge
+    for name in ("Familiar", "Grim", "Incantation", "Immolate", "Cryptid", "Sigil", "Ouija"):
+        assert name in bridge
+    assert "needs a non-empty hand" in bridge
+
+
+def test_bridge_watchdog_abandons_poisoned_pack():
+    """An abandon race can pair the OLD pack contents with the NEW pack
+    state (probe_diag_v110: PLANET_PACK holding spectrals). The watchdog
+    must detect the set mismatch and abandon instead of rebuilding/waiting.
+    """
+    bridge = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    assert 'expected = "Tarot"' in bridge
+    assert 'expected = "Planet"' in bridge
+    assert 'expected = "Spectral"' in bridge
+    assert 'expected = "Standard"' in bridge
+    assert 'expected = "Joker"' in bridge
+    assert "poisoned pack" in bridge
