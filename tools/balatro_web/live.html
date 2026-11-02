@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>DecideX · 网页端游戏实况</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 网页端游戏实况：游戏本体 100% 跑在 /play（浏览器内 WASM + AutoPilot HUD）。
+     本页同源内嵌 /play，侧栏直接读取 iframe 的 window._lastDecidexState 与
+     #autopilot-status，不经过服务端——服务端零计算零出网流量的架构边界不变。
+     旧版真机串流（VNC 抓屏 /api/frame.jpg）已随真机链路下线而废弃。 -->
+<style>
+  :root {
+    --felt1:#35654d; --felt2:#1e4433; --panel:#10141d; --line:#2a2f3c;
+    --text:#e8ecf3; --dim:#93a0b4; --accent:#f2b134; --good:#5fd08a;
+    --bad:#e06c6c; --warn:#facc15; --chip:#009dff; --mult:#fe5f55;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; color:var(--text); font:14px/1.5 "Segoe UI",system-ui,sans-serif;
+         background:
+           radial-gradient(ellipse at 50% 38%, var(--felt1) 0%, var(--felt2) 58%, #0e2419 100%)
+           fixed var(--panel);
+         min-height:100vh; }
+  body::after { content:""; position:fixed; inset:0; pointer-events:none;
+                box-shadow: inset 0 0 180px rgba(0,0,0,.55); }
+  header { position:sticky; top:0; z-index:6; background:rgba(10,14,20,.92);
+           border-bottom:1px solid var(--line); padding:9px 14px;
+           display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0 10px 0 0; color:var(--accent); white-space:nowrap; }
+  header a { color:var(--dim); font-size:12px; text-decoration:none;
+             border:1px solid var(--line); border-radius:7px; padding:5px 10px; }
+  header a:hover { color:var(--text); border-color:var(--accent); }
+  #liveDot { display:inline-block; width:9px; height:9px; border-radius:50%;
+             background:#666; margin-right:6px; vertical-align:middle; }
+  #liveDot.on { background:var(--bad); animation:pulse 1.4s infinite; }
+  #liveDot.stale { background:var(--warn); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
+  #liveState { font-size:12px; color:var(--dim); }
+  .stage { display:grid; grid-template-columns: 1fr 340px; gap:12px;
+           padding:12px; max-width:1720px; margin:0 auto; align-items:start; }
+  .game-wrap { position:relative; border-radius:10px; overflow:hidden;
+               background:#000; border:1px solid var(--line); }
+  .game-wrap iframe { display:block; width:100%; height:calc(100vh - 118px);
+                      min-height:480px; border:0; background:#000; }
+  .toolbar { display:flex; gap:8px; margin-top:8px; align-items:center; flex-wrap:wrap; }
+  .toolbar button { background:#1a212e; color:var(--text); border:1px solid var(--line);
+                    border-radius:7px; padding:6px 12px; font-size:13px; cursor:pointer; }
+  .toolbar button:hover { border-color:var(--accent); }
+  .toolbar .hint { color:var(--dim); font-size:12px; }
+  .panel { background:rgba(12,16,24,.88); border:1px solid var(--line);
+           border-radius:12px; padding:12px; }
+  .panel + .panel { margin-top:12px; }
+  .panel h3 { margin:0 0 8px; font-size:12px; color:var(--accent);
+              letter-spacing:.08em; text-transform:uppercase; }
+  .phase { font-size:15px; font-weight:700; margin-bottom:8px; }
+  .stats { display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; }
+  .stat { background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.12);
+          border-radius:9px; padding:5px 8px; font-size:12px; text-align:center; min-width:0; }
+  .stat b { display:block; font-size:16px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .stat .lbl { color:var(--dim); font-size:10px; letter-spacing:.06em; }
+  .blind-row { display:flex; align-items:center; gap:10px; margin:8px 0 2px; }
+  .blind-chip { width:64px; height:64px; border-radius:50%; flex:0 0 auto;
+                display:flex; flex-direction:column; align-items:center; justify-content:center;
+                text-align:center; background:radial-gradient(circle at 35% 30%, #6d7f8f, #2f3d49 70%);
+                border:4px solid #d9d2bd; box-shadow:0 4px 12px rgba(0,0,0,.5); }
+  .blind-chip.t-big { background:radial-gradient(circle at 35% 30%, #e0a23c, #8a5a13 70%); }
+  .blind-chip.t-boss { background:radial-gradient(circle at 35% 30%, #a44ab8, #4d1d63 70%); }
+  .blind-chip .nm { font-size:8px; font-weight:800; color:#fff; text-shadow:0 1px 2px #000;
+                    padding:0 4px; line-height:1.1; }
+  .blind-chip .tgt { font-size:11px; font-weight:900; color:#fff; text-shadow:0 1px 2px #000; }
+  .blind-info { font-size:12px; color:var(--dim); min-width:0; }
+  .blind-info b { color:var(--text); }
+  .hpbar { height:8px; border-radius:4px; background:rgba(0,0,0,.4); margin-top:5px; overflow:hidden; }
+  .hpbar i { display:block; height:100%; background:linear-gradient(90deg, var(--chip), var(--good));
+             width:0%; transition:width .3s; }
+  .cards { display:flex; flex-wrap:wrap; gap:5px; }
+  .card { background:rgba(0,0,0,.4); border:1px solid rgba(255,255,255,.14); border-radius:6px;
+          padding:3px 7px; font-size:12px; font-weight:700; }
+  .card.hl { border-color:var(--accent); background:rgba(242,177,52,.18); }
+  .card .st { font-weight:400; color:var(--dim); font-size:10px; margin-left:3px; }
+  .suit-S { color:#cfe3ff; } .suit-H { color:#ff9c9c; } .suit-D { color:#ffd08a; } .suit-C { color:#a8e6c0; }
+  .joker { background:rgba(0,0,0,.4); border:1px solid rgba(255,255,255,.14); border-radius:6px;
+           padding:4px 8px; font-size:12px; margin-bottom:4px; }
+  .joker b { color:#c9a7ff; } .joker .jv { color:var(--dim); font-size:10px; margin-left:6px; }
+  .shopline { font-size:12px; color:var(--dim); }
+  .shopline b { color:var(--text); }
+  #apStatus { font-size:12px; color:var(--dim); word-break:break-all; }
+  #apStatus.good { color:var(--good); }
+  .empty { color:var(--dim); font-size:12px; }
+  @media (max-width: 1080px){ .stage { grid-template-columns: 1fr; }
+    .game-wrap iframe { height:calc(100vh - 200px); min-height:360px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1><span id="liveDot"></span>DecideX · 网页端游戏实况</h1>
+  <span id="liveState">等待游戏画面…</span>
+  <a href="/" style="margin-left:auto">返回目录</a>
+  <a href="/play" target="_blank">独立打开 /play</a>
+  <button id="fsBtn" style="background:#1a212e;color:var(--text);border:1px solid var(--line);border-radius:7px;padding:5px 10px;font-size:12px;cursor:pointer;">全屏</button>
+  <button id="reloadBtn" style="background:#1a212e;color:var(--text);border:1px solid var(--line);border-radius:7px;padding:5px 10px;font-size:12px;cursor:pointer;">重载游戏</button>
+</header>
+
+<div class="stage">
+  <div>
+    <div class="game-wrap">
+      <iframe id="liveFrame" src="/play" title="Balatro 网页游戏" allow="fullscreen"></iframe>
+    </div>
+    <div class="toolbar">
+      <button id="fsBtn2">全屏</button>
+      <button id="reloadBtn2">重载游戏</button>
+      <span class="hint">游戏与 AutoPilot HUD 运行在本页内嵌的 /play 中；实况面板数据直接来自该游戏实例，不经过服务端。</span>
+    </div>
+  </div>
+
+  <aside>
+    <div class="panel">
+      <h3>对局实况</h3>
+      <div class="phase" id="phase">等待游戏加载…</div>
+      <div class="stats">
+        <div class="stat"><b id="stAnte">-</b><span class="lbl">ANTE</span></div>
+        <div class="stat"><b id="stRound">-</b><span class="lbl">ROUND</span></div>
+        <div class="stat"><b id="stMoney">-</b><span class="lbl">资金</span></div>
+        <div class="stat"><b id="stHands">-</b><span class="lbl">出牌</span></div>
+        <div class="stat"><b id="stDiscards">-</b><span class="lbl">弃牌</span></div>
+        <div class="stat"><b id="stDeck">-</b><span class="lbl">牌堆</span></div>
+      </div>
+      <div class="blind-row" id="blindRow" style="display:none">
+        <div class="blind-chip" id="blindChip"><span class="nm" id="blindNm">-</span><span class="tgt" id="blindTgt">-</span></div>
+        <div class="blind-info">
+          <div>目标 <b id="blindGoal">-</b> · 已得 <b id="blindScored">-</b></div>
+          <div class="hpbar"><i id="blindBar"></i></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>手牌 <span class="empty" id="handCount"></span></h3>
+      <div class="cards" id="handCards"><span class="empty">暂无手牌</span></div>
+    </div>
+
+    <div class="panel">
+      <h3>小丑与消耗牌 <span class="empty" id="jokerCount"></span></h3>
+      <div id="jokerList"><span class="empty">暂无小丑</span></div>
+      <div class="cards" id="consCards" style="margin-top:6px"></div>
+    </div>
+
+    <div class="panel">
+      <h3>商店 / 补充包</h3>
+      <div class="shopline" id="shopLine">-</div>
+      <div class="cards" id="packCards" style="margin-top:6px"></div>
+    </div>
+
+    <div class="panel">
+      <h3>AutoPilot</h3>
+      <div id="apStatus">-</div>
+    </div>
+  </aside>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var frame = $("liveFrame");
+  var dot = $("liveDot");
+  var liveState = $("liveState");
+  var PHASE_LABELS = {
+    "DRAW_TO_HAND": "当前阶段: 正在发牌...",
+    "HAND_PLAYED": "当前阶段: 计分结算中...",
+    "ROUND_EVAL": "当前阶段: 回合结算",
+    "MENU": "当前阶段: 主菜单",
+    "SPLASH": "当前阶段: 标题界面"
+  };
+  var SUIT_SYM = { S: "♠", H: "♥", D: "♦", C: "♣" };
+  var lastCount = 0, lastFlowTs = 0, everLive = false;
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function txt(id, v) { var el = $(id); if (el) el.textContent = v; }
+
+  function cardChip(c) {
+    var sym = SUIT_SYM[c.suit] || "";
+    var enh = c.enhancement ? ' <span class="st">' + esc(c.enhancement) + "</span>" : "";
+    var ed = c.edition ? ' <span class="st">' + esc(c.edition) + "</span>" : "";
+    var hl = c.highlighted ? " hl" : "";
+    return '<span class="card' + hl + '"><span class="suit-' + esc(c.suit || "") + '">' +
+      esc(c.rank || "?") + sym + "</span>" + enh + ed + "</span>";
+  }
+
+  function render(st) {
+    txt("phase", PHASE_LABELS[st.state_name] || ("当前阶段: " + (st.state_name || "准备就绪")));
+    txt("stAnte", st.ante != null ? st.ante : "-");
+    txt("stRound", st.round != null ? st.round : "-");
+    txt("stMoney", "$" + (st.money != null ? st.money : "-"));
+    txt("stHands", st.hands_left != null ? st.hands_left : "-");
+    txt("stDiscards", st.discards_left != null ? st.discards_left : "-");
+    txt("stDeck", st.deck_count != null ? st.deck_count : "-");
+
+    var blind = st.blind || {};
+    var hasBlind = blind && blind.name && blind.name !== "None" && Number(blind.chips) > 0;
+    $("blindRow").style.display = hasBlind ? "" : "none";
+    if (hasBlind) {
+      txt("blindNm", blind.name);
+      txt("blindTgt", blind.chips);
+      txt("blindGoal", blind.chips);
+      txt("blindScored", blind.scored || 0);
+      var pct = Math.max(0, Math.min(100, (Number(blind.scored) || 0) / Number(blind.chips) * 100));
+      $("blindBar").style.width = pct + "%";
+      var chipEl = $("blindChip");
+      chipEl.className = "blind-chip" + (blind.type === "boss" ? " t-boss" : (blind.type === "big" ? " t-big" : ""));
+    }
+
+    var hand = st.hand || [];
+    txt("handCount", hand.length ? "（" + hand.length + " 张）" : "");
+    $("handCards").innerHTML = hand.length ? hand.map(cardChip).join("") : '<span class="empty">暂无手牌</span>';
+
+    var jokers = st.jokers || [];
+    txt("jokerCount", (st.jokers_count != null ? st.jokers_count : jokers.length) + "/" + (st.joker_slots || 5));
+    $("jokerList").innerHTML = jokers.length ? jokers.map(function (j) {
+      var bits = [];
+      if (Number(j.chips)) bits.push("+" + j.chips);
+      if (Number(j.mult)) bits.push("+" + j.mult + " 多倍");
+      if (Number(j.xmult) && Number(j.xmult) !== 1) bits.push("×" + j.xmult);
+      var ed = j.edition ? ' <span class="jv">' + esc(j.edition) + "</span>" : "";
+      return '<div class="joker"><b>' + esc(j.name) + "</b>" + ed +
+        (bits.length ? '<span class="jv">' + esc(bits.join(" / ")) + "</span>" : "") + "</div>";
+    }).join("") : '<span class="empty">暂无小丑</span>';
+
+    var cons = st.consumables || [];
+    $("consCards").innerHTML = cons.length
+      ? cons.map(function (c) { return '<span class="card">' + esc(c.name || "牌") + "</span>"; }).join("")
+      : "";
+
+    var shop = st.shop || {};
+    var shopBits = [];
+    if (st.state_name === "SHOP") {
+      shopBits.push("货架 <b>" + ((shop.cards || []).length) + "</b> · 补充包 <b>" +
+        ((shop.boosters || []).length) + "</b> · 刷新 $" + (shop.reroll_cost != null ? shop.reroll_cost : "-"));
+    }
+    var pack = st.pack_cards || [];
+    if (pack.length) shopBits.push("包内卡牌 <b>" + pack.length + "</b>" + (st.can_skip_booster ? "（可跳过）" : ""));
+    $("shopLine").innerHTML = shopBits.length ? shopBits.join(" · ") : "-";
+    $("packCards").innerHTML = pack.length
+      ? pack.map(function (c) {
+          return '<span class="card' + (c.highlighted ? " hl" : "") + '">' + esc(c.name || "卡") + "</span>";
+        }).join("")
+      : "";
+  }
+
+  function poll() {
+    var w = null, doc = null, st = null, ap = "";
+    try { w = frame.contentWindow; doc = frame.contentDocument; } catch (_) {}
+    if (w) {
+      try { st = w._lastDecidexState || null; } catch (_) {}
+      try { if (doc) { var el = doc.getElementById("autopilot-status"); if (el) ap = el.textContent || ""; } } catch (_) {}
+    }
+    var count = 0;
+    try { count = Number(w && w._lastDecidexStateCount) || 0; } catch (_) {}
+
+    if (st && count > 0) {
+      if (count !== lastCount) { lastCount = count; lastFlowTs = Date.now(); everLive = true; }
+      render(st);
+      var apEl = $("apStatus");
+      apEl.textContent = ap || "-";
+      apEl.className = (ap.indexOf("失败") >= 0 || ap.indexOf("暂停") >= 0) ? "" : "good";
+      var idleMs = Date.now() - lastFlowTs;
+      if (idleMs > 8000) {
+        dot.className = "stale";
+        liveState.textContent = "实况无新快照 " + Math.round(idleMs / 1000) + "s（游戏可能在过场或未开自动托管）";
+      } else {
+        dot.className = "on";
+        liveState.textContent = "实况中 · 快照 #" + count;
+      }
+    } else {
+      dot.className = "";
+      liveState.textContent = "等待游戏画面…（首次加载约需下载 53.7MB 资产）";
+      txt("phase", "等待游戏加载…");
+    }
+  }
+
+  function goFullscreen() {
+    var el = frame;
+    var fn = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (fn) { try { fn.call(el); } catch (_) {} }
+  }
+  $("fsBtn").addEventListener("click", goFullscreen);
+  $("fsBtn2").addEventListener("click", goFullscreen);
+  function reload() { frame.src = "/play"; }
+  $("reloadBtn").addEventListener("click", reload);
+  $("reloadBtn2").addEventListener("click", reload);
+
+  setInterval(poll, 800);
+  poll();
+})();
+</script>
+</body>
+</html>

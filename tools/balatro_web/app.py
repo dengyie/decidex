@@ -7,6 +7,7 @@ Only REAL snapshots from the bridge mod are ever shown — no demo data.
 Routes:
   GET  /                      UI
   GET  /login                 operator login page
+  GET  /stream                web-game live view (iframe /play + same-origin state panel)
   GET  /api/health            service + snapshot inventory
   GET  /api/game?name=        one snapshot: board + legal envelope
   GET  /api/session           whether the caller already holds a login session
@@ -1039,8 +1040,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(503, b"Balatro WASM build is unavailable.", "text/plain; charset=utf-8")
                 return self._send_file(wasm_index, "text/html; charset=utf-8", cache_seconds=0)
             if path in ("/stream", "/stream/", "/stream/index.html"):
-                page = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
-                page = page.replace("__GAME_DIMS__", f"{GAME_W}x{GAME_H}")
+                # 网页端游戏实况：内嵌 /play（浏览器内 WASM 游戏 + AutoPilot HUD），
+                # 侧栏同源直读 iframe 的实时对局状态。旧真机串流(VNC 抓屏)已下线。
+                page = (Path(__file__).parent / "live.html").read_text(encoding="utf-8")
                 return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
 
             if path in ("/viz.js", "/viz.css"):

@@ -270,7 +270,10 @@ def test_explicit_play_and_stream_routes(server):
 
     code, body, _ = _get(base, "/stream")
     assert code == 200
-    assert b'id="livePanel"' in body
+    # 网页端游戏实况：同源内嵌 /play，侧栏直读 iframe 实时对局状态
+    assert b'<iframe id="liveFrame" src="/play"' in body
+    assert b"_lastDecidexState" in body
+    assert b"autopilot-status" in body
     assert b'href="/"' in body
     assert b"__GAME_DIMS__" not in body
 

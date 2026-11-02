@@ -515,11 +515,9 @@ def test_coordinate_mapping_patches():
     assert "coords.scaleX" in love_content
     assert "coords.scaleY" in love_content
 
-    # Verify balatro_web index.html coordinate mapping fix
-    web_index = Path(__file__).resolve().parents[1] / "tools" / "balatro_web" / "index.html"
-    web_content = web_index.read_text(encoding="utf-8")
-    assert "Math.floor(clampedX * GAME_W / renderW)" in web_content
-    assert "Math.floor(clampedY * GAME_H / renderH)" in web_content
+    # The old balatro_web VNC-console page (with the click coordinate
+    # mapping) was removed when /stream became the web-game live view;
+    # the love.js letterbox patch above is what /play actually uses.
 
 
 
