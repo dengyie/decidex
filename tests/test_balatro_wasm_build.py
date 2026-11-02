@@ -1027,3 +1027,111 @@ def test_pack_select_arms_watchdog_and_breaks_futile_retries():
     assert "_skipCurrentPack && state.can_skip_booster" in js_content
     # The breaker must reset per pack episode, keyed by state name.
     assert "_packStateSeen" in js_content
+
+
+def test_scoring_applies_joker_effects_in_order():
+    """Vanilla evaluate_play applies each joker's +mult before its ×mult,
+    left-to-right. The old code accumulated all xmult and multiplied at the
+    end, which mis-scored any run mixing +mult and ×mult jokers.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "const totalMult = mult * xmult" not in content
+    # In-order application inside the joker loop
+    assert "chips += jChips;" in content
+    assert "mult += jMult;" in content
+    assert "mult *= jXmult;" in content
+    # Played-card editions/glass, then held-in-hand, then jokers
+    assert "mult *= cardXMult;" in content
+    assert "mult += heldMult;" in content
+    assert "mult *= heldXMult;" in content
+
+
+def test_scoring_gates_conditional_xmult_jokers_by_hand_type():
+    """The Duo family x_mult must only fire when the played hand contains the
+    required type (game: next(context.poker_hands[ability.type])). Previously
+    the generic ability.x_mult path applied them unconditionally, and Acrobat
+    fired on every hand instead of the last one.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert '"The Duo": "Pair", "The Trio": "Three of a Kind", "The Family": "Four of a Kind"' in content
+    assert '"The Order": "Straight", "The Tribe": "Flush"' in content
+    assert "DUO_HAND_GATE[jname] && !containsHand[DUO_HAND_GATE[jname]]" in content
+    assert 'jname === "Acrobat" && Number(stateContext && stateContext.hands_left) !== 1' in content
+
+
+def test_scoring_conditional_extra_jokers_not_double_counted():
+    """Jolly-family/Half/Mystic Summit carry their bonus in extra but only score
+    when their condition holds. The automatic extra path must skip them so a
+    non-matching hand isn't credited their mult/chips.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "CONDITIONAL_EXTRA_JOKERS" in content
+    for name in ("Jolly Joker", "Half Joker", "Mystic Summit", "Crafty Joker"):
+        assert f'"{name}"' in content
+    assert "j.extra.mult && !CONDITIONAL_EXTRA_JOKERS.has(jname)" in content
+
+
+def test_scoring_covers_held_in_hand_and_face_jokers():
+    """Baron / Shoot the Moon / Raised Fist / Mime / Blackboard / Photograph /
+    Triboulet / Flower Pot / Baseball Card / Cavendish were absent from the
+    prediction entirely — the main source of 'score missed the jokers'.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert 'j.name === "Baron"' in content
+    assert 'j.name === "Shoot the Moon"' in content
+    assert 'j.name === "Raised Fist"' in content
+    assert 'jokerFlags.mime ? 2 : 1' in content
+    assert 'jname === "Blackboard"' in content
+    assert "allHeldBlack" in content
+    assert 'jname === "Photograph"' in content
+    assert 'jname === "Triboulet"' in content
+    assert 'jname === "Flower Pot"' in content
+    assert 'jname === "Baseball Card"' in content
+    # Cavendish stores its multiplier in extra.Xmult (capital X), which the
+    # generic extra.x_mult path never read.
+    assert "j.extra.Xmult" in content
+
+
+def test_scoring_covers_retriggers_and_pareidolia():
+    """Red-seal plus Hack/Hanging Chad/Sock and Buskin/Dusk retrigger scoring
+    cards; Pareidolia makes every card a face card for trigger purposes.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "cardRepeats" in content
+    assert 'jokerFlags.hack && ["2", "3", "4", "5"].includes(c.rank)' in content
+    assert 'jokerFlags.hangingChad && ci === 0' in content
+    assert "jokerFlags.sockBuskin && isCardFace(c)" in content
+    assert "jokerFlags.dusk" in content
+    assert "jokerFlags.pareidolia" in content
+
+
+def test_scoring_four_fingers_shortcut_classification():
+    """Four Fingers legalizes 4-card flushes/straights; Shortcut bridges
+    single-rank gaps. Both classification and scoring-card extraction must
+    agree, or the hand is scored as High Card (everything lost).
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "function isStraight(cards, jokers)" in content
+    assert "const isFlush = maxSuitCount >= (jokerFlags.fourFingers ? 4 : 5);" in content
+    assert "const need = fourFingers ? 4 : 5;" in content
+    assert "const gap = shortcut ? 1 : 0;" in content
+
+
+def test_scoring_uses_leveled_hand_values_from_bridge():
+    """Planet-levelled hands must be scored at their levelled chips/mult, not
+    the level-1 POKER_HANDS table. The bridge emits hand_levels for every hand
+    above level 1.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    bridge = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    assert '"hand_levels":{' in bridge
+    assert "hlvl > 1" in bridge
+    assert "stateContext.hand_levels" in content
+    assert "hand_levels[handName]" in content

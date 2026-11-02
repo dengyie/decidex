@@ -466,14 +466,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
-  const EXPECTED_LOVE_SIZE = 56354783;
+  const EXPECTED_LOVE_SIZE = 56354960;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v109";
+  const ASSET_VERSION = "v110";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=109";
-  const ASSET_WASM_URL = "love.wasm.bin?v=109";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=110";
+  const ASSET_WASM_URL = "love.wasm.bin?v=110";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -855,17 +855,28 @@ end
   };
 
   // Helper to check Straight
-  function isStraight(cards) {
-    if (!cards || cards.length < 5) return false;
+  function isStraight(cards, jokers) {
+    if (!cards || cards.length === 0) return false;
+    // Four Fingers: 4-card straights count; Shortcut: gaps of 1 are bridged.
+    const fourFingers = (jokers || []).some(j => j.name === "Four Fingers" && !j.debuff);
+    const shortcut = (jokers || []).some(j => j.name === "Shortcut" && !j.debuff);
+    const minLen = fourFingers ? 4 : 5;
+    const gap = shortcut ? 1 : 0;
+    if (cards.length < minLen) return false;
     const nums = [...new Set(cards.map(c => RANK_NUM[c.rank] || 0))].sort((a, b) => b - a);
-    if (nums.length < 5) return false;
-    for (let i = 0; i <= nums.length - 5; i++) {
-      if (nums[i] - nums[i + 4] === 4 && new Set(nums.slice(i, i + 5)).size === 5) return true;
+    if (nums.length < minLen) return false;
+    for (let i = 0; i + minLen - 1 < nums.length; i++) {
+      const win = nums.slice(i, i + minLen);
+      let ok = true;
+      for (let k = 0; k + 1 < win.length; k++) {
+        const d = win[k] - win[k + 1];
+        if (d < 1 || d > 1 + gap) { ok = false; break; }
+      }
+      if (ok) return true;
     }
-    // Ace-low wheel: A-2-3-4-5
-    if (nums.includes(14) && nums.includes(2) && nums.includes(3) && nums.includes(4) && nums.includes(5)) {
-      return true;
-    }
+    // Ace-low wheel: A-2-3-4-5 (A-2-3-4 with Four Fingers)
+    const wheel = minLen === 4 ? [14, 4, 3, 2] : [14, 5, 4, 3, 2];
+    if (wheel.every(n => nums.includes(n))) return true;
     return false;
   }
 
@@ -1103,11 +1114,19 @@ end
       const pairRank = Object.keys(rankCounts).find(r => rankCounts[r] >= 2 && r !== tripRank);
       scoring = normalCards.filter(c => c.rank === tripRank || c.rank === pairRank);
     } else if (handName === "Flush" || handName === "Straight Flush") {
+      // Four Fingers makes 4-card flushes legal (mirror classification above)
+      const fourFingers = (jokers || []).some(j => j.name === "Four Fingers" && !j.debuff);
+      const need = fourFingers ? 4 : 5;
       const suitCounts = {};
       for (const c of normalCards) suitCounts[c.suit] = (suitCounts[c.suit] || 0) + 1;
-      const flushSuit = Object.keys(suitCounts).find(s => suitCounts[s] >= 5);
-      scoring = normalCards.filter(c => c.suit === flushSuit).slice(0, 5);
+      const flushSuit = Object.keys(suitCounts).find(s => suitCounts[s] >= need);
+      scoring = flushSuit ? normalCards.filter(c => c.suit === flushSuit).slice(0, 5) : [];
     } else if (handName === "Straight") {
+      // Mirror isStraight: same min length / gap tolerance / wheel handling
+      const fourFingers = (jokers || []).some(j => j.name === "Four Fingers" && !j.debuff);
+      const shortcut = (jokers || []).some(j => j.name === "Shortcut" && !j.debuff);
+      const minLen = fourFingers ? 4 : 5;
+      const gap = shortcut ? 1 : 0;
       const sorted = [...normalCards].sort((a, b) => (RANK_NUM[b.rank] || 0) - (RANK_NUM[a.rank] || 0));
       const seenRanks = new Set();
       const uniqueSorted = [];
@@ -1118,18 +1137,26 @@ end
         }
       }
       let foundStraight = false;
-      for (let i = 0; i <= uniqueSorted.length - 5; i++) {
-        const sub = uniqueSorted.slice(i, i + 5);
-        if ((RANK_NUM[sub[0].rank] - RANK_NUM[sub[4].rank]) === 4) {
+      for (let i = 0; i + minLen - 1 < uniqueSorted.length; i++) {
+        const sub = uniqueSorted.slice(i, i + minLen);
+        let ok = true;
+        for (let k = 0; k + 1 < sub.length; k++) {
+          const d = (RANK_NUM[sub[k].rank] || 0) - (RANK_NUM[sub[k + 1].rank] || 0);
+          if (d < 1 || d > 1 + gap) { ok = false; break; }
+        }
+        if (ok) {
           scoring = sub;
           foundStraight = true;
           break;
         }
       }
-      if (!foundStraight && seenRanks.has("A") && seenRanks.has("2") && seenRanks.has("3") && seenRanks.has("4") && seenRanks.has("5")) {
-        scoring = uniqueSorted.filter(c => ["A", "2", "3", "4", "5"].includes(c.rank));
+      if (!foundStraight) {
+        const wheelNeed = minLen === 4 ? ["A", "4", "3", "2"] : ["A", "5", "4", "3", "2"];
+        if (wheelNeed.every(r => seenRanks.has(r))) {
+          scoring = uniqueSorted.filter(c => wheelNeed.includes(c.rank));
+        }
       }
-      if (scoring.length === 0) scoring = normalCards.slice(0, 5);
+      if (scoring.length === 0) scoring = normalCards.slice(0, minLen);
     } else if (handName === "Three of a Kind") {
       const topRank = Object.keys(rankCounts).find(r => rankCounts[r] >= 3);
       scoring = normalCards.filter(c => c.rank === topRank).slice(0, 3);
@@ -1152,11 +1179,33 @@ end
     return combined;
   }
 
+  // Flags for jokers that modify classification, retriggers, or face semantics.
+  function getJokerFlags(jokers) {
+    const flags = {
+      names: new Set(), pareidolia: false, fourFingers: false, shortcut: false,
+      hack: false, hangingChad: false, sockBuskin: false, dusk: false, mime: false
+    };
+    for (const j of (jokers || [])) {
+      if (j.debuff) continue;
+      flags.names.add(j.name);
+      if (j.name === "Pareidolia") flags.pareidolia = true;
+      else if (j.name === "Four Fingers") flags.fourFingers = true;
+      else if (j.name === "Shortcut") flags.shortcut = true;
+      else if (j.name === "Hack") flags.hack = true;
+      else if (j.name === "Hanging Chad") flags.hangingChad = true;
+      else if (j.name === "Sock and Buskin") flags.sockBuskin = true;
+      else if (j.name === "Dusk") flags.dusk = true;
+      else if (j.name === "Mime") flags.mime = true;
+    }
+    return flags;
+  }
+
   // Enhanced poker evaluator with card enhancements & joker abilities
   function evaluateHandScore(selectedCards, jokers, blind, stateContext) {
     if (!selectedCards || selectedCards.length === 0) return null;
 
     const constraints = detectConstraints(jokers, blind);
+    const jokerFlags = getJokerFlags(jokers);
     const rankCounts = {};
     const suitCounts = {};
     for (const c of selectedCards) {
@@ -1165,9 +1214,20 @@ end
     }
 
     const counts = Object.values(rankCounts).sort((a, b) => b - a);
-    const maxSuitCount = Math.max(...Object.values(suitCounts));
-    const isFlush = maxSuitCount >= 5;
-    const straight = isStraight(selectedCards);
+    const maxSuitCount = Math.max(...Object.values(suitCounts), 0);
+    const isFlush = maxSuitCount >= (jokerFlags.fourFingers ? 4 : 5);
+    const straight = isStraight(selectedCards, jokers);
+
+    // The Duo family / Card Sharp style gates: does the played selection
+    // contain the required hand type (game checks context.poker_hands[type],
+    // so Two Pair also contains Pair, Straight Flush contains Straight+Flush).
+    const containsHand = {
+      "Pair": counts[0] >= 2,
+      "Three of a Kind": counts[0] >= 3,
+      "Four of a Kind": counts[0] >= 4,
+      "Straight": straight,
+      "Flush": isFlush
+    };
 
     // 1. Hand classification
     let handName = "High Card";
@@ -1190,13 +1250,41 @@ end
     let cardMult = 0;
     let cardXMult = 1.0;
 
-    for (const c of scoringCards) {
-      const isCardDebuffed = Boolean(c.debuff) ||
-        Boolean(constraints.debuffedSuit && c.suit === constraints.debuffedSuit) ||
-        Boolean(constraints.debuffFaceCards && ["J", "Q", "K"].includes(c.rank));
-      if (isCardDebuffed) {
+    // Retrigger repeats per scoring card (vanilla evaluate_play builds a reps
+    // list per card: red seal + Hack/Hanging Chad/Sock and Buskin/Dusk).
+    const isCardFace = (c) => jokerFlags.pareidolia || ["J", "Q", "K"].includes(c.rank);
+    const cardDebuffed = (c) => Boolean(c.debuff) ||
+      Boolean(constraints.debuffedSuit && c.suit === constraints.debuffedSuit) ||
+      Boolean(constraints.debuffFaceCards && ["J", "Q", "K"].includes(c.rank));
+    const cardRepeats = (c, ci) => {
+      let reps = (c.seal === "red") ? 2 : 1;
+      if (jokerFlags.hack && ["2", "3", "4", "5"].includes(c.rank)) reps += 1;
+      if (jokerFlags.hangingChad && ci === 0) reps += 2;
+      if (jokerFlags.sockBuskin && isCardFace(c)) reps += 1;
+      if (jokerFlags.dusk && Number(stateContext && stateContext.hands_left) === 1) reps += 1;
+      return reps;
+    };
+
+    // Weighted trigger counts (a retriggered card triggers suit/rank jokers again)
+    const scoringSuits = {};
+    let faceWeight = 0, evenWeight = 0, oddWeight = 0, fibWeight = 0, aceWeight = 0, tenFourWeight = 0;
+
+    for (let ci = 0; ci < scoringCards.length; ci++) {
+      const c = scoringCards[ci];
+      if (cardDebuffed(c)) {
         continue;
       }
+
+      const repeats = cardRepeats(c, ci);
+
+      // Weighted trigger counts for per-card jokers
+      scoringSuits[c.suit] = (scoringSuits[c.suit] || 0) + repeats;
+      if (isCardFace(c)) faceWeight += repeats;
+      if (["2", "4", "6", "8", "10"].includes(c.rank)) evenWeight += repeats;
+      if (["A", "9", "7", "5", "3"].includes(c.rank)) oddWeight += repeats;
+      if (["A", "2", "3", "5", "8"].includes(c.rank)) fibWeight += repeats;
+      if (c.rank === "A") aceWeight += repeats;
+      if (c.rank === "10" || c.rank === "4") tenFourWeight += repeats;
 
       let cChips = (c.enhancement === "stone" ? 50 : (RANK_VALUES[c.rank] || 0));
       let cMult = 0;
@@ -1214,44 +1302,97 @@ end
       else if (c.edition === "holo") cMult += 10;
       else if (c.edition === "poly") cXMult *= 1.5;
 
-      // Seal retriggers
-      const repeats = (c.seal === "red") ? 2 : 1;
       cardChips += cChips * repeats;
       cardMult += cMult * repeats;
       cardXMult *= Math.pow(cXMult, repeats);
     }
 
-    // 3. Steel card held in hand: 1.5x Mult per unplayed steel card
-    if (stateContext && stateContext.hand) {
-      const selectedIndices = new Set(selectedCards.map(c => c.index).filter(x => x !== undefined));
-      const unplayedCards = stateContext.hand.filter(c => !selectedIndices.has(c.index));
-      for (const uc of unplayedCards) {
-        const isUcDebuffed = Boolean(uc.debuff) ||
-          Boolean(constraints.debuffedSuit && uc.suit === constraints.debuffedSuit);
-        if (!isUcDebuffed && uc.enhancement === "steel") {
-          const repeats = (uc.seal === "red") ? 2 : 1;
-          cardXMult *= Math.pow(1.5, repeats);
+    // 3. Held-in-hand pass (game order: after played cards, before jokers).
+    // Steel ×1.5, Baron ×1.5 per held K, Shoot the Moon +13 per held Q,
+    // Raised Fist +2×lowest held rank — each retriggered once by Mime.
+    const selectedIndices = new Set(selectedCards.map(c => c.index).filter(x => x !== undefined));
+    const heldCards = (stateContext && stateContext.hand)
+      ? stateContext.hand.filter(c => !selectedIndices.has(c.index))
+      : [];
+    const heldReps = jokerFlags.mime ? 2 : 1;
+    let heldXMult = 1.0;
+    let heldMult = 0;
+    // Blackboard: every card held in hand must be Spades/Clubs (is_suit
+    // bypasses debuff in the game, so debuffed cards still count).
+    const allHeldBlack = heldCards.every(c => c.suit === "S" || c.suit === "C");
+    for (const uc of heldCards) {
+      const isUcDebuffed = Boolean(uc.debuff) ||
+        Boolean(constraints.debuffedSuit && uc.suit === constraints.debuffedSuit);
+      if (!isUcDebuffed && uc.enhancement === "steel") {
+        heldXMult *= Math.pow(1.5, heldReps);
+      }
+    }
+    for (const j of (jokers || [])) {
+      if (j.debuff) continue;
+      if (j.name === "Baron") {
+        const kings = heldCards.filter(c => c.rank === "K" && !(Boolean(c.debuff) ||
+          Boolean(constraints.debuffedSuit && c.suit === constraints.debuffedSuit))).length;
+        if (kings > 0) {
+          const baronX = (typeof j.extra === "number" && j.extra > 1) ? j.extra : 1.5;
+          heldXMult *= Math.pow(baronX, kings * heldReps);
         }
+      } else if (j.name === "Shoot the Moon") {
+        const queens = heldCards.filter(c => c.rank === "Q" && !(Boolean(c.debuff) ||
+          Boolean(constraints.debuffedSuit && c.suit === constraints.debuffedSuit))).length;
+        if (queens > 0) {
+          const stmMult = (typeof j.extra === "number" && j.extra) ? j.extra : 13;
+          heldMult += stmMult * queens * heldReps;
+        }
+      } else if (j.name === "Raised Fist") {
+        const lowest = heldCards
+          .filter(c => !(Boolean(c.debuff) ||
+            Boolean(constraints.debuffedSuit && c.suit === constraints.debuffedSuit)))
+          .map(c => RANK_NUM[c.rank] || 0)
+          .sort((a, b) => a - b)[0];
+        if (lowest > 0) heldMult += 2 * lowest * heldReps;
       }
     }
 
-    const base = POKER_HANDS[handName] || { chips: 10, mult: 1 };
+    // Base chips/mult: use the run's leveled hand values when the bridge
+    // reported them (Planet cards level hands up beyond the level-1 table).
+    const lvlInfo = stateContext && stateContext.hand_levels && stateContext.hand_levels[handName];
+    const base = lvlInfo
+      ? { chips: Number(lvlInfo[1]) || POKER_HANDS[handName].chips, mult: Number(lvlInfo[2]) || POKER_HANDS[handName].mult }
+      : (POKER_HANDS[handName] || { chips: 10, mult: 1 });
     let chips = base.chips + cardChips;
     let mult = base.mult + cardMult;
-    let xmult = cardXMult;
 
-    // 4. Apply Joker effects & build breakdown
+    // Order mirrors vanilla evaluate_play: played-card editions/glass first,
+    // then held-in-hand (+ then ×), then jokers left-to-right with each
+    // joker's +mult applied before its ×mult.
+    mult *= cardXMult;
+    mult += heldMult;
+    mult *= heldXMult;
+
+    // 4. Apply Joker effects & build breakdown (left-to-right, in-order)
     const activeJokerBadges = [];
-    const scoringSuits = {};
-    for (const sc of scoringCards) {
-      scoringSuits[sc.suit] = (scoringSuits[sc.suit] || 0) + 1;
-    }
+
+    // The Duo family: ability.x_mult only fires when the played hand contains
+    // the required type (game: next(context.poker_hands[ability.type])).
+    const DUO_HAND_GATE = {
+      "The Duo": "Pair", "The Trio": "Three of a Kind", "The Family": "Four of a Kind",
+      "The Order": "Straight", "The Tribe": "Flush"
+    };
+    // These jokers carry their bonus in extra.mult/chips but only score when a
+    // condition holds; the hand-gated manual handlers below cover the matching
+    // case, so the automatic extra path must NOT apply them unconditionally.
+    const CONDITIONAL_EXTRA_JOKERS = new Set([
+      "Jolly Joker", "Zany Joker", "Mad Joker", "Crazy Joker", "Droll Joker",
+      "Sly Joker", "Wily Joker", "Clever Joker", "Devious Joker", "Crafty Joker",
+      "Half Joker", "Mystic Summit"
+    ]);
 
     for (const j of (jokers || [])) {
       if (j.debuff) continue;
       let jChips = Number(j.chips) || 0;
       let jMult = Number(j.mult) || 0;
       let jXmult = Number(j.xmult) || 1.0;
+      const jname = j.name || "";
 
       // Edition bonus on Joker
       if (j.edition === "foil") jChips += 50;
@@ -1261,63 +1402,86 @@ end
       // Extra counters on scaling Jokers (avoid double-counting if j.mult is already populated)
       if (j.extra && typeof j.extra === "object") {
         if (jChips === 0 && j.extra.chips) jChips += Number(j.extra.chips) || 0;
-        if (jMult === 0 && j.extra.mult) jMult += Number(j.extra.mult) || 0;
+        if (jChips === 0 && j.extra.chip_mod) jChips += Number(j.extra.chip_mod) || 0;
+        if (jMult === 0 && j.extra.mult && !CONDITIONAL_EXTRA_JOKERS.has(jname)) {
+          jMult += Number(j.extra.mult) || 0;
+        }
         if (jXmult === 1.0 && (j.extra.x_mult || j.extra.xmult)) {
           jXmult *= Number(j.extra.x_mult || j.extra.xmult) || 1.0;
         }
       }
 
-      // Conditional suit/rank jokers trigger on scoring cards only
-      const jname = j.name || "";
+      // Cavendish keeps its multiplier in extra.Xmult (ability.x_mult stays 1)
+      if (jname === "Cavendish" && jXmult === 1.0) {
+        jXmult = Number(j.extra && j.extra.Xmult) || 3;
+      }
+
+      // Condition-gated x_mult jokers
+      if (DUO_HAND_GATE[jname] && !containsHand[DUO_HAND_GATE[jname]]) {
+        jXmult = 1.0;
+      } else if (jname === "Acrobat" && Number(stateContext && stateContext.hands_left) !== 1) {
+        jXmult = 1.0;
+      }
+
+      // Conditional suit/rank jokers trigger on scoring cards only (retrigger-weighted)
       if (jname === "Lusty Joker") jMult += 4 * (scoringSuits["H"] || 0);
       else if (jname === "Greedy Joker") jMult += 4 * (scoringSuits["D"] || 0);
       else if (jname === "Wrathful Joker") jMult += 4 * (scoringSuits["S"] || 0);
       else if (jname === "Gluttonous Joker") jMult += 4 * (scoringSuits["C"] || 0);
+      else if (jname === "Onyx Agate") jMult += (Number(j.extra) || 4) * (scoringSuits["C"] || 0);
+      else if (jname === "Arrowhead") jChips += (Number(j.extra) || 50) * (scoringSuits["S"] || 0);
       else if (jname === "Even Steven") {
-        const evens = scoringCards.filter(c => ["2", "4", "6", "8", "10"].includes(c.rank)).length;
-        jMult += 4 * evens;
+        jMult += 4 * evenWeight;
       } else if (jname === "Odd Todd") {
-        const odds = scoringCards.filter(c => ["A", "9", "7", "5", "3"].includes(c.rank)).length;
-        jChips += 31 * odds;
+        jChips += 31 * oddWeight;
       } else if (jname === "Fibonacci") {
-        const fibs = scoringCards.filter(c => ["A", "2", "3", "5", "8"].includes(c.rank)).length;
-        jMult += 8 * fibs;
+        jMult += 8 * fibWeight;
       } else if (jname === "Scary Face") {
-        const faces = scoringCards.filter(c => ["J", "Q", "K"].includes(c.rank)).length;
-        jChips += 30 * faces;
+        jChips += 30 * faceWeight;
       } else if (jname === "Smiley Face") {
-        const faces = scoringCards.filter(c => ["J", "Q", "K"].includes(c.rank)).length;
-        jMult += 5 * faces;
+        jMult += 5 * faceWeight;
       } else if (jname === "Scholar") {
-        const aces = scoringCards.filter(c => c.rank === "A").length;
-        jChips += 20 * aces;
-        jMult += 4 * aces;
+        jChips += (Number(j.extra && j.extra.chips) || 30) * aceWeight;
+        jMult += (Number(j.extra && j.extra.mult) || 4) * aceWeight;
       } else if (jname === "Walkie Talkie") {
-        const tensOrFours = scoringCards.filter(c => c.rank === "10" || c.rank === "4").length;
-        jChips += 10 * tensOrFours;
-        jMult += 4 * tensOrFours;
-      } else if (jname === "Half Joker" && selectedCards.length <= 3) {
-        jMult += 20;
-      } else if (jname === "Jolly Joker" && handName.includes("Pair")) {
+        jChips += 10 * tenFourWeight;
+        jMult += 4 * tenFourWeight;
+      } else if (jname === "Half Joker" && selectedCards.length <= (Number(j.extra && j.extra.size) || 3)) {
+        jMult += (Number(j.extra && j.extra.mult) || 20);
+      } else if (jname === "Jolly Joker" && containsHand["Pair"]) {
         jMult += 8;
-      } else if (jname === "Zany Joker" && handName.includes("Three of a Kind")) {
+      } else if (jname === "Zany Joker" && containsHand["Three of a Kind"]) {
         jMult += 12;
       } else if (jname === "Mad Joker" && handName === "Two Pair") {
         jMult += 10;
-      } else if (jname === "Crazy Joker" && handName.includes("Straight")) {
+      } else if (jname === "Crazy Joker" && containsHand["Straight"]) {
         jMult += 12;
-      } else if (jname === "Droll Joker" && handName.includes("Flush")) {
+      } else if (jname === "Droll Joker" && containsHand["Flush"]) {
         jMult += 10;
-      } else if (jname === "Sly Joker" && handName.includes("Pair")) {
+      } else if (jname === "Sly Joker" && containsHand["Pair"]) {
         jChips += 50;
-      } else if (jname === "Wily Joker" && handName.includes("Three of a Kind")) {
+      } else if (jname === "Wily Joker" && containsHand["Three of a Kind"]) {
         jChips += 100;
       } else if (jname === "Clever Joker" && handName === "Two Pair") {
         jChips += 80;
-      } else if (jname === "Devious Joker" && handName.includes("Straight")) {
+      } else if (jname === "Devious Joker" && containsHand["Straight"]) {
         jChips += 100;
-      } else if (jname === "Crafty Joker" && handName.includes("Flush")) {
+      } else if (jname === "Crafty Joker" && containsHand["Flush"]) {
         jChips += 80;
+      } else if (jname === "Triboulet") {
+        const kq = scoringCards.filter(c => (c.rank === "K" || c.rank === "Q") && !cardDebuffed(c)).length;
+        if (kq > 0) jXmult *= Math.pow(Number(j.extra) || 2, kq);
+      } else if (jname === "Photograph") {
+        const firstFace = scoringCards.find(c => isCardFace(c) && !cardDebuffed(c));
+        if (firstFace) jXmult *= Number(j.extra) || 2;
+      } else if (jname === "Flower Pot") {
+        const suitsHit = ["S", "H", "D", "C"].filter(s => (scoringSuits[s] || 0) > 0).length;
+        if (suitsHit >= 4) jXmult *= Number(j.extra) || 3;
+      } else if (jname === "Blackboard") {
+        if (allHeldBlack) jXmult *= Number(j.extra) || 3;
+      } else if (jname === "Baseball Card") {
+        const uncommons = (jokers || []).filter(o => !o.debuff && Number(o.rarity) === 2).length;
+        if (uncommons > 0) jXmult *= Math.pow(1.5, uncommons);
       } else if (jname === "Banner" && stateContext && stateContext.discards_left) {
         jChips += 30 * Number(stateContext.discards_left);
       } else if (jname === "Mystic Summit" && stateContext && Number(stateContext.discards_left) === 0) {
@@ -1332,7 +1496,9 @@ end
 
       chips += jChips;
       mult += jMult;
-      xmult *= jXmult;
+      if (jXmult !== 1.0) {
+        mult *= jXmult;
+      }
 
       if (jChips > 0 || jMult > 0 || jXmult > 1.0) {
         activeJokerBadges.push({
@@ -1345,13 +1511,12 @@ end
       }
     }
 
-    const totalMult = mult * xmult;
-    const totalScore = Math.floor(chips * totalMult);
+    const totalScore = Math.floor(chips * mult);
 
     return {
       handName: handName,
       chips: chips,
-      mult: Math.round(totalMult * 10) / 10,
+      mult: Math.round(mult * 10) / 10,
       totalScore: totalScore,
       cards: selectedCards,
       jokerBadges: activeJokerBadges

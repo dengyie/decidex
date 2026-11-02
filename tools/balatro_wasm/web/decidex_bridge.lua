@@ -1335,6 +1335,17 @@ local function build_state_json(actual)
   parts[#parts + 1] = '"played_hands":' .. jtable(map(unique_played, jstr))
   parts[#parts + 1] = '"most_played_hand":' .. jstr(run_most_played_hand())
 
+  -- Levelled hands (Planet cards): the client predicts scores with these
+  -- instead of the level-1 table. Only hands above level 1 are emitted.
+  local hand_levels_parts = {}
+  for hname, hinfo in pairs((G.GAME and G.GAME.hands) or {}) do
+    local hlvl = tonumber(hinfo.level) or 1
+    if hlvl > 1 then
+      hand_levels_parts[#hand_levels_parts + 1] = jstr(hname) .. ':[' .. hlvl .. ',' .. (tonumber(hinfo.chips) or 0) .. ',' .. (tonumber(hinfo.mult) or 0) .. ']'
+    end
+  end
+  parts[#parts + 1] = '"hand_levels":{' .. table.concat(hand_levels_parts, ",") .. '}'
+
   local deck_count = (G.deck and G.deck.cards and #G.deck.cards) or 0
   local discard_count = (G.discard and G.discard.cards and #G.discard.cards) or 0
   local joker_limit = (G.jokers and G.jokers.config and G.jokers.config.card_limit) or 5

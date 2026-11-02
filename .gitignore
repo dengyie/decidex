@@ -41,3 +41,6 @@ tools/balatro_wasm/test_browser_profile/
 tools/balatro_wasm/test_browser_profile*/
 .pytest-tmp*/
 .codex-memory/
+
+# vanilla source extraction (local reference only)
+/game/
