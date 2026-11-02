@@ -2488,6 +2488,31 @@ local function decidex_execute_inner(action, args)
     return false, "cash_out button not ready yet"
   end
 
+  if action == "force_end_round" then
+    -- Escape hatch for a round whose resolution chain broke: SELECTING_HAND
+    -- with zero hands left never self-resolves (vanilla ends a round only
+    -- through the final played hand or the all-areas-empty auto-end_round
+    -- in Game:update_selecting_hand). Observed live: a dropped scoring
+    -- event left the game waiting forever, hand stuffed to 21 cards, 160
+    -- queued events. end_round() evaluates win/loss itself and runs the
+    -- whole end-of-round chain (game over, cash out, ante up).
+    if G.STATE ~= G.STATES.SELECTING_HAND then
+      return false, "not in SELECTING_HAND"
+    end
+    local cr = (G.GAME and G.GAME.current_round) or {}
+    local hands_left = tonumber(cr.hands_left) or 0
+    local discards_left = tonumber(cr.discards_left) or 0
+    if hands_left > 0 and discards_left > 0 then
+      return false, "actions still available"
+    end
+    if G.hand and G.hand.unhighlight_all then
+      pcall(function() G.hand:unhighlight_all() end)
+    end
+    local ok, err = pcall(end_round)
+    if ok then return true, "forced end_round" end
+    return false, "end_round failed: " .. tostring(err)
+  end
+
   if action == "continue_endless" then
     if G.FUNCS and G.FUNCS.exit_overlay_menu then
       local ok, err = pcall(G.FUNCS.exit_overlay_menu)

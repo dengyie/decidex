@@ -1231,3 +1231,20 @@ def test_pack_hard_episode_cap():
 
     assert "Pack episode exceeded 75s; forcing leave" in content
     assert "now - this._stateEnterTime > 75000" in content
+
+
+def test_force_end_round_escape_hatch():
+    """A round whose resolution chain broke (dropped scoring event) strands
+    SELECTING_HAND with zero hands forever -- vanilla only ends a round
+    through the final played hand or the all-areas-empty auto-end. The
+    client must force vanilla end_round after 20s.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    bridge = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    assert "window.executeForceEndRound" in content
+    assert "SELECTING_HAND with 0 hands for 20s; forcing end_round" in content
+    assert "this._handsExhaustedSince" in content
+    assert 'if action == "force_end_round" then' in bridge
+    assert "actions still available" in bridge
+    assert "pcall(end_round)" in bridge

@@ -466,14 +466,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
-  const EXPECTED_LOVE_SIZE = 56355805;
+  const EXPECTED_LOVE_SIZE = 56356170;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v113";
+  const ASSET_VERSION = "v114";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=113";
-  const ASSET_WASM_URL = "love.wasm.bin?v=113";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=114";
+  const ASSET_WASM_URL = "love.wasm.bin?v=114";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3489,6 +3489,17 @@ end
     return dispatchLuaAction(luaCode, "select_pack_card");
   };
 
+  // Escape hatch for a round whose resolution chain broke: SELECTING_HAND
+  // with zero hands left never self-resolves (vanilla only ends a round
+  // through the final played hand or the all-areas-empty auto-end). The
+  // bridge calls vanilla end_round(), which evaluates win/loss itself.
+  window.executeForceEndRound = function () {
+    if (!window.Module || !window.Module.FS) return unavailableAction("force_end_round");
+    const luaCode = `local fn = (_G.DECIDEX_EXECUTE or (G and G.DECIDEX_EXECUTE)); if fn then fn("force_end_round") end`;
+    console.log("[DecideX] Dispatched force_end_round action");
+    return dispatchLuaAction(luaCode, "force_end_round");
+  };
+
   // Escape hatch for a booster pack whose UI never appeared. The bridge
   // rebuilds the pack UI directly, and falls back to abandoning the pack
   // and returning to the shop so the run keeps advancing.
@@ -4024,6 +4035,7 @@ end
         if (!["TAROT_PACK", "PLANET_PACK", "SPECTRAL_PACK", "STANDARD_PACK", "BUFFOON_PACK"].includes(sname)) {
           this._inPackState = false;
         }
+        if (sname !== "SELECTING_HAND") this._handsExhaustedSince = null;
       }
 
       this.busy = true;
@@ -4135,9 +4147,27 @@ end
             executedAction = false;
             unlockCooldownMs = 200;
           } else if (Number(state.hands_left) <= 0) {
-            this.updateStatus("出牌次数已耗尽，等待盲注结算...", false);
-            executedAction = false;
-            unlockCooldownMs = 500;
+            // Vanilla only resolves a round through the FINAL played hand or
+            // the all-areas-empty auto-end_round in update_selecting_hand.
+            // If the resolution chain broke (a scored event dropped by the
+            // Event Guard), the game sits in SELECTING_HAND with zero hands
+            // forever — production probe: 100s stall, hand stuffed to 21
+            // cards, 160 queued events. Nothing the client waits for can
+            // happen: force vanilla end_round (it evaluates win/loss
+            // itself) after 20s.
+            if (!this._handsExhaustedSince) this._handsExhaustedSince = now;
+            if (now - this._handsExhaustedSince > 20000) {
+              this._handsExhaustedSince = null;
+              this.updateStatus("回合结算卡死，强制结算...", true);
+              console.warn("[AutoPilot] SELECTING_HAND with 0 hands for 20s; forcing end_round");
+              window.executeForceEndRound();
+              executedAction = true;
+              unlockCooldownMs = 1500;
+            } else {
+              this.updateStatus("出牌次数已耗尽，等待盲注结算...", false);
+              executedAction = false;
+              unlockCooldownMs = 500;
+            }
           } else if (Number(state.deck_count || 0) > 0 && state.hand.length < Math.min(Number(state.hand_size || 8), state.hand.length + Number(state.deck_count || 0)) && (!this._handIncompleteSince || now - this._handIncompleteSince < 2800)) {
             const expected = Math.min(Number(state.hand_size || 8), state.hand.length + Number(state.deck_count || 0));
             if (!this._handIncompleteSince) {
