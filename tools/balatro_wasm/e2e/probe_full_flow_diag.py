@@ -176,11 +176,16 @@ async def run():
             os.makedirs(profile_dir, exist_ok=True)
             browser = await p.chromium.launch_persistent_context(
                 user_data_dir=profile_dir, headless=HEADLESS,
-                viewport=VIEWPORT, args=launch_args)
+                viewport=VIEWPORT, args=launch_args,
+                # The production PWA service worker (and the 4h HTTP cache on
+                # app.js?v=N) can serve install-day shell bytes to a persistent
+                # profile -- a probe must exercise the RELEASED bytes, so block
+                # SWs here and disable the HTTP cache via CDP below.
+                service_workers="block")
             page = browser.pages[0] if browser.pages else await browser.new_page()
         else:
             browser = await p.chromium.launch(headless=HEADLESS, args=launch_args)
-            context = await browser.new_context(viewport=VIEWPORT)
+            context = await browser.new_context(viewport=VIEWPORT, service_workers="block")
             page = context.pages[0] if context.pages else await context.new_page()
 
         def on_console(msg):
@@ -202,6 +207,13 @@ async def run():
         # background — a probe that launches immediately plays the OLD
         # assets and tests nothing. Reload once so the updated core takes
         # control, then re-query the button (the reload detaches it).
+        # Deterministic bytes: disable the HTTP cache via CDP so the reload
+        # re-fetches every shell asset from the edge, and confirm WHICH
+        # script the page executed (performance entries list the URL, the
+        # served bytes may still differ -- see the sw-v2 incident).
+        cdp = await page.context.new_cdp_session(page)
+        await cdp.send("Network.enable", {})
+        await cdp.send("Network.setCacheDisabled", {"cacheDisabled": True})
         await page.reload(wait_until="domcontentloaded")
         btn = await page.wait_for_selector("#btn-launch", state="visible", timeout=launch_timeout)
         core = await page.evaluate(
