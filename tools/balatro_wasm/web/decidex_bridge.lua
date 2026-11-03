@@ -944,7 +944,13 @@ local function pack_stall_watchdog()
           _G._pack_mismatch_time = now2
           return false
         end
-        if now2 - _G._pack_mismatch_time > 2.0 then
+        -- 5s (raised from 2s): right after a state change the NEW pack's UI
+        -- creation event may still be pending while G.pack_cards still holds
+        -- the PREVIOUS pack's area -- that healthy transition must not be
+        -- abandoned (it threw away freshly bought packs on slow hosts).
+        -- Real poison (wrong-set contents wedged by an abandon race) never
+        -- self-heals, so 5s still stops the card-eating crash loop early.
+        if now2 - _G._pack_mismatch_time > 5.0 then
           print("[DecideX Pack Watchdog] " .. tostring(expected) ..
                 " state holds foreign-set contents (poisoned pack); abandoning")
           _G._pack_mismatch_time = nil
@@ -1387,6 +1393,30 @@ local function build_state_json(actual)
     end
   end
   parts[#parts + 1] = '"hand_levels":{' .. table.concat(hand_levels_parts, ",") .. '}'
+
+  -- Decision-support counters (Supernova/Card Sharp read per-type hand play
+  -- counts; Erosion needs the full-deck deficit; Fortune Teller reads tarot
+  -- usage; The Idol needs its rotating rank/suit target; the client prioritizes
+  -- Planet packs by hand usage). All values are already maintained by vanilla,
+  -- so emitting them is cheap and side-effect free.
+  local played_parts = {}
+  local played_round_parts = {}
+  for hname, hinfo in pairs((G.GAME and G.GAME.hands) or {}) do
+    local played = tonumber(hinfo.played) or 0
+    local played_round = tonumber(hinfo.played_this_round) or 0
+    if played > 0 then played_parts[#played_parts + 1] = jstr(hname) .. ':' .. tostring(played) end
+    if played_round > 0 then played_round_parts[#played_round_parts + 1] = jstr(hname) .. ':' .. tostring(played_round) end
+  end
+  parts[#parts + 1] = '"hand_played":{' .. table.concat(played_parts, ",") .. '}'
+  parts[#parts + 1] = '"hand_played_round":{' .. table.concat(played_round_parts, ",") .. '}'
+  parts[#parts + 1] = '"starting_deck_size":' .. tostring((G.GAME and G.GAME.starting_deck_size) or 52)
+  parts[#parts + 1] = '"deck_cards_total":' .. tostring((G.playing_cards and #G.playing_cards) or 52)
+  parts[#parts + 1] = '"tarots_used":' .. tostring((G.GAME and G.GAME.consumeable_usage_total and G.GAME.consumeable_usage_total.tarot) or 0)
+  local idol_card = (G.GAME and G.GAME.current_round and G.GAME.current_round.idol_card) or nil
+  if idol_card and idol_card.rank and idol_card.suit then
+    parts[#parts + 1] = '"idol_rank":' .. jstr(RANK_MAP[idol_card.rank] or tostring(idol_card.rank))
+    parts[#parts + 1] = '"idol_suit":' .. jstr(SUIT_MAP[idol_card.suit] or tostring(idol_card.suit))
+  end
 
   local deck_count = (G.deck and G.deck.cards and #G.deck.cards) or 0
   local discard_count = (G.discard and G.discard.cards and #G.discard.cards) or 0

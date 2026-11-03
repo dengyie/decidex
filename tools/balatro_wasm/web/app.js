@@ -466,14 +466,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
-  const EXPECTED_LOVE_SIZE = 56356620;
+  const EXPECTED_LOVE_SIZE = 56357265;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v117";
+  const ASSET_VERSION = "v118";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=117";
-  const ASSET_WASM_URL = "love.wasm.bin?v=117";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=118";
+  const ASSET_WASM_URL = "love.wasm.bin?v=118";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -937,6 +937,14 @@ end
     "Blueprint": "utility", "Brainstorm": "utility", "Four Fingers": "utility",
     "Shortcut": "utility", "Splash": "utility", "Mime": "utility", "Hanging Chad": "utility",
     "Hack": "utility", "Dusk": "utility", "Sock and Buskin": "utility"
+  };
+
+  // Vanilla Planet card -> poker hand mapping (Planet Merchant / Celestial
+  // packs). Used to prioritize leveling hands the run actually plays.
+  const PLANET_HAND_MAP = {
+    "Pluto": "High Card", "Mercury": "Pair", "Uranus": "Two Pair", "Venus": "Three of a Kind",
+    "Saturn": "Straight", "Jupiter": "Flush", "Earth": "Full House", "Mars": "Four of a Kind",
+    "Neptune": "Straight Flush", "Planet X": "Five of a Kind", "Ceres": "Flush House", "Eris": "Flush Five"
   };
 
   // S-tier Joker list. Must live at module scope: the AutoPilot pack-scoring
@@ -1407,36 +1415,66 @@ end
     const CONDITIONAL_EXTRA_JOKERS = new Set([
       "Jolly Joker", "Zany Joker", "Mad Joker", "Crazy Joker", "Droll Joker",
       "Sly Joker", "Wily Joker", "Clever Joker", "Devious Joker", "Crafty Joker",
-      "Half Joker", "Mystic Summit"
+      "Half Joker", "Mystic Summit",
+      // Object-shaped extra ({mult}/{chips}/{mult,chips}) whose bonus is
+      // condition-gated: the unconditional generic path would double-count
+      // with the manual handlers below (Scholar extra={mult:4,chips:20},
+      // Walkie Talkie extra={chips:10,mult:4}; Abstract/Smiley guarded the
+      // same way even though their vanilla extras are scalars).
+      "Scholar", "Walkie Talkie", "Abstract Joker", "Smiley Face"
     ]);
 
-    for (const j of (jokers || [])) {
-      if (j.debuff) continue;
-      let jChips = Number(j.chips) || 0;
-      let jMult = Number(j.mult) || 0;
-      let jXmult = Number(j.xmult) || 1.0;
-      const jname = j.name || "";
-
-      // Edition bonus on Joker
-      if (j.edition === "foil") jChips += 50;
-      else if (j.edition === "holo") jMult += 10;
-      else if (j.edition === "poly") jXmult *= 1.5;
-
-      // Extra counters on scaling Jokers (avoid double-counting if j.mult is already populated)
-      if (j.extra && typeof j.extra === "object") {
-        if (jChips === 0 && j.extra.chips) jChips += Number(j.extra.chips) || 0;
-        if (jChips === 0 && j.extra.chip_mod) jChips += Number(j.extra.chip_mod) || 0;
-        if (jMult === 0 && j.extra.mult && !CONDITIONAL_EXTRA_JOKERS.has(jname)) {
-          jMult += Number(j.extra.mult) || 0;
+    // Vanilla copy semantics (card.lua + en-us tooltip): Blueprint copies
+    // the Joker to its RIGHT (cards[i+1]); Brainstorm copies the LEFTMOST
+    // Joker (cards[1]). A copy Joker pointing at another copy Joker chains
+    // through it to the next real Joker; a debuffed donor contributes
+    // nothing (calculate_joker is gated on not self.debuff); a copy Joker
+    // with no donor keeps only its own edition bonus.
+    const resolveCopyDonor = (j, idx) => {
+      const list = jokers || [];
+      const start = (j.name === "Blueprint") ? idx + 1 : 0;
+      for (let k = start; k < list.length; k++) {
+        const cand = list[k];
+        if (cand === j) return null;
+        if (cand.name !== "Blueprint" && cand.name !== "Brainstorm") {
+          return cand.debuff ? null : cand;
         }
-        if (jXmult === 1.0 && (j.extra.x_mult || j.extra.xmult)) {
-          jXmult *= Number(j.extra.x_mult || j.extra.xmult) || 1.0;
+      }
+      return null;
+    };
+
+    // jSource = physical card (its edition applies), jEffect = ability donor.
+    const applyJokerEffect = (jSource, jEffect) => {
+      let jChips = Number(jEffect.chips) || 0;
+      let jMult = Number(jEffect.mult) || 0;
+      let jXmult = Number(jEffect.xmult) || 1.0;
+      const jname = jEffect.name || "";
+
+      // Edition bonus belongs to the physical joker: a foil Blueprint keeps
+      // its own +50 Chips even while copying another Joker's ability.
+      if (jSource.edition === "foil") jChips += 50;
+      else if (jSource.edition === "holo") jMult += 10;
+      else if (jSource.edition === "poly") jXmult *= 1.5;
+
+      // Extra counters on scaling Jokers (avoid double-counting if j.mult is
+      // already populated). Condition-gated jokers are excluded ENTIRELY from
+      // the generic path: their manual handlers below apply the bonus only
+      // when the trigger holds, and several (Scholar, Walkie Talkie) carry
+      // the same value in extra -- unconditional application double-counts.
+      if (jEffect.extra && typeof jEffect.extra === "object" && !CONDITIONAL_EXTRA_JOKERS.has(jname)) {
+        if (jChips === 0 && jEffect.extra.chips) jChips += Number(jEffect.extra.chips) || 0;
+        if (jChips === 0 && jEffect.extra.chip_mod) jChips += Number(jEffect.extra.chip_mod) || 0;
+        if (jMult === 0 && jEffect.extra.mult) {
+          jMult += Number(jEffect.extra.mult) || 0;
+        }
+        if (jXmult === 1.0 && (jEffect.extra.x_mult || jEffect.extra.xmult)) {
+          jXmult *= Number(jEffect.extra.x_mult || jEffect.extra.xmult) || 1.0;
         }
       }
 
       // Cavendish keeps its multiplier in extra.Xmult (ability.x_mult stays 1)
       if (jname === "Cavendish" && jXmult === 1.0) {
-        jXmult = Number(j.extra && j.extra.Xmult) || 3;
+        jXmult = Number(jEffect.extra && jEffect.extra.Xmult) || 3;
       }
 
       // Condition-gated x_mult jokers
@@ -1446,13 +1484,15 @@ end
         jXmult = 1.0;
       }
 
-      // Conditional suit/rank jokers trigger on scoring cards only (retrigger-weighted)
-      if (jname === "Lusty Joker") jMult += 4 * (scoringSuits["H"] || 0);
-      else if (jname === "Greedy Joker") jMult += 4 * (scoringSuits["D"] || 0);
-      else if (jname === "Wrathful Joker") jMult += 4 * (scoringSuits["S"] || 0);
-      else if (jname === "Gluttonous Joker") jMult += 4 * (scoringSuits["C"] || 0);
-      else if (jname === "Onyx Agate") jMult += (Number(j.extra) || 4) * (scoringSuits["C"] || 0);
-      else if (jname === "Arrowhead") jChips += (Number(j.extra) || 50) * (scoringSuits["S"] || 0);
+      // Conditional suit/rank jokers trigger on scoring cards only
+      // (retrigger-weighted). Vanilla suit jokers read extra.s_mult (= 3).
+      const suitBonus = (suit) => (Number(jEffect.extra && jEffect.extra.s_mult) || 3) * (scoringSuits[suit] || 0);
+      if (jname === "Lusty Joker") jMult += suitBonus("H");
+      else if (jname === "Greedy Joker") jMult += suitBonus("D");
+      else if (jname === "Wrathful Joker") jMult += suitBonus("S");
+      else if (jname === "Gluttonous Joker") jMult += suitBonus("C");
+      else if (jname === "Onyx Agate") jMult += (Number(jEffect.extra) || 4) * (scoringSuits["C"] || 0);
+      else if (jname === "Arrowhead") jChips += (Number(jEffect.extra) || 50) * (scoringSuits["S"] || 0);
       else if (jname === "Even Steven") {
         jMult += 4 * evenWeight;
       } else if (jname === "Odd Todd") {
@@ -1464,13 +1504,13 @@ end
       } else if (jname === "Smiley Face") {
         jMult += 5 * faceWeight;
       } else if (jname === "Scholar") {
-        jChips += (Number(j.extra && j.extra.chips) || 30) * aceWeight;
-        jMult += (Number(j.extra && j.extra.mult) || 4) * aceWeight;
+        jChips += (Number(jEffect.extra && jEffect.extra.chips) || 20) * aceWeight;
+        jMult += (Number(jEffect.extra && jEffect.extra.mult) || 4) * aceWeight;
       } else if (jname === "Walkie Talkie") {
         jChips += 10 * tenFourWeight;
         jMult += 4 * tenFourWeight;
-      } else if (jname === "Half Joker" && selectedCards.length <= (Number(j.extra && j.extra.size) || 3)) {
-        jMult += (Number(j.extra && j.extra.mult) || 20);
+      } else if (jname === "Half Joker" && selectedCards.length <= (Number(jEffect.extra && jEffect.extra.size) || 3)) {
+        jMult += (Number(jEffect.extra && jEffect.extra.mult) || 20);
       } else if (jname === "Jolly Joker" && containsHand["Pair"]) {
         jMult += 8;
       } else if (jname === "Zany Joker" && containsHand["Three of a Kind"]) {
@@ -1493,15 +1533,15 @@ end
         jChips += 80;
       } else if (jname === "Triboulet") {
         const kq = scoringCards.filter(c => (c.rank === "K" || c.rank === "Q") && !cardDebuffed(c)).length;
-        if (kq > 0) jXmult *= Math.pow(Number(j.extra) || 2, kq);
+        if (kq > 0) jXmult *= Math.pow(Number(jEffect.extra) || 2, kq);
       } else if (jname === "Photograph") {
         const firstFace = scoringCards.find(c => isCardFace(c) && !cardDebuffed(c));
-        if (firstFace) jXmult *= Number(j.extra) || 2;
+        if (firstFace) jXmult *= Number(jEffect.extra) || 2;
       } else if (jname === "Flower Pot") {
         const suitsHit = ["S", "H", "D", "C"].filter(s => (scoringSuits[s] || 0) > 0).length;
-        if (suitsHit >= 4) jXmult *= Number(j.extra) || 3;
+        if (suitsHit >= 4) jXmult *= Number(jEffect.extra) || 3;
       } else if (jname === "Blackboard") {
-        if (allHeldBlack) jXmult *= Number(j.extra) || 3;
+        if (allHeldBlack) jXmult *= Number(jEffect.extra) || 3;
       } else if (jname === "Baseball Card") {
         const uncommons = (jokers || []).filter(o => !o.debuff && Number(o.rarity) === 2).length;
         if (uncommons > 0) jXmult *= Math.pow(1.5, uncommons);
@@ -1515,6 +1555,28 @@ end
         jChips += 2 * Math.max(0, Number(stateContext.money));
       } else if (jname === "Abstract Joker" && jokers) {
         jMult += 3 * jokers.length;
+      } else if (jname === "Supernova") {
+        // Vanilla: mult += G.GAME.hands[scoring_name].played (per-run count
+        // of the hand type being scored; bridge emits hand_played).
+        jMult += (stateContext && stateContext.hand_played && Number(stateContext.hand_played[handName])) || 0;
+      } else if (jname === "Card Sharp") {
+        // Vanilla: X3 when this hand type was already played this round
+        // (hands[scoring_name].played_this_round > 1; extra.Xmult = 3).
+        const playedRound = (stateContext && stateContext.hand_played_round && Number(stateContext.hand_played_round[handName])) || 0;
+        if (playedRound > 1) jXmult *= Number(jEffect.extra && jEffect.extra.Xmult) || 3;
+      } else if (jname === "Erosion") {
+        // Vanilla: extra(=4) * (starting_deck_size - #G.playing_cards).
+        const missing = Math.max(0, (Number(stateContext && stateContext.starting_deck_size) || 52) - (Number(stateContext && stateContext.deck_cards_total) || 52));
+        jMult += (Number(jEffect.extra) || 4) * missing;
+      } else if (jname === "Fortune Teller") {
+        // Vanilla: extra(=1) * consumeable_usage_total.tarot.
+        jMult += (Number(jEffect.extra) || 1) * (Number(stateContext && stateContext.tarots_used) || 0);
+      } else if (jname === "The Idol" && stateContext && stateContext.idol_rank && stateContext.idol_suit) {
+        const idolHits = scoringCards.filter(c => c.rank === stateContext.idol_rank && c.suit === stateContext.idol_suit && !cardDebuffed(c)).length;
+        if (idolHits > 0) {
+          jChips += 50;
+          jXmult *= 2;
+        }
       }
 
       chips += jChips;
@@ -1525,13 +1587,28 @@ end
 
       if (jChips > 0 || jMult > 0 || jXmult > 1.0) {
         activeJokerBadges.push({
-          name: j.name,
+          name: jname,
           chips: jChips,
           mult: jMult,
           xmult: jXmult,
-          edition: j.edition
+          edition: jSource.edition,
+          copiedBy: jEffect !== jSource ? jSource.name : undefined
         });
       }
+    };
+
+    const jokerList = jokers || [];
+    for (let ji = 0; ji < jokerList.length; ji++) {
+      const j = jokerList[ji];
+      if (j.debuff) continue;
+      if (j.name === "Blueprint" || j.name === "Brainstorm") {
+        const donor = resolveCopyDonor(j, ji);
+        if (donor) {
+          applyJokerEffect(j, donor);
+          continue;
+        }
+      }
+      applyJokerEffect(j, j);
     }
 
     const totalScore = Math.floor(chips * mult);
@@ -2431,10 +2508,18 @@ end
       if (isConsumable) {
         if (isPlanet) {
           pillar = "planet";
-          if (["Jupiter", "Earth", "Saturn", "Mercury", "Planet X", "Mars", "Uranus"].includes(cname)) {
-            score = 80;
+          // Usage-aware: the most-played hand's planet is the best buy;
+          // planets for hands played at least once are still decent; a
+          // planet for a hand never played this run is nearly dead stock.
+          const handForPlanet = PLANET_HAND_MAP[cname];
+          const playedForHand = handForPlanet ? (Number(state.hand_played && state.hand_played[handForPlanet]) || 0) : 0;
+          const mostPlayedPlanet = Object.entries(PLANET_HAND_MAP).find(([, h]) => h === (state.most_played_hand || ""));
+          if (mostPlayedPlanet && mostPlayedPlanet[0] === cname) {
+            score = 88;
+          } else if (playedForHand > 0) {
+            score = 78;
           } else {
-            score = 68;
+            score = 62;
           }
         } else if (isTarot) {
           pillar = "tarot";
@@ -4170,6 +4255,29 @@ end
           this.lastCashOutTime = 0;
           this._shopEnterTime = null;
           this._togglingShop = false;
+          // Prediction-vs-actual calibration: the last play stored its
+          // predicted score; the blind.scored delta observed here is what the
+          // game actually paid. Makes "decisions got dumber" a measurable
+          // number instead of a feeling (window.__dxPredictionCalibration).
+          const calScored = Number(state.blind && state.blind.scored) || 0;
+          if (this._lastPlayPrediction) {
+            const predictedBefore = this._lastPlayPrediction;
+            if (calScored > predictedBefore.blindScored) {
+              const actual = calScored - predictedBefore.blindScored;
+              const predicted = predictedBefore.predicted;
+              const errPct = Math.abs(actual - predicted) / Math.max(actual, 1) * 100;
+              const cal = window.__dxPredictionCalibration = window.__dxPredictionCalibration || { n: 0, meanErrPct: 0, worstPct: 0, over: 0, under: 0 };
+              cal.n++;
+              cal.meanErrPct = Math.round(((cal.meanErrPct * (cal.n - 1) + errPct) / cal.n) * 10) / 10;
+              cal.worstPct = Math.max(cal.worstPct, Math.round(errPct * 10) / 10);
+              if (predicted > actual) cal.over++; else if (predicted < actual) cal.under++;
+              console.log(`[DecideX Calib] predicted=${predicted} actual=${actual} err=${errPct.toFixed(1)}% (n=${cal.n} mean=${cal.meanErrPct}%)`);
+              this._lastPlayPrediction = null;
+            } else if (calScored < predictedBefore.blindScored) {
+              // The pending play won the blind: scored resets on a new blind.
+              this._lastPlayPrediction = null;
+            }
+          }
           if (!state.hand || state.hand.length === 0) {
             this.updateStatus("等待发牌...", false);
             executedAction = false;
@@ -4282,6 +4390,12 @@ end
                       this._playSawHandPlayed = false;
                       this.updateStatus(`自动出牌 (${bestPlay.handName})...`, true);
                       console.log("[AutoPilot] Executing play hand:", bestPlay.handName, arb.reason);
+                      // Record the prediction for calibration on the next
+                      // SELECTING_HAND snapshot (blind.scored delta).
+                      this._lastPlayPrediction = {
+                        predicted: bestPlay.totalScore,
+                        blindScored: Number(state.blind && state.blind.scored) || 0
+                      };
                       window.executePlayAction(arb.cards);
                       executedAction = true;
                       unlockCooldownMs = 2500;
@@ -4504,6 +4618,9 @@ end
           if (packSig !== this._packLastSig) {
             this._packLastSig = packSig;
             this._packSigSince = Date.now();
+            // Real progress: a selection consumed (or targeted) a card.
+            // Re-arm the rejection fuse for the next decision.
+            this._packSelectFailStreak = 0;
           } else if (packCards.length > 0 && this._packSigSince && Date.now() - this._packSigSince > 45000) {
             this.updateStatus("补充包无进展，强制脱离...", true);
             console.warn("[AutoPilot] Pack unchanged for 45s (sig:", packSig, "); forcing leave");
@@ -4534,12 +4651,16 @@ end
             this._packEnterTime = null;
             let bestCard = null;
             if (sname === "PLANET_PACK") {
-              const priorityPlanets = ["Jupiter", "Earth", "Saturn", "Mercury", "Uranus", "Mars", "Venus", "Pluto", "Planet X", "Ceres", "Eris"];
-              for (const p of priorityPlanets) {
-                const found = packCards.find(c => c.name === p);
-                if (found && canUsePackCard(found, state)) { bestCard = found; break; }
-              }
-              if (!bestCard) bestCard = packCards.find(c => canUsePackCard(c, state)) || packCards[0];
+              // Level the hands this run actually plays (bridge emits
+              // hand_played counts per type): sorting pack planets by their
+              // hand's usage beats a fixed name priority, which wasted
+              // purchases on hands never played (e.g. Jupiter for a flush-less
+              // build). Zero-usage packs fall back to pack order.
+              const playedCounts = (state && state.hand_played) || {};
+              const planetCandidates = packCards
+                .filter(c => canUsePackCard(c, state) && PLANET_HAND_MAP[c.name])
+                .sort((a, b) => (Number(playedCounts[PLANET_HAND_MAP[b.name]]) || 0) - (Number(playedCounts[PLANET_HAND_MAP[a.name]]) || 0));
+              bestCard = planetCandidates[0] || packCards.find(c => canUsePackCard(c, state)) || packCards[0];
             } else if (sname === "BUFFOON_PACK") {
               const syn = analyzeSynergy(state.jokers);
               const jCount = (state.jokers || []).length;
@@ -4666,10 +4787,11 @@ end
               this.updateStatus(`补充包选择: ${bestCard.name || '卡牌'}${targetDesc}`, true);
               console.log("[AutoPilot] Selecting pack card:", bestCard.name, "at index", bestCard.index || 1, "targets:", targetIndices);
               window.executeSelectPackCard(bestCard.index || 1, targetIndices);
-              // A dispatched selection counts as progress: the failure
-              // breaker counts consecutive REJECTIONS, so every new attempt
-              // starts from a clean slate.
-              this._packSelectFailStreak = 0;
+              // NOTE: dispatching is NOT progress -- a rejected selection
+              // re-dispatches and would reset the failure breaker forever
+              // (the fuse could never reach 3 strikes). The breaker resets
+              // when the pack CONTENT signature changes below: a consumed
+              // card is the only proof a selection actually succeeded.
               // Arm the watchdog clock for this attempt: play/discard set it
               // explicitly, but this path never did, so repeated transient
               // rejections ("joker slots full") accumulated stuck-time from

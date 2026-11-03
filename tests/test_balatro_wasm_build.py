@@ -1072,7 +1072,13 @@ def test_scoring_conditional_extra_jokers_not_double_counted():
     assert "CONDITIONAL_EXTRA_JOKERS" in content
     for name in ("Jolly Joker", "Half Joker", "Mystic Summit", "Crafty Joker"):
         assert f'"{name}"' in content
-    assert "j.extra.mult && !CONDITIONAL_EXTRA_JOKERS.has(jname)" in content
+    # Refactored engine: the whole generic-extra block is skipped for
+    # condition-gated jokers (chips AND mult), so the exclusion check
+    # guards the block and the donor object is jEffect (copy jokers).
+    assert "!CONDITIONAL_EXTRA_JOKERS.has(jname)" in content
+    assert "jEffect.extra.mult" in content
+    for extra_name in ("Scholar", "Walkie Talkie"):
+        assert f'"{extra_name}"' in content
 
 
 def test_scoring_covers_held_in_hand_and_face_jokers():
@@ -1094,7 +1100,7 @@ def test_scoring_covers_held_in_hand_and_face_jokers():
     assert 'jname === "Baseball Card"' in content
     # Cavendish stores its multiplier in extra.Xmult (capital X), which the
     # generic extra.x_mult path never read.
-    assert "j.extra.Xmult" in content
+    assert "jEffect.extra.Xmult" in content
 
 
 def test_scoring_covers_retriggers_and_pareidolia():
