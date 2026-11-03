@@ -468,12 +468,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56357265;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v119";
+  const ASSET_VERSION = "v120";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=119";
-  const ASSET_WASM_URL = "love.wasm.bin?v=119";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=120";
+  const ASSET_WASM_URL = "love.wasm.bin?v=120";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -1645,6 +1645,10 @@ end
         if (evalRes) {
           const scoring = getScoringCards(chosen, evalRes.handName, state.jokers);
           const junkCount = chosen.length - scoring.length;
+          // Penalties below reshape totalScore for RANKING (junk filtering,
+          // violations). Keep the physical prediction separate so calibration
+          // compares what the game will actually pay.
+          evalRes.rawTotalScore = evalRes.totalScore;
 
           // The Psychic: Must play 5 cards. Less than 5 cards scores 0!
           if (constraints.requires5Cards && chosen.length < 5) {
@@ -4275,7 +4279,7 @@ end
               cal.meanErrPct = Math.round(((cal.meanErrPct * (cal.n - 1) + errPct) / cal.n) * 10) / 10;
               cal.worstPct = Math.max(cal.worstPct, Math.round(errPct * 10) / 10);
               if (predicted > actual) cal.over++; else if (predicted < actual) cal.under++;
-              console.log(`[DecideX Calib] predicted=${predicted} actual=${actual} err=${errPct.toFixed(1)}% (n=${cal.n} mean=${cal.meanErrPct}%)`);
+              console.log(`[DecideX Calib] predicted=${predicted} actual=${actual} err=${errPct.toFixed(1)}% hand=${predictedBefore.handName || "?"} jokers=[${(predictedBefore.jokerNames || []).join(",")}] (n=${cal.n} mean=${cal.meanErrPct}%)`);
               this._lastPlayPrediction = null;
             } else if (calScored < predictedBefore.blindScored) {
               // The pending play won the blind: scored resets on a new blind.
@@ -4395,10 +4399,16 @@ end
                       this.updateStatus(`自动出牌 (${bestPlay.handName})...`, true);
                       console.log("[AutoPilot] Executing play hand:", bestPlay.handName, arb.reason);
                       // Record the prediction for calibration on the next
-                      // SELECTING_HAND snapshot (blind.scored delta).
+                      // SELECTING_HAND snapshot (blind.scored delta). The RAW
+                      // (un-penalized) score is the physical prediction;
+                      // penalized totalScore is a ranking number only. Joker
+                      // names ride along so over/under-counts are diagnosable
+                      // from the log alone.
                       this._lastPlayPrediction = {
-                        predicted: bestPlay.totalScore,
-                        blindScored: Number(state.blind && state.blind.scored) || 0
+                        predicted: (bestPlay.rawTotalScore !== undefined ? bestPlay.rawTotalScore : bestPlay.totalScore),
+                        blindScored: Number(state.blind && state.blind.scored) || 0,
+                        handName: bestPlay.handName || "?",
+                        jokerNames: (state.jokers || []).filter(j => !j.debuff).map(j => j.name).slice(0, 8)
                       };
                       window.executePlayAction(arb.cards);
                       executedAction = true;
