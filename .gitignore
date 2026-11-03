@@ -44,3 +44,4 @@ tools/balatro_wasm/test_browser_profile*/
 
 # vanilla source extraction (local reference only)
 /game/
+.pytest_tmp/

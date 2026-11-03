@@ -468,12 +468,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56357265;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v118";
+  const ASSET_VERSION = "v119";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=118";
-  const ASSET_WASM_URL = "love.wasm.bin?v=118";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=119";
+  const ASSET_WASM_URL = "love.wasm.bin?v=119";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -1556,14 +1556,18 @@ end
       } else if (jname === "Abstract Joker" && jokers) {
         jMult += 3 * jokers.length;
       } else if (jname === "Supernova") {
-        // Vanilla: mult += G.GAME.hands[scoring_name].played (per-run count
-        // of the hand type being scored; bridge emits hand_played).
-        jMult += (stateContext && stateContext.hand_played && Number(stateContext.hand_played[handName])) || 0;
+        // Vanilla: mult += G.GAME.hands[scoring_name].played, where played is
+        // incremented BEFORE joker scoring -- the current play counts (the
+        // first-ever play of the type already gives +1). The bridge emits the
+        // pre-play count, so add one.
+        jMult += ((stateContext && stateContext.hand_played && Number(stateContext.hand_played[handName])) || 0) + 1;
       } else if (jname === "Card Sharp") {
-        // Vanilla: X3 when this hand type was already played this round
-        // (hands[scoring_name].played_this_round > 1; extra.Xmult = 3).
+        // Vanilla: X3 when hands[scoring_name].played_this_round > 1 AT
+        // SCORING TIME, with the current play already counted => the bridge's
+        // pre-play count only needs to be >= 1 (i.e. this is the 2nd+ play
+        // of the type this round).
         const playedRound = (stateContext && stateContext.hand_played_round && Number(stateContext.hand_played_round[handName])) || 0;
-        if (playedRound > 1) jXmult *= Number(jEffect.extra && jEffect.extra.Xmult) || 3;
+        if (playedRound >= 1) jXmult *= Number(jEffect.extra && jEffect.extra.Xmult) || 3;
       } else if (jname === "Erosion") {
         // Vanilla: extra(=4) * (starting_deck_size - #G.playing_cards).
         const missing = Math.max(0, (Number(stateContext && stateContext.starting_deck_size) || 52) - (Number(stateContext && stateContext.deck_cards_total) || 52));
@@ -1572,10 +1576,13 @@ end
         // Vanilla: extra(=1) * consumeable_usage_total.tarot.
         jMult += (Number(jEffect.extra) || 1) * (Number(stateContext && stateContext.tarots_used) || 0);
       } else if (jname === "The Idol" && stateContext && stateContext.idol_rank && stateContext.idol_suit) {
+        // Vanilla triggers PER matching scoring card (context.other_card);
+        // DNA-copied duplicates can put more than one copy of the selected
+        // rank+suit in a hand.
         const idolHits = scoringCards.filter(c => c.rank === stateContext.idol_rank && c.suit === stateContext.idol_suit && !cardDebuffed(c)).length;
         if (idolHits > 0) {
-          jChips += 50;
-          jXmult *= 2;
+          jChips += 50 * idolHits;
+          jXmult *= Math.pow(2, idolHits);
         }
       }
 
@@ -4144,9 +4151,6 @@ end
           this._shopPurchasedBooster = false;
           this._shopAttemptedItems.clear();
           this._loggedShelf = false;
-        }
-        if (!["TAROT_PACK", "PLANET_PACK", "SPECTRAL_PACK", "STANDARD_PACK", "BUFFOON_PACK"].includes(sname)) {
-          this._inPackState = false;
         }
         if (sname !== "SELECTING_HAND") this._handsExhaustedSince = null;
       }

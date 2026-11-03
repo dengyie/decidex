@@ -76,6 +76,40 @@ GOLDEN_CASES = [
         "expect": {"chips": 24, "mult": 6, "totalScore": 144},
     },
     {
+        # Blueprint -> Blueprint -> Cavendish: both copies resolve through the
+        # chain (vanilla context.blueprint recursion).
+        "name": "blueprint_chain_through_blueprint",
+        "fn": "evaluateHandScore",
+        "args": [[card("7", "S", 0), card("7", "H", 1)],
+                 [{"name": "Blueprint"}, {"name": "Blueprint"}, {"name": "Cavendish", "extra": {"Xmult": 3, "odds": 1000}}], {}, {}],
+        "expect": {"chips": 24, "mult": 54, "totalScore": 1296},
+    },
+    {
+        # A leftmost Brainstorm has nothing to copy (vanilla: other_joker == self).
+        "name": "brainstorm_leftmost_self_has_no_donor",
+        "fn": "evaluateHandScore",
+        "args": [[card("7", "S", 0), card("7", "H", 1)], [{"name": "Brainstorm"}], {}, {}],
+        "expect": {"chips": 24, "mult": 2, "totalScore": 48},
+    },
+    {
+        # A debuffed donor contributes nothing (vanilla calculate_joker is
+        # gated on not self.debuff), and the debuffed joker itself is skipped.
+        "name": "blueprint_debuffed_donor_contributes_nothing",
+        "fn": "evaluateHandScore",
+        "args": [[card("7", "S", 0), card("7", "H", 1)],
+                 [{"name": "Cavendish", "extra": {"Xmult": 3, "odds": 1000}, "debuff": True}, {"name": "Blueprint"}], {}, {}],
+        "expect": {"chips": 24, "mult": 2, "totalScore": 48},
+    },
+    {
+        # The copy carries the donor's ABILITY only: donor edition (holo +10)
+        # applies once to the donor itself, never to the Blueprint copy.
+        "name": "donor_edition_does_not_leak_to_copy",
+        "fn": "evaluateHandScore",
+        "args": [[card("9", "D", 0)],
+                 [{"name": "Blueprint"}, {"name": "Joker", "mult": 4, "edition": "holo"}], {}, {}],
+        "expect": {"chips": 14, "mult": 19, "totalScore": 266},
+    },
+    {
         "name": "duo_fires_on_two_pair",
         "fn": "evaluateHandScore",
         "args": [[card("7", "S", 0), card("7", "H", 1), card("3", "D", 2), card("3", "C", 3)],
@@ -96,11 +130,18 @@ GOLDEN_CASES = [
     },
     # --- New handlers driven by bridge-emitted counters ---
     {
-        "name": "supernova_uses_hand_played",
+        # Vanilla increments `played` before scoring: the current play counts.
+        "name": "supernova_counts_current_play",
         "fn": "evaluateHandScore",
         "args": [[card("7", "S", 0), card("7", "H", 1)], [{"name": "Supernova"}], {},
                  {"hand_played": {"Pair": 3}}],
-        "expect": {"chips": 24, "mult": 5, "totalScore": 120},
+        "expect": {"chips": 24, "mult": 6, "totalScore": 144},
+    },
+    {
+        "name": "supernova_first_play_counts",
+        "fn": "evaluateHandScore",
+        "args": [[card("7", "S", 0), card("7", "H", 1)], [{"name": "Supernova"}], {}, {}],
+        "expect": {"chips": 24, "mult": 3, "totalScore": 72},
     },
     {
         "name": "card_sharp_needs_repeat_this_round",
@@ -111,11 +152,21 @@ GOLDEN_CASES = [
         "expect": {"chips": 24, "mult": 6, "totalScore": 144},
     },
     {
-        "name": "card_sharp_dormant_on_first_play",
+        # Pre-play count 1 => the current play is the 2nd of the type this
+        # round; vanilla's `played_this_round > 1` (post-increment) fires.
+        "name": "card_sharp_fires_on_second_play",
         "fn": "evaluateHandScore",
         "args": [[card("7", "S", 0), card("7", "H", 1)],
                  [{"name": "Card Sharp", "extra": {"Xmult": 3}}], {},
                  {"hand_played_round": {"Pair": 1}}],
+        "expect": {"chips": 24, "mult": 6, "totalScore": 144},
+    },
+    {
+        "name": "card_sharp_dormant_on_first_play",
+        "fn": "evaluateHandScore",
+        "args": [[card("7", "S", 0), card("7", "H", 1)],
+                 [{"name": "Card Sharp", "extra": {"Xmult": 3}}], {},
+                 {"hand_played_round": {"Pair": 0}}],
         "expect": {"chips": 24, "mult": 2, "totalScore": 48},
     },
     {
@@ -139,11 +190,20 @@ GOLDEN_CASES = [
                  {"idol_rank": "K", "idol_suit": "S"}],
         "expect": {"chips": 80, "mult": 4, "totalScore": 320},
     },
+    {
+        # Vanilla triggers PER matching card; DNA-copied duplicates can place
+        # more than one copy of the selected rank+suit in a hand.
+        "name": "idol_triggers_per_duplicate_card",
+        "fn": "evaluateHandScore",
+        "args": [[card("K", "S", 0), card("K", "S", 1)], [{"name": "The Idol"}], {},
+                 {"idol_rank": "K", "idol_suit": "S"}],
+        "expect": {"chips": 130, "mult": 8, "totalScore": 1040},
+    },
     # --- Candidate ranking & arbitration ---
     {
         "name": "findBestPlays_prefers_pair_over_high_card",
         "fn": "findBestPlays",
-        "args": [{"hand": [card("H", "H", 0), card("7", "S", 1), card("7", "H", 2),
+        "args": [{"hand": [card("5", "H", 0), card("7", "S", 1), card("7", "H", 2),
                            card("9", "D", 3), card("4", "C", 4)],
                   "jokers": [], "blind": {"chips": 300, "scored": 0},
                   "hands_left": 4, "discards_left": 3}],

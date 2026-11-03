@@ -49,14 +49,21 @@ const NEEDS = [
   "findBestDiscards", "optimizePlayWithJunkFilter", "arbitrateAction",
 ];
 
+// Optional definitions: nice for debugging but not referenced by any
+// function under test. Everything else in NEEDS is REQUIRED -- a missing
+// required definition must fail loudly, never silently.
+const OPTIONAL = new Set(["JOKER_PILLAR_MAP", "PLANET_HAND_MAP", "POKER_HAND_TIERS"]);
+
 const parts = [];
 for (const name of NEEDS) {
   try {
     parts.push(extractDef(name));
   } catch (err) {
-    // Non-fatal: some constants are optional for the tested functions.
-    parts.push(`/* missing: ${name} */ void 0;`);
-    if (!name.endsWith("_MAP") && !name.endsWith("_TIERS")) throw err;
+    if (OPTIONAL.has(name)) {
+      parts.push(`/* optional: ${name} */ void 0;`);
+    } else {
+      throw err;
+    }
   }
 }
 
