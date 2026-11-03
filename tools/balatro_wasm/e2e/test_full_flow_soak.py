@@ -14,8 +14,9 @@ Pass criteria:
   * no stall: a single state must not outlive its dwell budget without
     any acknowledged action.
 
-Every console line is mirrored to stdout with a wall-clock prefix so a
-stall can be traced against the surrounding bridge/AutoPilot chatter.
+Operational console lines are mirrored to stdout with a wall-clock prefix so
+stalls can be traced against the surrounding bridge/AutoPilot chatter;
+high-volume [DECIDEX_STATE] lines are suppressed at the page boundary.
 
 Env:
   BALATRO_SOAK_URL       target (default http://127.0.0.1:8099/)
@@ -31,16 +32,22 @@ import time
 
 from playwright.async_api import async_playwright
 
+from harness_support import (
+    TERMINAL_LATCH_READ,
+    TERMINAL_LATCH_SCRIPT,
+    positive_finite_float,
+    positive_viewport,
+)
+
 BASE_URL = os.environ.get("BALATRO_SOAK_URL", "http://127.0.0.1:8099/")
 MIN_GAMES = int(os.environ.get("BALATRO_SOAK_MIN_GAMES", "2"))
 MAX_SECONDS = int(os.environ.get("BALATRO_SOAK_MAX_SECONDS", "2400"))
 
-# Headless Chromium rasterizes WebGL in software (SwiftShader), so the
-# cost of a soak run is roughly proportional to viewport pixels. 1024x576
-# is 72% fewer pixels than 1920x1080 and the game renders fine.
-_VP = os.environ.get("BALATRO_SOAK_VIEWPORT", "1024x576")
-VIEWPORT = {"width": int(_VP.split("x")[0]), "height": int(_VP.split("x")[1])}
-POLL_SECONDS = float(os.environ.get("BALATRO_SOAK_POLL", "2"))
+# 1024x576 requests about 72% fewer canvas pixels than 1920x1080. This is
+# expected to reduce rasterization work; actual CPU savings depend on the
+# browser renderer and host.
+VIEWPORT = positive_viewport("BALATRO_SOAK_VIEWPORT", "1024x576")
+POLL_SECONDS = positive_finite_float("BALATRO_SOAK_POLL", 2)
 
 # The bridge emits a multi-KB [DECIDEX_STATE] JSON several times a second.
 # Mirroring it through CDP console events is pure overhead for the soak
@@ -168,6 +175,7 @@ class Soak:
 
             # Diagnostic channel: ask the bridge for a state dump when a
             # stall is declared.
+            await page.evaluate(TERMINAL_LATCH_SCRIPT)
             await page.evaluate(
                 """() => {
                     window.__soakSeq = 900000;
@@ -198,6 +206,8 @@ class Soak:
             while time.monotonic() - start < MAX_SECONDS:
                 await asyncio.sleep(POLL_SECONDS)
                 t = time.monotonic() - start
+                terminal = await page.evaluate(TERMINAL_LATCH_READ)
+                self.games_completed = terminal["total"]
                 st = await page.evaluate("() => window._lastDecidexState")
                 if not st:
                     continue
@@ -206,8 +216,6 @@ class Soak:
                     self.state_events.append((f"{t:.0f}s", sname))
                     print(f"[Soak] {t:6.0f}s  -> {sname}  ante={st.get('ante')} "
                           f"round={st.get('round')} money={st.get('money')}", flush=True)
-                    if sname in ("GAME_OVER", "GAME_WON"):
-                        self.games_completed += 1
                     prev_state = sname
                     state_since = time.monotonic()
                     self.stall_dumped = False
@@ -220,9 +228,6 @@ class Soak:
                     key = (ante, deck)
                     if not self.blinds_seen or self.blinds_seen[-1] != key:
                         self.blinds_seen.append(key)
-
-                if sname == "GAME_OVER" or sname == "GAME_WON":
-                    pass  # counted on transition below
 
                 dwell = time.monotonic() - state_since
                 budget = DWELL_BUDGETS.get(sname, DEFAULT_BUDGET)
@@ -237,6 +242,8 @@ class Soak:
                     print(f"[Soak] *** STALL *** {t:.0f}s {note}", flush=True)
                     await page.evaluate("() => window.__soakDump && window.__soakDump()")
 
+            terminal = await page.evaluate(TERMINAL_LATCH_READ)
+            self.games_completed = terminal["total"]
             await b.close()
 
         # Metrics rollup
@@ -263,13 +270,12 @@ class Soak:
             failures.append("hard action failures")
         if self.stalls:
             failures.append("state stalls")
-        # games_completed is informational: the autopilot wins often enough
-        # that a game over is rare inside the time cap. The flow evidence is
-        # the state-transition timeline itself.
+        if self.games_completed < MIN_GAMES:
+            failures.append(f"completed {self.games_completed}/{MIN_GAMES} games")
         if failures:
             print(f"\n[FAIL] {', '.join(failures)}", flush=True)
             raise SystemExit(1)
-        print("\n[PASS] full flow completed with no stalls/errors", flush=True)
+        print(f"\n[PASS] full flow completed: {self.games_completed} games, no stalls/errors", flush=True)
 
 
 if __name__ == "__main__":

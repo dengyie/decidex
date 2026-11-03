@@ -1,12 +1,13 @@
 """Deep-diagnosis full-flow probe: drive AutoPilot through whole games while
-mirroring EVERY console line and sampling the JS autopilot's internal state,
-so a wedge carries its own explanation in the log.
+mirroring operational console lines and sampling the JS autopilot's internal
+state, so a wedge carries its own explanation in the log.
 
 Unlike test_full_flow_soak.py (which only prints watchdog/state lines), this
 probe prints every [DECIDEX_ACTION_RESULT] (including transient rejections),
-every 10s a one-line JS internal snapshot (in-flight lock, busy, skip latches,
+periodically emits a JS internal snapshot (in-flight lock, busy, skip latches,
 pack signature), and on a stall dumps BOTH sides: the Lua SOAK-DUMP (bridge
-eval) and the JS snapshot plus a screenshot.
+eval) and the JS snapshot plus a screenshot. High-volume [DECIDEX_STATE]
+console lines are suppressed; the probe reads state directly from the page.
 
 Env:
   PROBE_URL           target (default https://balatro.mangoqwq.com/)
@@ -26,19 +27,24 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright
 
+from harness_support import (
+    TERMINAL_LATCH_READ,
+    TERMINAL_LATCH_SCRIPT,
+    positive_finite_float,
+    positive_viewport,
+)
+
 BASE_URL = os.environ.get("PROBE_URL", "https://balatro.mangoqwq.com/")
 MIN_GAMES = int(os.environ.get("PROBE_MIN_GAMES", "2"))
 MAX_SECONDS = int(os.environ.get("PROBE_MAX_SECONDS", "2400"))
 HEADLESS = os.environ.get("PROBE_HEADLESS", "1") != "0"
-# Low-power defaults: the game renders on a SOFTWARE rasterizer in headless
-# mode (SwiftShader) at 4x game speed -- a 1920x1080 viewport burned a whole
-# core on raster work alone. 1024x576 is 72% fewer pixels; the probe is
-# state-driven and never inspects pixels, the screenshots only need to be
-# legible for a human.
-_VP = os.environ.get("PROBE_VIEWPORT", "1024x576")
-VIEWPORT = {"width": int(_VP.split("x")[0]), "height": int(_VP.split("x")[1])}
-POLL_SECONDS = float(os.environ.get("PROBE_POLL", "2"))
-DIAG_EVERY = float(os.environ.get("PROBE_DIAG_EVERY", "30"))
+# Low-power defaults: 1024x576 requests about 72% fewer canvas pixels than
+# 1920x1080. This is expected to reduce rasterization work; actual CPU savings
+# depend on the browser renderer and host. The probe is state-driven and only
+# needs screenshots legible enough for a human.
+VIEWPORT = positive_viewport("PROBE_VIEWPORT", "1024x576")
+POLL_SECONDS = positive_finite_float("PROBE_POLL", 2)
+DIAG_EVERY = positive_finite_float("PROBE_DIAG_EVERY", 30)
 
 SCREENSHOT_DIR = Path("tools/balatro_wasm/screenshots")
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -142,6 +148,9 @@ class Probe:
         self.stall_dumped = False
         self.prev_state = None
         self.state_since = time.monotonic()
+        self.terminal_total = 0
+        self.terminal_seq = 0
+        self.terminal_events = []
 
     async def on_stall(self, page, sname, dwell, budget, t):
         note = f"{t:.0f}s state={sname} dwell={dwell:.0f}s budget={budget}s"
@@ -206,14 +215,24 @@ async def run():
             await asyncio.sleep(1)
             if await page.evaluate("() => window._lastDecidexStateCount || 0"):
                 break
+        await page.evaluate(TERMINAL_LATCH_SCRIPT)
         await page.evaluate("() => window.AutoPilot.toggle(true)")
-        print("[Probe] AutoPilot enabled", flush=True)
+        print("[Probe] AutoPilot enabled with terminal-event latch", flush=True)
 
         start = time.monotonic()
         last_diag = 0
         while time.monotonic() - start < MAX_SECONDS:
             await asyncio.sleep(POLL_SECONDS)
             t = time.monotonic() - start
+            terminal = await page.evaluate(TERMINAL_LATCH_READ)
+            if terminal["total"] > probe.terminal_total:
+                probe.terminal_total = terminal["total"]
+                fresh_events = [e for e in terminal["events"] if e.get("seq", 0) > probe.terminal_seq]
+                if fresh_events:
+                    probe.terminal_seq = max(e["seq"] for e in fresh_events)
+                    probe.terminal_events.extend(fresh_events)
+                probe.games = probe.terminal_total
+                print(f"[Probe] === terminal event(s): {probe.games} total ===", flush=True)
             st = await page.evaluate("() => window._lastDecidexState")
             if not st:
                 continue
@@ -221,9 +240,6 @@ async def run():
             if sname != probe.prev_state:
                 print(f"[Probe] {t:6.0f}s -> {sname} ante={st.get('ante')} "
                       f"round={st.get('round')} money={st.get('money')}", flush=True)
-                if sname in ("GAME_OVER", "GAME_WON"):
-                    probe.games += 1
-                    print(f"[Probe] === game {probe.games} completed ===", flush=True)
                 probe.prev_state = sname
                 probe.state_since = time.monotonic()
                 probe.stall_dumped = False
@@ -241,6 +257,8 @@ async def run():
             if probe.games >= MIN_GAMES:
                 break
 
+        terminal = await page.evaluate(TERMINAL_LATCH_READ)
+        probe.games = terminal["total"]
         print(f"\n[Probe-RESULT] games={probe.games} stalls={len(probe.stalls)}", flush=True)
         for s in probe.stalls:
             print(f"  stall: {s}", flush=True)
