@@ -767,7 +767,12 @@ def test_autopilot_escapes_a_wedged_booster_pack():
     # the wait must be discriminated: a live pack UIBox with consumed cards
     # (can_skip_booster still true) closes immediately, while a pack whose UI
     # never appeared must get the bridge's 4s rebuild window first.
-    assert 'const emptyGraceMs = state.pack_closing ? 3000 : (state.can_skip_booster ? 800 : 6000);' in pack_branch
+    assert "if (state.pack_closing && timeInPack < 3000) {" in pack_branch
+    # Opposite patience by history: a consumed pack (saw cards) closes fast;
+    # a never-opened pack gets the bridge's rebuild(~4s)+refill(~5.5s) window.
+    assert "const emptyGraceMs = this._packSawCardsThisEpisode ? 800 : 9000;" in pack_branch
+    assert "this._packSawCardsThisEpisode = false;" in js_content
+    assert "this._packSawCardsThisEpisode = true;" in js_content
     # Before abandoning a pack whose UI may be missing, ask for a forced
     # state dump: the bridge's 4s rebuild can restore G.pack_cards without a
     # fresh snapshot ever reaching the client, which made the AutoPilot throw
@@ -1355,6 +1360,9 @@ def test_bridge_auto_closes_consumed_pack():
     assert "abandon_pack()" in body
     # A fresh snapshot must follow the close (pack gone, or pack_closing).
     assert "LAST_PACK_SIG = \"\"" in body
+    # A rebuilt-but-unpopulated area must NOT be instantly closed: the
+    # populate window lands 1.5s after the rebuild.
+    assert "if _G._pack_rebuilt_at and not _G._pack_populated then return false end" in body
     # The client must see the closing flag or it double-exits (abandon_pack
     # racing the queued state restore -> nil G.STATE).
     assert '"pack_closing":' in content
@@ -1374,3 +1382,43 @@ def test_event_guard_prints_are_rate_limited():
 
     assert "_G._decidex_guard_throttle" in content
     assert "suppressed in last 10s" in content
+
+
+def test_bridge_populates_dead_pack_creation():
+    """Vanilla creates pack cards in queued events (card.lua:1721, delay
+    1.3*sqrt(GAMESPEED)) and emplaces them gated on the pack UIBox sliding
+    in. When the watchdog rebuilt the UI after those events died into a
+    removed area, the rebuilt area stayed empty forever (probe v122: 5/22
+    rebuilds ever showed cards; the rest were abandoned at 6s with the
+    purchase lost). The bridge must refill the rebuilt area itself,
+    mirroring vanilla's sets/voucher odds/seed keys, and trim late vanilla
+    emplaces that would duplicate the refill.
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    assert "local function populate_empty_pack()" in content
+    body = content.split("local function populate_empty_pack()", 1)[1].split(
+        chr(10) + "local function force_advance_to_shop()", 1)[0]
+    # Only after a rebuild, with a settle window (healthy backlogs deliver
+    # the originals), and only while the area is still empty.
+    assert "_G._pack_rebuilt_at" in body
+    assert "now - _G._pack_rebuilt_at < 1.5" in body
+    assert "if G.pack_cards.cards and G.pack_cards.cards[1] then" in body
+    # Mirror of vanilla card.lua:1732-1775 (sets, voucher odds, seeds).
+    for fragment in ['"Tarot", G.pack_cards', '"Planet", G.pack_cards', '"Spectral", G.pack_cards',
+                     '"Enhanced" or "Base"', '"Joker", G.pack_cards', "v_omen_globe",
+                     "v_telescope", "poll_edition", "set_edition"]:
+        assert fragment in body, fragment
+    # Late vanilla emplace would duplicate the refill: trim to pack_size.
+    assert "#cards > size" in body
+    # A refill (or vanilla delivery) must re-emit so the client sees it.
+    assert 'print("[DecideX Pack Watchdog] pack populated from bridge")' in content
+    assert "LAST_PACK_SIG = \"\"" in body
+    # Wired into the per-frame maintenance path.
+    maint = content.split("local function decidex_maintenance()", 1)[1].split(chr(10) + "end", 1)[0]
+    assert "pcall(populate_empty_pack)" in maint
+    # The rebuild records its timestamp and forces the epoch-carrying emit.
+    reb = content.split("local function rebuild_pack_ui()", 1)[1].split(
+        chr(10) + "local function populate_empty_pack()", 1)[0]
+    assert "_G._pack_rebuilt_at" in reb
+    assert 'LAST_PACK_SIG = ""' in reb

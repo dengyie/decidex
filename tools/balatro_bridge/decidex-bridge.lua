@@ -609,6 +609,15 @@ local function rebuild_pack_ui()
     return false
   end
   print("[DecideX Pack Watchdog] rebuilt pack UI, G.pack_cards restored")
+  -- The rebuilt area is EMPTY (the factory only creates the CardArea+UIBox;
+  -- vanilla fills it from queued events that may already be dead). Record
+  -- when this happened for populate_empty_pack, and force a fresh emit: the
+  -- new area identity bumps pack_epoch, which resets the client's
+  -- saw-cards-this-episode latch so it waits for the refill instead of
+  -- treating the pack as consumed.
+  _G._pack_rebuilt_at = (love.timer and love.timer.getTime()) or os.clock()
+  _G._pack_populated = nil
+  LAST_PACK_SIG = ""
   return true
 end
 
@@ -1098,6 +1107,10 @@ local function auto_close_consumed_pack()
   end
   if not _G._pack_seen_nonempty then return false end
   if (G.GAME and G.GAME.pack_choices and G.GAME.pack_choices > 1) then return false end
+  -- A rebuilt-but-unpopulated area deserves the populate window first (see
+  -- populate_empty_pack): its refill lands 1.5s after the rebuild, and
+  -- closing now would throw away a recoverable pack.
+  if _G._pack_rebuilt_at and not _G._pack_populated then return false end
   if not (G.GAME and G.GAME.PACK_INTERRUPT) then return false end
   local now = (love.timer and love.timer.getTime()) or os.clock()
   if not _G._pack_empty_confirm then
@@ -1117,6 +1130,101 @@ local function auto_close_consumed_pack()
     -- stale snapshot.
     LAST_PACK_SIG = ""
     LAST_STATE_NUM = nil
+  end
+  return ok
+end
+
+-- Fill a rebuilt pack area whose vanilla card-creation events are dead.
+--
+-- Vanilla creates pack cards in QUEUED events (card.lua:1721: delay
+-- 1.3*sqrt(GAMESPEED) = 1.84s at the bridge's forced speed 4, then a second
+-- event that emplaces the locals into G.pack_cards gated on the pack UIBox
+-- sliding in). When the watchdog rebuilt the UI after those events already
+-- completed into a since-removed area — or G.STATE_COMPLETE stuck true
+-- blocked the factory from ever running — the rebuilt area stays empty
+-- forever: probe v122 saw only 5/22 rebuilds ever show cards, every other
+-- pack was abandoned at 6s with its contents lost.
+--
+-- This mirrors vanilla's own creation loop (same sets, voucher odds, seeds
+-- and edition polling) into the rebuilt area, 1.5s after the rebuild — long
+-- enough for a healthy backlog to deliver the originals, short enough to
+-- beat the client's patience. If vanilla's emplace event fires late anyway,
+-- the pack-size trim below drops the duplicates.
+local function populate_empty_pack()
+  if not is_pack_state() then
+    _G._pack_rebuilt_at = nil
+    _G._pack_populated = nil
+    return false
+  end
+  if not (_G._pack_rebuilt_at and not _G._pack_populated) then return false end
+  local now = (love.timer and love.timer.getTime()) or os.clock()
+  if now - _G._pack_rebuilt_at < 1.5 then return false end
+  if not (G.pack_cards and G.booster_pack) then return false end
+  if G.pack_cards.cards and G.pack_cards.cards[1] then
+    -- Vanilla delivered after all; nothing to fill.
+    _G._pack_populated = true
+    return false
+  end
+  -- Trim late vanilla emplaces: our cards + vanilla's would exceed the
+  -- pack size. Extras sit at the end (vanilla emplaces its full set).
+  local size = tonumber(G.GAME and G.GAME.pack_size) or 2
+  local cards = G.pack_cards.cards or {}
+  if #cards > size then
+    for i = #cards, size + 1, -1 do
+      local c = cards[i]
+      if c then pcall(function()
+        G.pack_cards:remove_card(c)
+        c:remove()
+      end) end
+    end
+  end
+  _G._pack_populated = true
+  print("[DecideX Pack Watchdog] rebuilt area still empty after 1.5s; populating " ..
+        tostring(size) .. " cards (vanilla creation events dead)")
+  local ok, err = pcall(function()
+    for i = 1, size do
+      local card = nil
+      if G.STATE == G.STATES.TAROT_PACK then
+        if G.GAME.used_vouchers.v_omen_globe and pseudorandom('omen_globe') > 0.8 then
+          card = create_card("Spectral", G.pack_cards, nil, nil, true, true, nil, 'ar2')
+        else
+          card = create_card("Tarot", G.pack_cards, nil, nil, true, true, nil, 'ar1')
+        end
+      elseif G.STATE == G.STATES.PLANET_PACK then
+        local forced_planet = nil
+        if G.GAME.used_vouchers.v_telescope and i == 1 then
+          local _hand, _tally = nil, 0
+          for _, v in ipairs(G.handlist) do
+            if G.GAME.hands[v].visible and G.GAME.hands[v].played > _tally then
+              _hand = v
+              _tally = G.GAME.hands[v].played
+            end
+          end
+          if _hand then
+            for _, v in pairs(G.P_CENTER_POOLS.Planet) do
+              if v.config.hand_type == _hand then forced_planet = v.key end
+            end
+          end
+        end
+        card = create_card("Planet", G.pack_cards, nil, nil, true, true, forced_planet, 'pl1')
+      elseif G.STATE == G.STATES.SPECTRAL_PACK then
+        card = create_card("Spectral", G.pack_cards, nil, nil, true, true, nil, 'spe')
+      elseif G.STATE == G.STATES.STANDARD_PACK then
+        card = create_card((pseudorandom(pseudoseed('stdset'..G.GAME.round_resets.ante)) > 0.6) and "Enhanced" or "Base",
+                           G.pack_cards, nil, nil, nil, true, nil, 'sta')
+        local edition = poll_edition('standard_edition'..G.GAME.round_resets.ante, 2, true)
+        card:set_edition(edition)
+      elseif G.STATE == G.STATES.BUFFOON_PACK then
+        card = create_card("Joker", G.pack_cards, nil, nil, true, true, nil, 'buf')
+      end
+      if card then G.pack_cards:emplace(card) end
+    end
+  end)
+  if ok then
+    LAST_PACK_SIG = ""
+    print("[DecideX Pack Watchdog] pack populated from bridge")
+  else
+    print("[DecideX Pack Watchdog] pack populate failed: " .. tostring(err))
   end
   return ok
 end
@@ -3040,6 +3148,11 @@ local function decidex_maintenance()
 
   -- Booster-pack watchdog: recover from a pack whose UI never appeared.
   pcall(pack_stall_watchdog)
+
+  -- Refill a rebuilt-but-empty pack area whose vanilla creation events are
+  -- dead (must run before the auto-close so a recoverable pack gets its
+  -- populate window instead of an instant abandon).
+  pcall(populate_empty_pack)
 
   -- Consumed-pack fast exit (see the comment on auto_close_consumed_pack).
   pcall(auto_close_consumed_pack)

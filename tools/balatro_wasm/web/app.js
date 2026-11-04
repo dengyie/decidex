@@ -466,14 +466,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
-  const EXPECTED_LOVE_SIZE = 56358864;
+  const EXPECTED_LOVE_SIZE = 56360463;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v122";
+  const ASSET_VERSION = "v123";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=122";
-  const ASSET_WASM_URL = "love.wasm.bin?v=122";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=123";
+  const ASSET_WASM_URL = "love.wasm.bin?v=123";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -4622,6 +4622,7 @@ end
             this._packLastSig = null;
             this._packSigSince = null;
             this._packEpochSince = now;
+            this._packSawCardsThisEpisode = false;
           }
           // Hard episode cap: ANY pack episode that outlives 75s is
           // abandoned no matter what the snapshots showed. The empty-pack
@@ -4680,8 +4681,10 @@ end
           } else if (packCards.length > 0) {
             this._packEnterTime = null;
             // Cards are back (possibly restored by a requested dump): the
-            // next empty stretch may legitimately ask for another one.
+            // next empty stretch may legitimately ask for another one, and
+            // an emptying from here on means the pack was consumed.
             this._packEmptyDumped = false;
+            this._packSawCardsThisEpisode = true;
             let bestCard = null;
             if (sname === "PLANET_PACK") {
               // Level the hands this run actually plays (bridge emits
@@ -4876,20 +4879,34 @@ end
             // here would double-exit — abandon_pack racing the queued
             // restore can write nil into G.STATE. Wait it out; the normal
             // fallbacks still apply if the close somehow wedges.
-            const emptyGraceMs = state.pack_closing ? 3000 : (state.can_skip_booster ? 800 : 6000);
+            if (state.pack_closing && timeInPack < 3000) {
+              this.updateStatus("补充包桥端关闭中...", true);
+              executedAction = false;
+              unlockCooldownMs = 200;
+            } else {
+            // Two empty kinds need OPPOSITE patience, decided by whether
+            // this episode ever held cards:
+            //   - saw cards, now empty => the pack was consumed; the bridge
+            //     auto-close usually lands within ~0.4s, so a short grace
+            //     then force (covers the auto-close-failed case).
+            //   - never saw cards => the pack never opened. The bridge
+            //     rebuilds the UI at ~4s and (v123) refills dead creation
+            //     events at ~5.5s, so wait 9s before giving up on a pack
+            //     that cost real money.
+            const emptyGraceMs = this._packSawCardsThisEpisode ? 800 : 9000;
             if (timeInPack < emptyGraceMs) {
               this.updateStatus("等待补充包结算...", true);
               executedAction = false;
               unlockCooldownMs = 300;
-            } else if (!state.can_skip_booster && !this._packEmptyDumped) {
-              // The bridge's pack watchdog rebuilds a lost pack UI at ~4s and
-              // may restore G.pack_cards without the client ever seeing a new
-              // snapshot (probe v121: "rebuilt pack UI, G.pack_cards restored",
-              // then the next AutoPilot steps still ran on the stale empty
-              // snapshot and abandoned the freshly restored pack). Ask for a
-              // forced dump: if the rebuild produced cards they arrive with
-              // it, and if the pack is truly gone the next step leaves without
-              // another 6s guess.
+            } else if (!this._packEmptyDumped && timeInPack >= 6000) {
+              // The bridge's pack watchdog rebuilds a lost pack UI at ~4s
+              // and may restore G.pack_cards without the client ever seeing
+              // a new snapshot (probe v121: "rebuilt pack UI, G.pack_cards
+              // restored", then the next AutoPilot steps still ran on the
+              // stale empty snapshot and abandoned the freshly restored
+              // pack). Ask for a forced dump: if the rebuild/refill produced
+              // cards they arrive with it, and if the pack is truly gone the
+              // next step leaves without another guess.
               this._packEmptyDumped = true;
               this.updateStatus("补充包重建中，请求状态刷新...", true);
               console.log(`[AutoPilot] Pack empty for ${Math.round(timeInPack)}ms with no UI; requesting state dump before leaving`);
@@ -4908,6 +4925,7 @@ end
             } else {
               executedAction = false;
               unlockCooldownMs = 250;
+            }
             }
           }
         } else if (sname === "GAME_WON" || state.won) {
