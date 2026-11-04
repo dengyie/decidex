@@ -468,12 +468,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56357265;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v120";
+  const ASSET_VERSION = "v121";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=120";
-  const ASSET_WASM_URL = "love.wasm.bin?v=120";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=121";
+  const ASSET_WASM_URL = "love.wasm.bin?v=121";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -4140,6 +4140,10 @@ end
 
       // Track state dwell time and reset sub-state clocks on transition
       const now = Date.now();
+      // Captured before the block below overwrites it: the pack-episode
+      // reset needs to know whether this snapshot is a re-entry into the
+      // pack state (see the pack branch) rather than a fresh epoch.
+      const prevSname = this._lastSeenState;
       if (sname !== this._lastSeenState) {
         this._lastSeenState = sname;
         this._stateEnterTime = now;
@@ -4598,10 +4602,22 @@ end
           // episodes: the next pack inherited a 60s-old timer and was
           // force-left instantly, throwing away freshly bought packs).
           const epoch = Number(state.pack_epoch) || 0;
-          if (epoch !== this._packEpoch) {
+          // A new episode is a new bridge epoch OR a re-entry into the pack
+          // state. The epoch alone is not enough: the bridge bumps it only
+          // when the pack CardArea *identity* changes, and a pack whose area
+          // is nil (removed by a crashed close chain) compares equal to the
+          // next such pack (nil == nil). A stuck epoch then carried the 75s
+          // cap and the empty-pack clock into brand-new packs, force-leaving
+          // them on sight (probe v121: "Pack empty for 295064ms", cap firing
+          // on a just-opened BUFFOON_PACK). Two packs cannot be opened
+          // without an intervening state, so re-entry always marks one.
+          if (epoch !== this._packEpoch || prevSname !== sname) {
+            if (epoch !== this._packEpoch) console.log(`[AutoPilot] Pack episode epoch ${this._packEpoch} -> ${epoch}`);
+            else console.log(`[AutoPilot] Pack episode re-entered from ${prevSname} (epoch ${epoch} unchanged)`);
             this._packEpoch = epoch;
             this._packSelectFailStreak = 0;
             this._skipCurrentPack = false;
+            this._packEmptyForceLeftAt = 0;
             this._packEnterTime = null;
             this._packLastSig = null;
             this._packSigSince = null;
@@ -4663,6 +4679,9 @@ end
             unlockCooldownMs = 1200;
           } else if (packCards.length > 0) {
             this._packEnterTime = null;
+            // Cards are back (possibly restored by a requested dump): the
+            // next empty stretch may legitimately ask for another one.
+            this._packEmptyDumped = false;
             let bestCard = null;
             if (sname === "PLANET_PACK") {
               // Level the hands this run actually plays (bridge emits
@@ -4826,32 +4845,62 @@ end
               unlockCooldownMs = 200;
             }
           } else {
+            // Empty pack (pack_cards is []). Two cases, one correct move:
+            //   (a) the last choice was just taken and vanilla's own close
+            //       chain is in flight -- doing anything here duplicates it;
+            //   (b) the area/UI is gone (creation or restore event dropped,
+            //       e.g. button_callbacks.lua:2283 crashing on a removed
+            //       CardArea whose .cards became nil) -- the pack will never
+            //       close by itself.
+            // Treating this as "skippable" was the automations' biggest time
+            // sink: the skip button still exists inside G.booster_pack, so
+            // `can_skip_booster` stays true (bridge mirrors the button, not
+            // the card list) and the client re-dispatched skip_booster every
+            // few seconds -- probe_v121 measured 75 empty-pack skips and 8
+            // forced abandons across 4 games, ~16% of wall clock. Skips stack
+            // duplicate end_consumeable chains, they do not close faster.
+            // Wait out the bridge's own recovery windows (pack-UI rebuild at
+            // 4s) before forcing; force_leave_pack sets the state directly,
+            // so there is no event chain left to drop.
             if (!this._packEnterTime) this._packEnterTime = now;
             const timeInPack = now - this._packEnterTime;
-            if (timeInPack < 3500) {
-              this.updateStatus("等待补充包卡牌生成...", true);
+            // Two empties, distinguished without a bridge change:
+            //   - can_skip_booster STILL true => the pack UIBox is alive and
+            //     only its card list is consumed (the skip button mirrors the
+            //     UIBox, not the cards). Nothing can be lost: close now.
+            //   - can_skip_booster false => the UI may never have appeared
+            //     (the bridge rebuilds a lost pack UI at 4s), so wait out the
+            //     rebuild window before abandoning what is still a real pack.
+            const emptyGraceMs = state.can_skip_booster ? 800 : 6000;
+            if (timeInPack < emptyGraceMs) {
+              this.updateStatus("等待补充包结算...", true);
               executedAction = false;
-              unlockCooldownMs = 350;
-            } else if (state.can_skip_booster) {
-              this.updateStatus("补充包超时无卡，跳过...", true);
-              console.log("[AutoPilot] Skipping empty booster pack after timeout");
-              window.executeSkipBooster();
+              unlockCooldownMs = 300;
+            } else if (!state.can_skip_booster && !this._packEmptyDumped) {
+              // The bridge's pack watchdog rebuilds a lost pack UI at ~4s and
+              // may restore G.pack_cards without the client ever seeing a new
+              // snapshot (probe v121: "rebuilt pack UI, G.pack_cards restored",
+              // then the next AutoPilot steps still ran on the stale empty
+              // snapshot and abandoned the freshly restored pack). Ask for a
+              // forced dump: if the rebuild produced cards they arrive with
+              // it, and if the pack is truly gone the next step leaves without
+              // another 6s guess.
+              this._packEmptyDumped = true;
+              this.updateStatus("补充包重建中，请求状态刷新...", true);
+              console.log(`[AutoPilot] Pack empty for ${Math.round(timeInPack)}ms with no UI; requesting state dump before leaving`);
+              window.decidexReEvaluate();
               executedAction = true;
-              unlockCooldownMs = 600;
-            } else if (timeInPack > 20000) {
-              // The pack UI never appeared: the game froze inside the pack
-              // state (a modal unlock popup pauses the game and freezes every
-              // timer, so the pack UIBox event never runs). The bridge
-              // watchdog rebuilds the pack UI and, failing that, abandons the
-              // pack so the run keeps advancing.
-              this.updateStatus("补充包卡死，强制脱离...", true);
-              console.log("[AutoPilot] Booster pack wedged for", Math.round(timeInPack), "ms, forcing leave");
+              unlockCooldownMs = 1000;
+            } else if (!this._packEmptyForceLeftAt || now - this._packEmptyForceLeftAt > 2500) {
+              this._packEmptyForceLeftAt = now;
+              this._packEmptyDumped = false;
+              this._lastProgressTimestamp = now;
+              this.updateStatus("补充包已无卡可选，强制脱离...", true);
+              console.log(`[AutoPilot] Pack empty for ${Math.round(timeInPack)}ms; forcing leave (no skip spam)`);
               window.executeForceLeavePack();
-              this._packEnterTime = null;
               executedAction = true;
               unlockCooldownMs = 1200;
             } else {
-              this.updateStatus("等待补充包卡牌...", false);
               executedAction = false;
               unlockCooldownMs = 250;
             }

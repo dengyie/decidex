@@ -39,6 +39,7 @@ tools/balatro_wasm/test_browser_profile/
 
 # E2E browser profiles (per-scenario Chromium user data) and local pytest tmp
 tools/balatro_wasm/test_browser_profile*/
+tools/balatro_wasm/e2e/profile_*/
 .pytest-tmp*/
 .codex-memory/
 

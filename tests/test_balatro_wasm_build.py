@@ -761,10 +761,30 @@ def test_autopilot_escapes_a_wedged_booster_pack():
 
     # The empty-pack branch must escalate to the escape hatch instead of
     # waiting forever when the pack cannot be skipped.
-    pack_branch = js_content.split('this.updateStatus("等待补充包卡牌生成..."', 1)[1]
+    pack_branch = js_content.split("// Empty pack (pack_cards is [])", 1)[1]
     assert "executeForceLeavePack()" in pack_branch
-    # The escape hatch must not fire before the pack had a fair chance.
-    assert "timeInPack > 20000" in pack_branch
+    # The escape hatch must not fire before the pack had a fair chance, and
+    # the wait must be discriminated: a live pack UIBox with consumed cards
+    # (can_skip_booster still true) closes immediately, while a pack whose UI
+    # never appeared must get the bridge's 4s rebuild window first.
+    assert 'const emptyGraceMs = state.can_skip_booster ? 800 : 6000;' in pack_branch
+    # Before abandoning a pack whose UI may be missing, ask for a forced
+    # state dump: the bridge's 4s rebuild can restore G.pack_cards without a
+    # fresh snapshot ever reaching the client, which made the AutoPilot throw
+    # away a freshly restored pack (probe v121).
+    assert "window.decidexReEvaluate();" in pack_branch
+    assert "!this._packEmptyDumped" in pack_branch
+    # An empty pack is NOT skippable: re-dispatching skip_booster stacks
+    # duplicate end_consumeable chains (probe_v121: 75 skips, 8 abandons,
+    # ~16% of wall clock across 4 games) and delays the close.
+    assert "executeSkipBooster()" not in pack_branch
+
+    # Episode clocks must not outlive an episode. The bridge only bumps
+    # pack_epoch when the pack CardArea identity changes, and nil == nil for
+    # removed areas, so a stuck epoch carried the 75s cap into fresh packs and
+    # force-left them on sight (probe v121: "Pack empty for 295064ms").
+    assert "const prevSname = this._lastSeenState;" in js_content
+    assert "if (epoch !== this._packEpoch || prevSname !== sname) {" in js_content
 
 
 def test_bridge_latch_hygiene_resets_per_episode():
