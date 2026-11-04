@@ -466,14 +466,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
-  const EXPECTED_LOVE_SIZE = 56357265;
+  const EXPECTED_LOVE_SIZE = 56358864;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v121";
+  const ASSET_VERSION = "v122";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=121";
-  const ASSET_WASM_URL = "love.wasm.bin?v=121";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=122";
+  const ASSET_WASM_URL = "love.wasm.bin?v=122";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -4871,7 +4871,12 @@ end
             //   - can_skip_booster false => the UI may never have appeared
             //     (the bridge rebuilds a lost pack UI at 4s), so wait out the
             //     rebuild window before abandoning what is still a real pack.
-            const emptyGraceMs = state.can_skip_booster ? 800 : 6000;
+            // pack_closing: the bridge's auto-close already queued this
+            // pack's exit (state restore lands ~0.6s out). Forcing leave
+            // here would double-exit — abandon_pack racing the queued
+            // restore can write nil into G.STATE. Wait it out; the normal
+            // fallbacks still apply if the close somehow wedges.
+            const emptyGraceMs = state.pack_closing ? 3000 : (state.can_skip_booster ? 800 : 6000);
             if (timeInPack < emptyGraceMs) {
               this.updateStatus("等待补充包结算...", true);
               executedAction = false;

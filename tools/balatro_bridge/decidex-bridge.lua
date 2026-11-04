@@ -31,7 +31,27 @@ local function install_emanager_crash_guard()
         self.func = function(...)
           local ok, ret = pcall(orig_func, ...)
           if not ok then
-            print("[DecideX Event Guard] Dropping crashed event: " .. tostring(ret))
+            -- Rate-limit per error signature. The known-broken vanilla
+            -- close chain (button_callbacks.lua:2283, focus restore on a
+            -- removed pack CardArea) and zombie tarot transform events
+            -- (card.lua, queued before a round ended) fire hundreds of
+            -- times per session. First occurrence prints in full, then a
+            -- suppressed count every 10s keeps observability without
+            -- flooding the console mirror (45min soak: 334 drops).
+            local msg = tostring(ret)
+            local now = (love.timer and love.timer.getTime()) or os.clock()
+            if not _G._decidex_guard_throttle then _G._decidex_guard_throttle = {} end
+            local bucket = _G._decidex_guard_throttle[msg]
+            if not bucket then
+              _G._decidex_guard_throttle[msg] = { t = now, n = 0 }
+              print("[DecideX Event Guard] Dropping crashed event: " .. msg)
+            elseif now - bucket.t > 10 then
+              print("[DecideX Event Guard] Dropping crashed event: " .. msg ..
+                    " (+" .. tostring(bucket.n) .. " suppressed in last 10s)")
+              _G._decidex_guard_throttle[msg] = { t = now, n = 0 }
+            else
+              bucket.n = bucket.n + 1
+            end
             return true
           end
           return ret
@@ -49,6 +69,10 @@ local function install_emanager_crash_guard()
   end
 end
 pcall(install_emanager_crash_guard)
+
+-- Forward declaration: auto_close_consumed_pack resets this to force a
+-- fresh [DECIDEX_STATE] emit carrying pack_closing=true (see its comment).
+local LAST_PACK_SIG = ""
 
 local SUIT_MAP = { Spades = "S", Hearts = "H", Diamonds = "D", Clubs = "C" }
 local RANK_MAP = {
@@ -1035,6 +1059,68 @@ local function pack_stall_watchdog()
   return true
 end
 
+-- Auto-close a consumed booster pack from the bridge side.
+--
+-- This WASM build's natural close chain is broken: CardArea:remove()
+-- nils .cards and vanilla button_callbacks.lua:2283 crashes on the
+-- removed area (the Event Guard drops it), so until now every consumed
+-- pack waited for the client's empty-pack grace (~800ms) plus a
+-- force_leave_pack round trip — ~1.3s per pack, 8+ packs per run.
+-- The pack is closed here instead. Measured on this build: vanilla's own
+-- programmatic close (G.FUNCS.end_consumeable) queues its state restore
+-- behind an event chain that NEVER lands (0/7 self-restores in probe
+-- v122, every pack wedged until the client cleaned up at 3-4.2s), so the
+-- fast exit uses abandon_pack() — the battle-tested instant path the
+-- client's force_leave_pack has driven for weeks: G.STATE is restored
+-- synchronously from G.GAME.PACK_INTERRUPT, PACK_INTERRUPT is cleared
+-- synchronously, and the orphaned pack UI is handled by the existing
+-- pack-UI sweep. Guards, in order:
+--   * the pack area held cards this episode (a half-created pack is
+--     transiently empty while its card-creation events are queued);
+--   * no multi-choice pending (choices live in the area, so an empty
+--     area already implies none — belt and braces);
+--   * G.GAME.PACK_INTERRUPT is still set (a sane restore target exists
+--     and no queued vanilla close is already in flight);
+--   * the empty state is stable for 0.3s (anti-flicker);
+--   * once per episode.
+local function auto_close_consumed_pack()
+  if not is_pack_state() then
+    _G._pack_seen_nonempty = nil
+    _G._pack_auto_closed = nil
+    _G._pack_empty_confirm = nil
+    return false
+  end
+  local cards = G.pack_cards and G.pack_cards.cards
+  if cards and cards[1] then
+    _G._pack_seen_nonempty = true
+    _G._pack_empty_confirm = nil
+    return false
+  end
+  if not _G._pack_seen_nonempty then return false end
+  if (G.GAME and G.GAME.pack_choices and G.GAME.pack_choices > 1) then return false end
+  if not (G.GAME and G.GAME.PACK_INTERRUPT) then return false end
+  local now = (love.timer and love.timer.getTime()) or os.clock()
+  if not _G._pack_empty_confirm then
+    _G._pack_empty_confirm = now
+    return false
+  end
+  if now - _G._pack_empty_confirm < 0.3 then return false end
+  if _G._pack_auto_closed then return false end
+  _G._pack_auto_closed = true
+  print("[DecideX Bridge] pack consumed (area empty); auto-closing via abandon_pack")
+  local ok, err = pcall(function() abandon_pack() end)
+  if not ok then
+    print("[DecideX Bridge] pack auto-close failed: " .. tostring(err))
+  else
+    -- Force the next frame's emit: the client must see the pack gone (or
+    -- pack_closing=true if the close failed) instead of re-deciding on a
+    -- stale snapshot.
+    LAST_PACK_SIG = ""
+    LAST_STATE_NUM = nil
+  end
+  return ok
+end
+
 local function force_advance_to_shop()
   if not (G and G.STATES and G.STATE == G.STATES.ROUND_EVAL) then return false end
   pcall(function()
@@ -1524,6 +1610,11 @@ local function build_state_json(actual)
     end
   end
   parts[#parts + 1] = '"can_skip_booster":' .. (can_skip_booster and "true" or "false")
+  -- The bridge's auto-close already queued this pack's exit
+  -- (end_consumeable restores the state ~0.6s out). The client must wait
+  -- instead of force-leaving: a second exit (abandon_pack) races the
+  -- queued restore and can write nil into G.STATE.
+  parts[#parts + 1] = '"pack_closing":' .. ((_G._pack_auto_closed and is_pack_state) and "true" or "false")
   parts[#parts + 1] = '"pack_epoch":' .. tostring(_G._decidex_pack_epoch or 0)
 
   local won = (G.GAME and G.GAME.won) or false
@@ -1537,7 +1628,10 @@ local LAST_HAND_SIG = ""
 local LAST_SHOP_SIG = ""
 local LAST_BLIND_SIG = ""
 local LAST_EVAL_SIG = ""
-local LAST_PACK_SIG = ""
+-- LAST_PACK_SIG is forward-declared near the top of the file:
+-- auto_close_consumed_pack must reset it to force a re-emit with
+-- pack_closing=true (the pack signature is unchanged by the close, and
+-- without a fresh snapshot the client would force-leave a closing pack).
 
 local function check_and_emit_state()
   if not G or not G.STATE or not G.STATES then return end
@@ -2946,6 +3040,9 @@ local function decidex_maintenance()
 
   -- Booster-pack watchdog: recover from a pack whose UI never appeared.
   pcall(pack_stall_watchdog)
+
+  -- Consumed-pack fast exit (see the comment on auto_close_consumed_pack).
+  pcall(auto_close_consumed_pack)
 
   if not _G._decidex_step_logged then
     _G._decidex_step_logged = true

@@ -767,7 +767,7 @@ def test_autopilot_escapes_a_wedged_booster_pack():
     # the wait must be discriminated: a live pack UIBox with consumed cards
     # (can_skip_booster still true) closes immediately, while a pack whose UI
     # never appeared must get the bridge's 4s rebuild window first.
-    assert 'const emptyGraceMs = state.can_skip_booster ? 800 : 6000;' in pack_branch
+    assert 'const emptyGraceMs = state.pack_closing ? 3000 : (state.can_skip_booster ? 800 : 6000);' in pack_branch
     # Before abandoning a pack whose UI may be missing, ask for a forced
     # state dump: the bridge's 4s rebuild can restore G.pack_cards without a
     # fresh snapshot ever reaching the client, which made the AutoPilot throw
@@ -1325,3 +1325,52 @@ def test_download_size_validated_with_cache_bust_retry():
     assert "downloadLoveValidated" in content
     assert "edge served a stale package, retrying with cache buster" in content
     assert 'ASSET_LOVE_URL + "&bust=" + Date.now()' in content
+
+
+def test_bridge_auto_closes_consumed_pack():
+    """The pack close chain is broken in this WASM build (CardArea:remove()
+    nils .cards, vanilla button_callbacks.lua:2283 crashes on the removed
+    area, Event Guard drops it), so every consumed pack used to wait for the
+    client's empty-pack grace plus a force_leave_pack round trip (~1.3s per
+    pack, ~5% wall clock). The bridge now closes consumed packs itself with
+    the exact call vanilla makes (button_callbacks.lua:2268), guarded so it
+    can never cut a card's own effect chain short, close a half-created
+    pack, or double-close into a nil G.STATE.
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    assert "local function auto_close_consumed_pack()" in content
+    body = content.split("local function auto_close_consumed_pack()", 1)[1].split(
+        chr(10) + "local function force_advance_to_shop()", 1)[0]
+    # Only close packs whose contents were actually seen (half-created packs
+    # are transiently empty while their card-creation events run).
+    assert "_G._pack_seen_nonempty" in body
+    # Anti-flicker stability window before closing.
+    assert "now - _G._pack_empty_confirm < 0.3" in body
+    # end_consumeable restores G.STATE from PACK_INTERRUPT and nils it; a
+    # second call would write nil into G.STATE.
+    assert "G.GAME.PACK_INTERRUPT" in body
+    # The instant exit path (end_consumeable's queued restore chain never
+    # lands on this build: 0/7 self-restores in probe v122).
+    assert "abandon_pack()" in body
+    # A fresh snapshot must follow the close (pack gone, or pack_closing).
+    assert "LAST_PACK_SIG = \"\"" in body
+    # The client must see the closing flag or it double-exits (abandon_pack
+    # racing the queued state restore -> nil G.STATE).
+    assert '"pack_closing":' in content
+    # Wired into the per-frame maintenance path.
+    maint = content.split("local function decidex_maintenance()", 1)[1].split(chr(10) + "end", 1)[0]
+    assert "pcall(auto_close_consumed_pack)" in maint
+
+
+def test_event_guard_prints_are_rate_limited():
+    """The known-broken vanilla close chain and zombie tarot transform
+    events fire hundreds of drops per session (45min soak: 334). The Event
+    Guard must print the first occurrence in full and then fold repeats of
+    the same signature into a suppressed count, keeping observability
+    without flooding the browser console mirror.
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    assert "_G._decidex_guard_throttle" in content
+    assert "suppressed in last 10s" in content
