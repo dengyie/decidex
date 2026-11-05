@@ -364,17 +364,23 @@ end
       const originalSyncfs = FS.syncfs;
       FS.syncfs = function (populate, callback) {
         let done = false;
-        const timeoutMs = populate ? 15000 : 5000;
+        // The populate pass gates the launch button, so it keeps a tight cap.
+        // Write-back flushes can legitimately take much longer on a large save;
+        // a 5s cap used to let a new flush start while the old one was still
+        // running (5 concurrent syncfs, timeout storms in long runs).
+        const timeoutMs = populate ? 15000 : 60000;
         const timer = setTimeout(() => {
           if (done) return;
           done = true;
           const error = new Error(`FS.syncfs timed out after ${timeoutMs}ms`);
-          console.error("[DecideX] FS.syncfs failed:", error);
           if (populate) {
+            console.error("[DecideX] FS.syncfs failed:", error);
             initialSyncState = "failed";
             initialSyncStarted = false;
             btnLaunch.style.display = "block";
             statusText.textContent = "存档同步失败，请点击重试";
+          } else {
+            console.warn("[DecideX] IDBFS write-back is slow:", error.message);
           }
           if (callback) callback(error);
         }, timeoutMs);
@@ -414,13 +420,49 @@ end
     }
   }
 
+  // IDBFS write-back scheduler. Only one flush may run at a time: a big save can
+  // take longer than the cadence, and the old fixed setInterval stacked flushes
+  // until IDBFS reported several in flight and replies started timing out.
+  const SAVE_SYNC_BASE_MS = 15000;
+  const SAVE_SYNC_MAX_MS = 120000;
+  let saveSyncIntervalMs = SAVE_SYNC_BASE_MS;
+  let saveSyncTimer = null;
+  let writeSyncInFlight = false;
+  let writeSyncPending = false;
+
+  function scheduleSaveSync(delay) {
+    if (saveSyncTimer) clearTimeout(saveSyncTimer);
+    saveSyncTimer = setTimeout(function () {
+      saveSyncTimer = null;
+      syncSaveFileSystem();
+    }, delay === undefined ? saveSyncIntervalMs : delay);
+  }
+
   function syncSaveFileSystem() {
     const FS = window.Module && window.Module.FS;
-    if (FS && FS.syncfs) {
-      FS.syncfs(false, function (err) {
-        if (err) console.warn("[DecideX] IDBFS write sync error:", err);
-      });
+    if (!FS || !FS.syncfs) return;
+    if (writeSyncInFlight) {
+      writeSyncPending = true;
+      return;
     }
+    writeSyncInFlight = true;
+    writeSyncPending = false;
+    const startedAt = Date.now();
+    FS.syncfs(false, function (err) {
+      writeSyncInFlight = false;
+      const elapsed = Date.now() - startedAt;
+      if (err) console.warn("[DecideX] IDBFS write sync error:", err.message || err);
+      // Slow store: stretch the cadence so flushes stop queueing up.
+      if (elapsed > saveSyncIntervalMs / 2) {
+        saveSyncIntervalMs = Math.min(SAVE_SYNC_MAX_MS, Math.max(SAVE_SYNC_BASE_MS, elapsed * 4));
+        console.log(`[DecideX] IDBFS flush took ${elapsed}ms; write-back interval now ${saveSyncIntervalMs}ms`);
+      } else if (!err) {
+        saveSyncIntervalMs = SAVE_SYNC_BASE_MS;
+      }
+      // Edits made during the flush are persisted by the next tick.
+      writeSyncPending = false;
+      scheduleSaveSync();
+    });
   }
 
   function syncInitialFileSystem() {
@@ -460,20 +502,20 @@ end
     }
   };
 
-  // Auto-sync save data periodically
-  setInterval(syncSaveFileSystem, 15000);
+  // Auto-sync save data periodically (self-rescheduling, one flush at a time)
+  scheduleSaveSync();
   window.addEventListener("beforeunload", syncSaveFileSystem);
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
-  const EXPECTED_LOVE_SIZE = 56360463;
+  const EXPECTED_LOVE_SIZE = 56364032;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v123";
+  const ASSET_VERSION = "v127";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=123";
-  const ASSET_WASM_URL = "love.wasm.bin?v=123";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=127";
+  const ASSET_WASM_URL = "love.wasm.bin?v=127";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -1635,12 +1677,39 @@ end
     const hand = state.hand || [];
     if (hand.length === 0) return [];
 
+    // Both the AutoPilot watchdog and the HUD ask for this several times a
+    // second for the same hand; a full re-search is the most expensive thing
+    // the decision engine does, so memoise on everything the scoring pass reads.
+    const searchSig = (function () {
+      const cards = hand.map(c => `${c.rank}${c.suit}${c.enhancement || ""}${c.edition || ""}${c.seal || ""}${c.debuff ? "!" : ""}`).join(",");
+      const jokers = (state.jokers || []).map(j => `${j.name}|${j.debuff ? "!" : ""}|${JSON.stringify(j.extra || null)}|${j.mult || ""}|${j.xmult || ""}|${j.edition || ""}`).join(",");
+      const blind = state.blind || {};
+      const ctx = [
+        state.state_name, state.hands_left, state.discards_left, state.money,
+        state.deck_count, blind.chips, blind.scored, blind.type, blind.name,
+        state.starting_deck_size, state.deck_cards_total, state.tarots_used,
+        state.idol_rank, state.idol_suit,
+        JSON.stringify(state.hand_levels || null),
+        JSON.stringify(state.hand_played || null),
+        JSON.stringify(state.hand_played_round || null),
+      ].join("|");
+      return cards + "##" + jokers + "##" + ctx;
+    })();
+    const searchCache = findBestPlays._cache || (findBestPlays._cache = { sig: null, plays: null });
+    if (searchCache.sig === searchSig && searchCache.plays) return searchCache.plays;
+
     const constraints = detectConstraints(state.jokers, state.blind);
     const candidates = [];
     const n = hand.length;
 
     function combine(start, chosen) {
+      if (budgetHit) return;
       if (chosen.length > 0 && chosen.length <= 5) {
+        evals += 1;
+        if (evals > PLAY_SEARCH_EVAL_BUDGET) {
+          budgetHit = true;
+          return;
+        }
         const evalRes = evaluateHandScore(chosen, state.jokers, state.blind, state);
         if (evalRes) {
           const scoring = getScoringCards(chosen, evalRes.handName, state.jokers);
@@ -1773,14 +1842,91 @@ end
         }
       }
       if (chosen.length === 5) return;
-      for (let i = start; i < n; i++) {
-        combine(i + 1, [...chosen, hand[i]]);
+      for (let i = start; i < searchN; i++) {
+        if (budgetHit) return;
+        combine(i + 1, [...chosen, searchHand[i]]);
       }
     }
 
-    combine(0, []);
-    candidates.sort((a, b) => b.totalScore - a.totalScore);
+    // Exhaustive search is fine for a normal hand (n<=13 -> 2379 selections).
+    // Past that we search a focused pool: pairs/trips/quads, flush suits,
+    // straight runs and the highest-value cards. Endless runs reach 40+ cards,
+    // where C(n,5) is millions of scorings per call and froze the main thread
+    // for minutes (observed: 650s rounds, syncfs pile-ups, action timeouts).
+    const PLAY_SEARCH_EXHAUSTIVE_MAX_HAND = 13;
+    const PLAY_SEARCH_POOL_MAX = 12;
+    const PLAY_SEARCH_EVAL_BUDGET = 3000;
+    let evals = 0;
+    let budgetHit = false;
 
+    function cardSearchValue(c) {
+      let v = RANK_VALUES[c.rank] || 0;
+      const rankCount = hand.filter(x => x.rank === c.rank).length;
+      const suitCount = hand.filter(x => x.suit === c.suit).length;
+      if (rankCount >= 2) v += 25 * (rankCount - 1);
+      if (suitCount >= 4) v += 8 * suitCount;
+      if (c.enhancement) v += 6;
+      if (c.edition) v += 8;
+      if (c.seal) v += 6;
+      if (c.debuff) v -= 40;
+      return v;
+    }
+
+    function buildSearchPool() {
+      const runRanks = new Set();
+      const ranks = [...new Set(hand.map(c => RANK_NUM[c.rank] || 0).filter(Boolean))].sort((a, b) => a - b);
+      let run = [];
+      const noteRun = () => { if (run.length >= 3) run.forEach(r => runRanks.add(r)); };
+      for (const r of ranks) {
+        if (run.length === 0 || r === run[run.length - 1] + 1) run.push(r);
+        else { noteRun(); run = [r]; }
+      }
+      noteRun();
+
+      // Tiered pool so no single structure is crowded out by raw card values:
+      // one flush suit, then rank groups, then straight runs, then best cards.
+      const pool = [];
+      const seen = new Set();
+      const add = (c) => {
+        if (seen.has(c) || pool.length >= PLAY_SEARCH_POOL_MAX) return;
+        seen.add(c);
+        pool.push(c);
+      };
+      const byValue = (a, b) => cardSearchValue(b) - cardSearchValue(a);
+
+      const bySuit = {};
+      for (const c of hand) (bySuit[c.suit] = bySuit[c.suit] || []).push(c);
+      const suitTotal = (s) => bySuit[s].reduce((t, c) => t + (RANK_VALUES[c.rank] || 0), 0);
+      const flushSuit = Object.keys(bySuit)
+        .filter(s => bySuit[s].length >= 5)
+        .sort((a, b) => (bySuit[b].length - bySuit[a].length) || (suitTotal(b) - suitTotal(a)))[0];
+      if (flushSuit) bySuit[flushSuit].slice().sort(byValue).slice(0, 5).forEach(add);
+
+      const byRank = {};
+      for (const c of hand) (byRank[c.rank] = byRank[c.rank] || []).push(c);
+      Object.values(byRank)
+        .filter(g => g.length >= 2)
+        .sort((a, b) => (b.length - a.length) || byValue(a[0], b[0]))
+        .forEach(g => g.slice().sort(byValue).forEach(add));
+
+      hand.filter(c => runRanks.has(RANK_NUM[c.rank] || 0)).sort(byValue).forEach(add);
+      hand.slice().sort(byValue).forEach(add);
+      return pool;
+    }
+
+    const searchHand = n <= PLAY_SEARCH_EXHAUSTIVE_MAX_HAND ? hand : buildSearchPool();
+    const searchN = searchHand.length;
+
+    combine(0, []);
+    if (n > PLAY_SEARCH_EXHAUSTIVE_MAX_HAND) {
+      const logKey = `hand=${n} pool=${searchN}`;
+      const logged = findBestPlays._prunedLog || (findBestPlays._prunedLog = new Set());
+      if (!logged.has(logKey)) {
+        logged.add(logKey);
+        console.log(`[DecideX] Pruned play search: hand=${n} pool=${searchN} scored=${evals}${budgetHit ? " (budget hit)" : ""}`);
+      }
+    }
+    candidates.sort((a, b) => b.totalScore - a.totalScore);
     const unique = [];
     const seen = new Set();
     for (const c of candidates) {
@@ -1792,6 +1938,8 @@ end
       }
     }
 
+    searchCache.sig = searchSig;
+    searchCache.plays = unique;
     return unique;
   }
 

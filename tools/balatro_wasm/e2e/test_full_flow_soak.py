@@ -37,6 +37,7 @@ from harness_support import (
     TERMINAL_LATCH_SCRIPT,
     positive_finite_float,
     positive_viewport,
+    scale_dwell_budget,
 )
 
 BASE_URL = os.environ.get("BALATRO_SOAK_URL", "http://127.0.0.1:8099/")
@@ -230,7 +231,9 @@ class Soak:
                         self.blinds_seen.append(key)
 
                 dwell = time.monotonic() - state_since
-                budget = DWELL_BUDGETS.get(sname, DEFAULT_BUDGET)
+                # Oversized hands make healthy states legitimately slower.
+                hand_n = len(st.get("hand") or []) if isinstance(st.get("hand"), list) else 0
+                budget = scale_dwell_budget(DWELL_BUDGETS.get(sname, DEFAULT_BUDGET), hand_n)
                 # 10% grace so a budget-line dwell (76s vs 75, 46s vs 45)
                 # is not reported as a stall: the budgets mean "wedged",
                 # and soaks 20/21 both self-recovered 1s past the line.

@@ -489,6 +489,14 @@ def test_frontend_arbitration_and_autopilot():
     # than depending on unavailable Emscripten dependency hooks or racing it.
     assert "FS._decidex_syncfs_wrapped" in js_content
     assert "FS.syncfs timed out after ${timeoutMs}ms" in js_content
+    # IDBFS write-back must be serialised and back off when the store is slow.
+    # A fixed setInterval stacked flushes on a big save (5 concurrent syncfs and
+    # repeated "timed out after 5000ms" during long runs).
+    assert "writeSyncInFlight" in js_content
+    assert "saveSyncIntervalMs" in js_content
+    assert "SAVE_SYNC_MAX_MS" in js_content
+    assert "setInterval(syncSaveFileSystem" not in js_content
+    assert "const timeoutMs = populate ? 15000 : 60000;" in js_content
     assert "window.Module.addRunDependency" not in js_content
     assert "non-fatal" not in js_content
     assert "if (isLoveRunning || initialSyncState !== \"ready\") return;" in js_content
@@ -541,6 +549,88 @@ def test_bridge_copies_drift_is_detected(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="drifted apart"):
         build_mod.check_bridge_copies_in_sync()
+
+
+def test_bridge_keeps_blind_progression_self_healing():
+    """The bridge must never be able to strand a run on one blind.
+
+    Three defects combined into a run that could not end: the forced
+    ROUND_EVAL -> SHOP shortcut skipped vanilla cash_out's blind-ante tail
+    (reset_blinds, blind_ante, blind_tags); a lost
+    round_resets.blind == G.P_BLINDS.* identity silently dropped vanilla's
+    'Defeated' mark; and vanilla's blind-select builder is queued inside two
+    nested events (game.lua:3254-3290), so a pack overlay can delay it into
+    the middle of the NEXT round, where the ladder re-picks the blind just
+    beaten and create_UIBox_blind_choice() rewrites its state to 'Select'
+    (UI_definitions.lua:1489) -- permanently un-defeating it. Observed live:
+    rounds 2..8 all facing the same Big blind at ante 1, Boss never faced,
+    ante never advanced, no GAME_OVER in 900s.
+
+    A first repair pass inferred "just played" from the
+    round_resets.blind == G.P_BLINDS.* identity, but that field survives the
+    ante rollover: when AutoPilot skips both Small and Big (Coupon Tag), the
+    ladder legitimately re-offers the previous ante's Boss, and the repair
+    marked that unplayed Boss 'Defeated' 17 times in one blind select. The
+    played blind is therefore recorded per-ante at ROUND_EVAL.
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    # Forced cash-out replicates the vanilla tail.
+    assert "blind_ante = resets.ante" in content
+    assert "resets.blind_tags.Small = get_next_tag_key()" in content
+    assert "pcall(reset_blinds)" in content
+    assert "[DecideX Blind Guard] reset_blinds failed:" in content
+
+    # The round-eval guard re-derives the mark from the blind actually played,
+    # and records it (with its ante) for the blind-select repair.
+    assert "local function ensure_played_blind_defeated()" in content
+    assert "blind:get_type()" in content
+    assert "states[key] = 'Defeated'" in content
+    assert "[DecideX Blind Guard] marked" in content
+    assert "local function note_played_blind(key)" in content
+    assert "note_played_blind(key)" in content
+    assert "if rec.ante ~= resets.ante then return nil end" in content
+    # ...and only on the ROUND_EVAL entry frame, i.e. before cash_out can
+    # have reset the states.
+    guard_call = content.index("pcall(ensure_played_blind_defeated)")
+    entry_frame = content.rindex("if state_changed then", 0, guard_call)
+    assert entry_frame < guard_call
+    assert "G.STATE == G.STATES.ROUND_EVAL" in content[entry_frame - 400:entry_frame]
+
+    # The blind-select repair mirrors vanilla's ladder and identity test
+    assert "local function repair_blind_select_progress()" in content
+    assert "local function drop_blind_select_ui(reason)" in content
+    assert "return v == 'Defeated' or v == 'Skipped' or v == 'Hide'" in content
+    # Only the blind the ladder is offering may carry 'Select'; any other mark
+    # is a leftover from the delayed build.
+    assert "if (v == 'Select' or v == 'Current') and key ~= on_deck then" in content
+    # The offered blind must not be one this ante already played.
+    assert "if last and last == on_deck and (states[last] == 'Select' or states[last] == 'Current') then" in content
+    assert "mark_defeated(last, \" (already played)\")" in content
+    # An accepted selection (facing_blind) must never be "repaired" away.
+    assert "if G.GAME.facing_blind then return end" in content
+    assert "states[key] = 'Defeated'" in content
+    assert "local expected = blind_ladder(states)" in content
+    assert "if G.GAME.blind_on_deck ~= expected then" in content
+    # The repaired box is rebuilt from scratch, not patched in place.
+    assert "drop_blind_select_ui(\"rebuilding for repaired on_deck\")" in content
+    assert "if not rebuilt_needed then return end" in content
+    # Vanilla only ever shows this UI in BLIND_SELECT; a leftover copy
+    # elsewhere makes repair_nil_state() abandon the real screen.
+    assert ("if G.STATE ~= G.STATES.BLIND_SELECT and G.blind_select "
+            "and not G.blind_select.REMOVED then") in content
+    assert "[DecideX Blind Guard] blind select repaired: " in content
+    assert "[DecideX Blind Guard] dropped blind-select UI (" in content
+    # The late builder itself is refused outside BLIND_SELECT: it would
+    # rewrite blind_states and crash its own prompt-box event.
+    assert "local function install_blind_select_build_guard()" in content
+    assert "if G.STATES and G.STATE ~= G.STATES.BLIND_SELECT then" in content
+    assert "[DecideX Blind Guard] refused blind-select build in " in content
+    assert "pcall(install_blind_select_build_guard)" in content
+    # The repair is attempted every frame, and its failure cannot abort the
+    # watcher (a Lua error there would freeze the whole autopilot).
+    repair_call = content.index("pcall(repair_blind_select_progress)")
+    assert "err_blind_repair" in content[repair_call:repair_call + 300]
 
 
 def test_skip_blind_never_uses_synthetic_button():
@@ -752,10 +842,38 @@ def test_bridge_has_booster_pack_stall_watchdog():
     assert 'action == "force_leave_pack"' in content
 
 
+def test_play_search_is_bounded_on_oversized_hands():
+    """A 40+ card hand must not trigger the full C(n,5) subset search.
+
+    Endless runs grow the hand past 40 cards; exhaustive enumeration is millions
+    of scorings per call, and both the watchdog and the HUD call it several
+    times a second. That froze the main thread for minutes (650s rounds, syncfs
+    timeouts, in-flight action timeouts).
+    """
+    js_content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "const PLAY_SEARCH_EXHAUSTIVE_MAX_HAND = 13;" in js_content
+    assert "const PLAY_SEARCH_POOL_MAX = 12;" in js_content
+    assert "const PLAY_SEARCH_EVAL_BUDGET = 3000;" in js_content
+
+    body = js_content.split("function findBestPlays(state) {", 1)[1]
+    # The memo must key on the whole scoring context and be consulted first.
+    assert "findBestPlays._cache" in body
+    assert "if (searchCache.sig === searchSig && searchCache.plays) return searchCache.plays;" in body
+    # Enumeration must walk the pruned pool, never the raw hand, and honour the
+    # evaluation budget.
+    assert "for (let i = start; i < searchN; i++)" in body
+    assert "combine(i + 1, [...chosen, searchHand[i]])" in body
+    assert "evals > PLAY_SEARCH_EVAL_BUDGET" in body
+    assert "Pruned play search: hand=" in body
+    # The pool must protect each structure explicitly, not just card values.
+    assert "flushSuit" in body
+    assert "runRanks" in body
+
+
 def test_autopilot_escapes_a_wedged_booster_pack():
     """The AutoPilot must have an escape hatch for a pack that never opened."""
     js_content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
-
     assert "window.executeForceLeavePack" in js_content
     assert 'fn("force_leave_pack")' in js_content
 

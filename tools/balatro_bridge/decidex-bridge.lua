@@ -814,12 +814,40 @@ end
   nil into G.STATE (observed: repair_nil_state firing 10+ times over 15s
   as staggered duplicate restores kept re-nil-ing it).
 ]]
+--[[
+  Refuse to build the blind-select UI outside BLIND_SELECT.
+
+  Game:update_blind_select queues the builder inside two nested events
+  (game.lua:3254-3290). A booster pack opened around the transition keeps the
+  queue blocked past the state change, so the builder lands while the pack is
+  on screen. It then creates a blind-select box and rewrites
+  blind_states[on_deck] to 'Select' -- un-defeating the blind just beaten --
+  and its own follow-up event crashes on the prompt box
+  (UI_definitions.lua:1435). Vanilla only ever shows this box in
+  BLIND_SELECT, so refusing the build there is safe and leaves the pack UI
+  alone; the box is built normally when BLIND_SELECT is actually entered.
+]]
+local function install_blind_select_build_guard()
+  if not (G and G.UIT and create_UIBox_blind_select) then return false end
+  if _G._decidex_blind_build_guarded then return false end
+  _G._decidex_blind_build_guarded = true
+  local orig = create_UIBox_blind_select
+  create_UIBox_blind_select = function(...)
+    if G.STATES and G.STATE ~= G.STATES.BLIND_SELECT then
+      print("[DecideX Blind Guard] refused blind-select build in " ..
+        current_state_name())
+      return {n = G.UIT.ROOT, config = {align = 'cm', colour = G.C.CLEAR, padding = 0.03}, nodes = {}}
+    end
+    return orig(...)
+  end
+  return true
+end
+
 local function install_end_consumeable_dedup()
   if not (G and G.FUNCS and G.FUNCS.end_consumeable) then return false end
   if _G._decidex_end_consumeable_dedup then return false end
   _G._decidex_end_consumeable_dedup = true
-  local orig = G.FUNCS.end_consumeable
-  G.FUNCS.end_consumeable = function(e, delayfac)
+  local orig = G.FUNCS.end_consumeable  G.FUNCS.end_consumeable = function(e, delayfac)
     local now = (love.timer and love.timer.getTime()) or os.clock()
     if _G._decidex_last_end_consumeable and (now - _G._decidex_last_end_consumeable) < 1.5 then
       return nil
@@ -1258,6 +1286,30 @@ local function force_advance_to_shop()
         if ease_dollars then ease_dollars(G.GAME.current_round.dollars) end
       end
     end
+    -- Vanilla G.FUNCS.cash_out ends with this blind-ante tail
+    -- (button_callbacks.lua:2964-2969). Short-circuiting straight to SHOP
+    -- used to leave a Boss win's blind_states at Small=Big=Boss='Defeated';
+    -- create_UIBox_blind_select() then falls through its "Small? Big? else
+    -- Boss" ladder and offers the SAME boss again at the new ante, with
+    -- blind_ante/blind_tags never refreshed (observed live: ante 2
+    -- re-offering bl_psychic, then ante 3 re-offering bl_pillar).
+    if G.GAME then
+      local resets = G.GAME.round_resets
+      local states = resets and resets.blind_states
+      if resets and states and states.Boss == 'Defeated' then
+        resets.blind_ante = resets.ante
+        if resets.blind_tags and type(get_next_tag_key) == 'function' then
+          resets.blind_tags.Small = get_next_tag_key()
+          resets.blind_tags.Big = get_next_tag_key()
+        end
+      end
+      if type(reset_blinds) == 'function' then
+        local ok_reset, err_reset = pcall(reset_blinds)
+        if not ok_reset then
+          print("[DecideX Blind Guard] reset_blinds failed: " .. tostring(err_reset))
+        end
+      end
+    end
     G.STATE = G.STATES.SHOP
     if G.GAME then
       G.GAME.shop_free = nil
@@ -1268,6 +1320,176 @@ local function force_advance_to_shop()
     _G._round_eval_enter_time = nil
   end)
   return true
+end
+
+-- Remember which blind this run actually played, and in which ante. Keyed
+-- weakly by G.GAME so a fresh run or a loaded save starts without a record;
+-- ante is kept because a blind is only "just played" inside the ante it was
+-- played in (see last_played_blind_type).
+local function note_played_blind(key)
+  if not (G and G.GAME and key) then return end
+  local store = _G._decidex_played_by_game
+  if not store then
+    store = setmetatable({}, { __mode = 'k' })
+    _G._decidex_played_by_game = store
+  end
+  local resets = G.GAME.round_resets
+  store[G.GAME] = {
+    key = key,
+    ante = resets and resets.ante,
+    round = G.GAME.round,
+  }
+end
+
+-- Re-derive "this blind is beaten" from the blind that was actually played.
+--
+-- Vanilla end_round() marks the blind 'Defeated' by comparing
+-- G.GAME.round_resets.blind against the G.P_BLINDS prototypes
+-- (functions/state_events.lua:258-268). When that identity is lost -- a
+-- bridge-driven select, a resumed save, an end_round event chain cleared by
+-- a recovery path -- the mark silently never lands. blind_on_deck is then
+-- recomputed from stale states, so the SAME blind is offered again while
+-- G.GAME.round climbs: observed live as 17 Big blinds at ante 1 over 1500s,
+-- Boss never faced, ante never advanced and therefore no possible GAME_OVER
+-- (a run that can never end). The mark is idempotent, so this runs once on
+-- entering ROUND_EVAL and only when the state is actually missing.
+local function ensure_played_blind_defeated()
+  if not (G and G.GAME and G.STATES and G.STATE == G.STATES.ROUND_EVAL) then return end
+  local resets = G.GAME.round_resets
+  local states = resets and resets.blind_states
+  local blind = G.GAME.blind
+  if not (states and blind and blind.get_type) then return end
+  local ok_type, blind_type = pcall(function() return blind:get_type() end)
+  if not ok_type or not blind_type then return end
+  local key = (blind_type == 'Small' and 'Small') or (blind_type == 'Big' and 'Big') or 'Boss'
+  note_played_blind(key)
+  if states[key] == 'Defeated' then return end
+  local previous = states[key]
+  states[key] = 'Defeated'
+  print("[DecideX Blind Guard] marked " .. key .. " Defeated (was " ..
+    tostring(previous) .. ", blind=" .. tostring(blind.key) .. ")")
+end
+
+-- Vanilla's blind-select ladder (functions/UI_definitions.lua:1441-1443).
+local function blind_ladder(states)
+  local function skipped(v)
+    return v == 'Defeated' or v == 'Skipped' or v == 'Hide'
+  end
+  if not skipped(states.Small) then return 'Small' end
+  if not skipped(states.Big) then return 'Big' end
+  return 'Boss'
+end
+
+-- Which blind did this run just finish? Only a blind recorded at ROUND_EVAL in
+-- the CURRENT ante counts: round_resets.blind keeps the last played blind
+-- across the ante rollover, so after reset_blinds() it still names the old
+-- Boss while the ladder legitimately offers the new ante's Small blind (and,
+-- when both Small and Big are skipped, that Boss again). The old identity
+-- test mistook those for a stale re-offer and marked the unplayed Boss
+-- 'Defeated' -- 17 times in one blind select, observed live.
+local function last_played_blind_type()
+  local store = _G._decidex_played_by_game
+  local rec = store and G.GAME and store[G.GAME]
+  local resets = G.GAME and G.GAME.round_resets
+  if not (rec and resets) then return nil end
+  if rec.ante ~= resets.ante then return nil end
+  return rec.key
+end
+
+local function drop_blind_select_ui(reason)
+  if G.blind_select and not G.blind_select.REMOVED then
+    pcall(function() G.blind_select:remove() end)
+  end
+  G.blind_select = nil
+  for _, opt in pairs(G.blind_select_opts or {}) do
+    if opt and not opt.REMOVED then
+      pcall(function() opt:remove() end)
+    end
+  end
+  G.blind_select_opts = nil
+  if G.blind_prompt_box and not G.blind_prompt_box.REMOVED then
+    pcall(function() G.blind_prompt_box:remove() end)
+  end
+  G.blind_prompt_box = nil
+  if reason then
+    -- A wedged pack can leave several late builds queued; report at most one
+    -- line per 5s so the production log stays readable.
+    local now = (love.timer and love.timer.getTime()) or os.clock()
+    if not _G._blind_drop_last_print or now - _G._blind_drop_last_print > 5.0 then
+      _G._blind_drop_last_print = now
+      print("[DecideX Blind Guard] dropped blind-select UI (" .. reason .. ")")
+    end
+  end
+end
+
+-- Keep blind progression monotonic while the blind-select UI is up.
+--
+-- Vanilla queues the blind-select builder inside two nested events
+-- (game.lua:3254-3290). A pack overlay blocks that queue, so the builder can
+-- land in the MIDDLE of the next round, when blind_states[on_deck] is
+-- 'Current': the ladder then re-picks the blind that was just beaten and
+-- create_UIBox_blind_choice() rewrites its state to 'Select'
+-- (UI_definitions.lua:1489), un-defeating it. From then on every ladder run
+-- picks that same blind, G.GAME.round climbs, the Boss is never faced and the
+-- ante never advances -- observed live as rounds 3..8 all facing the same Big
+-- blind at ante 1 (a run that cannot end). Two invariants restore progress:
+-- the blind just played is 'Defeated' at blind select, and blind_on_deck is
+-- exactly what the vanilla ladder derives from the (repaired) states.
+local function repair_blind_select_progress()
+  if not (G and G.GAME and G.STATES and G.STATE == G.STATES.BLIND_SELECT) then return end
+  -- facing_blind means G.FUNCS.select_blind already accepted the pick: it has
+  -- just written blind_states[on_deck] = 'Current' and the round starts in the
+  -- same event pass. Repairing here would mistake that fresh 'Current' for a
+  -- blind that was beaten and skip the blind the player just chose.
+  if G.GAME.facing_blind then return end
+  local resets = G.GAME.round_resets
+  local states = resets and resets.blind_states
+  if not states then return end
+  local changes = {}
+  local rebuilt_needed = false
+  local on_deck = G.GAME.blind_on_deck
+
+  local function mark_defeated(key, why)
+    changes[#changes + 1] = key .. "=" .. tostring(states[key]) .. "->Defeated" .. (why or "")
+    states[key] = 'Defeated'
+    rebuilt_needed = true
+  end
+
+  -- create_UIBox_blind_choice() only ever marks the blind it is offering, so a
+  -- 'Select' on any other blind is a leftover from a delayed build (vanilla
+  -- queues the builder inside two nested events; a pack overlay can land it in
+  -- the middle of the next round).
+  if on_deck ~= nil then
+    for _, key in ipairs({ 'Small', 'Big', 'Boss' }) do
+      local v = states[key]
+      if (v == 'Select' or v == 'Current') and key ~= on_deck then
+        mark_defeated(key)
+      end
+    end
+  end
+  -- ...and the offered blind must not be the one this ante just played. The
+  -- record is per-ante on purpose: skipping both blinds legitimately re-offers
+  -- the previous ante's Boss, and round_resets.blind still names it then.
+  local last = last_played_blind_type()
+  if last and last == on_deck and (states[last] == 'Select' or states[last] == 'Current') then
+    mark_defeated(last, " (already played)")
+  end
+  local expected = blind_ladder(states)
+  if G.GAME.blind_on_deck ~= expected then
+    changes[#changes + 1] = "on_deck " .. tostring(G.GAME.blind_on_deck) .. "->" .. expected
+    -- A non-nil on_deck means an earlier builder already bound its options to
+    -- the wrong blind. nil is the pre-build state (or a fresh run): the box
+    -- either does not exist yet or was built from this same ladder.
+    if G.GAME.blind_on_deck ~= nil then rebuilt_needed = true end
+    G.GAME.blind_on_deck = expected
+  end
+  if #changes == 0 then return end
+  print("[DecideX Blind Guard] blind select repaired: " .. table.concat(changes, ", ") ..
+    " (round=" .. tostring(G.GAME.round) .. ", ante=" .. tostring(resets.ante) .. ")")
+  if not rebuilt_needed then return end
+  drop_blind_select_ui("rebuilding for repaired on_deck")
+  -- The watcher rebuilds in the same frame when the enter stamp is old.
+  _G._blind_select_enter_time = ((love.timer and love.timer.getTime()) or os.clock()) - 10
 end
 
 local function find_next_round_button()
@@ -2004,6 +2226,18 @@ local function check_and_emit_state()
     LAST_STATE_NUM = G.STATE
   end
 
+  -- A delayed blind-select build can leave a blind-select UI alive outside
+  -- BLIND_SELECT; repair_nil_state() would then infer BLIND_SELECT from it and
+  -- abandon whatever is actually on screen (observed: a pack). Vanilla only
+  -- ever shows this UI in BLIND_SELECT, so anything else is leftover.
+  if G.STATE ~= G.STATES.BLIND_SELECT and G.blind_select and not G.blind_select.REMOVED then
+    drop_blind_select_ui("stale UI in " .. current_state_name())
+  end
+  local ok_blind_repair, err_blind_repair = pcall(repair_blind_select_progress)
+  if not ok_blind_repair then
+    print("[DecideX Blind Guard] repair failed: " .. tostring(err_blind_repair))
+  end
+
   if G.STATE == G.STATES.SELECTING_HAND then
     LAST_SHOP_SIG = ""
     if G.GAME and G.GAME.current_round and G.GAME.current_round.hands_left and G.GAME.current_round.hands_left <= 0 then
@@ -2144,6 +2378,13 @@ local function check_and_emit_state()
     if state_changed then
       G.cashing_out = false
       _G._round_eval_enter_time = now
+      -- On the entry frame vanilla has already declared the round won, but
+      -- cash_out has not run yet, so a missing 'Defeated' mark is safe to
+      -- repair here (never after cash_out's reset_blinds()).
+      local ok_guard, err_guard = pcall(ensure_played_blind_defeated)
+      if not ok_guard then
+        print("[DecideX Blind Guard] guard failed: " .. tostring(err_guard))
+      end
     end
     if G.cashing_out and _G._last_cash_out_time and (now - _G._last_cash_out_time > 1.8) then
       G.cashing_out = false
@@ -3133,6 +3374,10 @@ local function decidex_maintenance()
 
   -- A Moveable aligned to a dead major aborts G:update every frame.
   pcall(install_align_to_major_guard)
+
+  -- A delayed blind-select build inside a pack rewrites blind_states and
+  -- crashes its own prompt-box event (see install_blind_select_build_guard).
+  pcall(install_blind_select_build_guard)
 
   -- Duplicate pack exits queue duplicate state-restore events that write
   -- nil into G.STATE (staggered over seconds).

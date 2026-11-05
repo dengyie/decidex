@@ -34,6 +34,18 @@ def positive_viewport(name: str, default: str) -> dict[str, int]:
     return {"width": width, "height": height}
 
 
+def scale_dwell_budget(budget: float, hand_size: int) -> float:
+    """Stretch a dwell budget for oversized hands, capped at 2x.
+
+    Scoring animations and decision work grow with the number of cards held;
+    past ~12 cards a healthy state can legitimately outlive the normal budget.
+    Without this, an endless run with a 49-card hand reports "slow" as
+    "wedged" (observed: 3 false stalls in one 2-game soak).
+    """
+    extra = max(0, int(hand_size or 0) - 12)
+    return min(budget * 2.0, budget * (1.0 + extra * 0.04))
+
+
 # Install after the page's app.js has defined onBalatroStateUpdate and before
 # AutoPilot is enabled. It counts terminal *edges*, not snapshots, so a busy
 # browser cannot make Python miss a GAME_OVER/GAME_WON transition.

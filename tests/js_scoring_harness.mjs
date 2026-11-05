@@ -71,6 +71,10 @@ const factory = new Function(parts.join("\n") + "\n" +
   "return { RANK_NUM, RANK_VALUES, POKER_HANDS, isStraight, getScoringCards, evaluateHandScore, findBestPlays, findBestDiscards, arbitrateAction, detectConstraints };");
 const api = factory();
 
+// stdout carries the JSON result only: decision-engine diagnostics (e.g. the
+// pruned-search notice) must not corrupt it.
+console.log = (...args) => process.stderr.write(args.join(" ") + "\n");
+
 const cases = JSON.parse(readFileSync(0, "utf8"));
 const out = [];
 for (const c of cases) {

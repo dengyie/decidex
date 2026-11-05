@@ -32,6 +32,7 @@ from harness_support import (
     TERMINAL_LATCH_SCRIPT,
     positive_finite_float,
     positive_viewport,
+    scale_dwell_budget,
 )
 
 BASE_URL = os.environ.get("PROBE_URL", "https://balatro.mangoqwq.com/")
@@ -262,7 +263,10 @@ async def run():
                 except Exception as e:
                     print(f"[Probe:JS] diag failed: {e}", flush=True)
             dwell = time.monotonic() - probe.state_since
-            budget = DWELL_BUDGETS.get(sname, DEFAULT_BUDGET)
+            # Oversized hands make healthy states legitimately slower; scale the
+            # budget so a big-hand round is not reported as a wedge.
+            hand_n = len(st.get("hand") or []) if isinstance(st.get("hand"), list) else 0
+            budget = scale_dwell_budget(DWELL_BUDGETS.get(sname, DEFAULT_BUDGET), hand_n)
             if dwell > budget * STALL_GRACE and not probe.stall_dumped:
                 probe.stall_dumped = True
                 await probe.on_stall(page, sname, dwell, budget, t)

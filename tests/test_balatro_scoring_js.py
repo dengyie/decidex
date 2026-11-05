@@ -11,6 +11,7 @@ drifts from the game's actual math fails loudly here first.
 import json
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -242,6 +243,69 @@ def run_cases(cases):
     if proc.returncode != 0:
         raise AssertionError(f"harness failed: {proc.stderr.decode(errors='replace')[:500]}")
     return {entry["name"]: entry for entry in json.loads(proc.stdout.decode())}
+
+
+def _big_state(hand, **extra):
+    state = {
+        "state_name": "SELECTING_HAND",
+        "hands_left": 2,
+        "discards_left": 0,
+        "money": 10,
+        "jokers": [],
+        "blind": {"chips": 200000, "scored": 0, "type": "big", "name": "Big Blind"},
+        "hand": hand,
+        "deck_count": 52,
+        "starting_deck_size": 52,
+        "deck_cards_total": 52,
+        "tarots_used": 0,
+    }
+    state.update(extra)
+    return state
+
+
+# Endless runs grow the hand to 40+ cards, where C(n,5) is millions of scorings
+# per call and used to freeze the browser main thread for minutes. These cases
+# pin the bounded search: it must stay fast and still find the structural hand.
+LARGE_HAND_CASES = [
+    {
+        "name": "large_hand_quad",
+        "fn": "findBestPlays",
+        "args": [_big_state([
+            card("J", "S", 0), card("J", "H", 1), card("J", "D", 2), card("J", "C", 3),
+            card("2", "S", 4), card("3", "D", 5), card("4", "H", 6), card("5", "C", 7),
+            card("6", "S", 8), card("7", "D", 9), card("8", "H", 10), card("9", "C", 11),
+            card("10", "S", 12), card("A", "D", 13), card("K", "H", 14), card("Q", "C", 15),
+            card("2", "H", 16), card("3", "C", 17), card("5", "S", 18), card("7", "C", 19),
+        ])],
+    },
+    {
+        "name": "large_hand_flush",
+        "fn": "findBestPlays",
+        "args": [_big_state([
+            card("2", "H", 0), card("4", "H", 1), card("6", "H", 2), card("8", "H", 3), card("10", "H", 4),
+            card("3", "S", 5), card("5", "S", 6), card("7", "S", 7), card("9", "S", 8), card("J", "S", 9),
+            card("2", "D", 10), card("5", "D", 11), card("8", "D", 12), card("J", "D", 13), card("K", "D", 14),
+            card("3", "C", 15), card("6", "C", 16), card("9", "C", 17), card("Q", "C", 18), card("A", "C", 19),
+        ])],
+    },
+]
+
+
+def test_large_hand_search_is_pruned_and_bounded():
+    started = time.monotonic()
+    got = run_cases(LARGE_HAND_CASES)
+    elapsed = time.monotonic() - started
+    assert elapsed < 5.0, f"large-hand search took {elapsed:.1f}s; pruning is not bounding it"
+
+    quad = got["large_hand_quad"]
+    assert quad["ok"], f"large_hand_quad raised: {quad.get('error')}"
+    assert quad["result"][0]["handName"] == "Four of a Kind", quad["result"][0]
+
+    flush = got["large_hand_flush"]
+    assert flush["ok"], f"large_hand_flush raised: {flush.get('error')}"
+    top = flush["result"][0]
+    assert top["handName"] == "Flush", top
+    assert len({c["suit"] for c in top["cards"]}) == 1, top["cards"]
 
 
 @pytest.fixture(scope="module")

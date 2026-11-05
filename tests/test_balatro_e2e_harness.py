@@ -15,6 +15,7 @@ from harness_support import (  # noqa: E402
     TERMINAL_LATCH_SCRIPT,
     positive_finite_float,
     positive_viewport,
+    scale_dwell_budget,
 )
 
 
@@ -73,3 +74,22 @@ def test_terminal_latch_counts_edges_and_retains_events():
     assert [event["seq"] for event in latch["events"]] == [1, 2, 3]
     assert [event["state"] for event in latch["events"]] == ["GAME_OVER", "GAME_WON", "UNKNOWN"]
     assert payload["updates"] == ["MENU", "GAME_OVER", "GAME_OVER", "MENU", "GAME_WON", "GAME_WON", "MENU", "UNKNOWN"]
+
+
+@pytest.mark.parametrize(
+    "hand_size,expected_factor",
+    [
+        (0, 1.0),
+        (8, 1.0),
+        (12, 1.0),
+        (20, 1.32),
+        (49, 2.0),
+    ],
+)
+def test_scale_dwell_budget_stretches_for_oversized_hands(hand_size, expected_factor):
+    """A big hand is slow, not wedged: budgets grow (capped at 2x)."""
+    assert scale_dwell_budget(90, hand_size) == pytest.approx(90 * expected_factor)
+
+
+def test_scale_dwell_budget_never_shrinks():
+    assert scale_dwell_budget(75, -3) == 75
