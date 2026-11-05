@@ -515,6 +515,29 @@ def test_frontend_arbitration_and_autopilot():
     assert f"love.js?v={asset_num}" in html_content
 
 
+def test_app_js_downloader_uses_short_lived_range_chunks():
+    """Cold-start large-file download must not rely on one long-lived stream.
+
+    The Cloudflare edge (and some transparent proxies) kill big HTTP/2
+    transfers mid-flight; a full-file retry then re-enters the same doomed
+    long stream and the progress bar freezes -- the v127 production probe sat
+    at 26.5MB through hours of "Stream blip" while short ranged reads over
+    the very same link delivered fine. Every request must therefore be
+    capped to a bounded chunk (Range resume picks up exactly at the break),
+    and attempts plus wall-clock must be bounded so a dead link fails loudly
+    instead of hanging the loader forever.
+    """
+    js_content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    assert "const DOWNLOAD_CHUNK_SIZE = 8 * 1024 * 1024;" in js_content
+    assert "const DOWNLOAD_MAX_ATTEMPTS = 120;" in js_content
+    assert "const DOWNLOAD_TOTAL_BUDGET_MS = 1800000;" in js_content
+    assert 'Range": `bytes=${loaded}-${loaded + DOWNLOAD_CHUNK_SIZE - 1}`' in js_content
+    assert "if (loaded - requestStart >= DOWNLOAD_CHUNK_SIZE)" in js_content
+    assert "await reader.cancel();" in js_content
+    assert "Download budget exceeded:" in js_content
+    assert "Download incomplete:" in js_content
+
+
 def test_coordinate_mapping_patches():
     # Verify love.js letterbox/pillarbox coordinate patch
     love_js = WEB_DIR / "love.js"

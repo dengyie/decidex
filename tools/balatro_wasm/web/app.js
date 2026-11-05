@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56364032;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v127";
+  const ASSET_VERSION = "v128";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=127";
-  const ASSET_WASM_URL = "love.wasm.bin?v=127";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=128";
+  const ASSET_WASM_URL = "love.wasm.bin?v=128";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -664,6 +664,7 @@ end
         let chunks = [];
         let total = initialTotal;
         let attempts = 0;
+        const startedAt = Date.now();
 
         // A stalled connection must not hang the loader forever. Without a
         // deadline the retry fetch() can sit unresolved indefinitely (the
@@ -671,10 +672,27 @@ end
         // frozen at the last successful offset with no error shown.
         const STALL_TIMEOUT_MS = 30000;
 
-        while (loaded < total && attempts < 40) {
+        // Long-lived single streams are what actually breaks on hostile
+        // paths: the Cloudflare edge and some transparent proxies kill big
+        // HTTP/2 transfers mid-flight (ERR_HTTP2_PROTOCOL_ERROR), and a
+        // full-file retry then re-enters the same doomed long stream -- the
+        // v127 production probe sat at 26.5MB through hours of blips while
+        // short ranged reads over the very same link delivered fine. Capping
+        // every request at DOWNLOAD_CHUNK_SIZE keeps each connection short;
+        // a break only costs the bytes since the last resume point, and the
+        // next Range request picks up exactly there. Attempts and wall-clock
+        // are bounded so a dead link fails loudly instead of hanging.
+        const DOWNLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
+        const DOWNLOAD_MAX_ATTEMPTS = 120;
+        const DOWNLOAD_TOTAL_BUDGET_MS = 1800000;
+
+        while (loaded < total && attempts < DOWNLOAD_MAX_ATTEMPTS) {
+          if (Date.now() - startedAt > DOWNLOAD_TOTAL_BUDGET_MS) {
+            throw new Error(`Download budget exceeded: ${loaded}/${total} bytes after ${Math.round((Date.now() - startedAt) / 1000)}s`);
+          }
           attempts++;
           try {
-            const headers = loaded > 0 ? { "Range": `bytes=${loaded}-` } : {};
+            const headers = loaded > 0 ? { "Range": `bytes=${loaded}-${loaded + DOWNLOAD_CHUNK_SIZE - 1}` } : {};
             const controller = new AbortController();
             const stallTimer = setTimeout(() => controller.abort(), STALL_TIMEOUT_MS);
             let res;
@@ -705,6 +723,9 @@ end
               }
             }
 
+            // Captured after the 200-reset above so the chunk cap counts
+            // from wherever this connection actually starts.
+            const requestStart = loaded;
             const reader = res.body.getReader();
             while (true) {
               // Per-read deadline: a socket that stays open but stops
@@ -728,7 +749,16 @@ end
               chunks.push(result.value);
               loaded += result.value.length;
               onProgress(loaded, total);
+              if (loaded - requestStart >= DOWNLOAD_CHUNK_SIZE) {
+                // Chunk satisfied: deliberately close this connection and
+                // let the next loop iteration open a fresh short ranged
+                // request, instead of streaming one connection for the whole
+                // remaining file.
+                try { await reader.cancel(); } catch (_) {}
+                break;
+              }
             }
+            console.log(`[DecideX Download] chunk done at ${(loaded / 1048576).toFixed(1)}MB / ${(total / 1048576).toFixed(1)}MB (attempt ${attempts})`);
           } catch (e) {
             console.warn(`[DecideX Download] Stream blip at ${(loaded / 1048576).toFixed(1)}MB / ${(total / 1048576).toFixed(1)}MB, resuming in 1s...`, e);
             if (loaded >= total) break;
