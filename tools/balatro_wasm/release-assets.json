@@ -6,7 +6,7 @@
       "filename": "balatro.love",
       "source": "artifact://balatro-v1.0.0.love",
       "min_size": 50000000,
-      "sha256": "0d15c5f059fe282d9a9790ea7fe96c676237d224dc111e7a299a4eff37a1750a"
+      "sha256": "03d34eeb7c10f003c12fd6b34bc58ff0d1334f0bff74b2d1959a8dfc4f9ddd1e"
     },
     {
       "filename": "love.wasm",

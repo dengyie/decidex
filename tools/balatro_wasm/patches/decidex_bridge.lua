@@ -1422,6 +1422,98 @@ local function drop_blind_select_ui(reason)
   end
 end
 
+-- Generic stale-UI sweep: every UIBox global must be removed when the game
+-- leaves the state that owns it.
+--
+-- Vanilla owns these removals itself (game.lua: update_shop/update_hand_played/
+-- update_draw_to_hand/update_new_round/update_blind_select/update_round_eval
+-- all start with `if self.shop then self.shop:remove(); self.shop = nil end`;
+-- G.FUNCS.cash_out removes G.round_eval at button_callbacks.lua:2940;
+-- end_consumeable removes G.booster_pack at 2591) -- but on this WASM build
+-- those removals run inside queued events that the Event Guard drops when a
+-- sibling crashed. The global then survives the transition and its UIBox
+-- keeps rendering ON TOP of the next stage: observed as the shop panel still
+-- covering the hand in BLIND_SELECT, and the round-eval panel stuck over the
+-- shop. Vanilla never shows these UIs in any other state, so "alive while the
+-- state is different" is always leftover, never a legitimate draw.
+--
+-- Exceptions keep the sweep conservative:
+--   - G.shop stays during ROUND_EVAL/HAND_PLAYED/DRAW_TO_HAND/NEW_ROUND: the
+--     next-blind flow rebuilds it legitimately inside the shop-adjacent
+--     transition (vanilla only removes it when those updates run, which they
+--     do on their own schedule).
+--   - A wipe/load lock means a screen transition is mid-flight; removing
+--     UIBoxes then desyncs G.CONTROLLER (same guard as the blind-select
+--     rebuild at line 2408).
+--   - A 1.2s settle window after a state change lets vanilla's own removal
+--     events run first; we only clean up what they left behind.
+local function sweep_stale_ui()
+  if not (G and G.I and G.I.UIBOX) then return end
+  local now = (love.timer and love.timer.getTime()) or os.clock()
+  if G.CONTROLLER and G.CONTROLLER.locks and (G.CONTROLLER.locks.wipe or G.CONTROLLER.locks.load) then
+    return
+  end
+  if _G._sweep_state_enter == nil or (LAST_STATE_NUM and G.STATE ~= LAST_STATE_NUM) then
+    _G._sweep_state_enter = now
+    return
+  end
+  if now - _G._sweep_state_enter < 1.2 then return end
+
+  local victims = {}
+  -- G.shop is vanilla-only in SHOP (game.lua:3059), but a pack legitimately
+  -- opens ON TOP of a live shop and returns to it on exit (vanilla's
+  -- update_shop keeps G.shop while TAROT/PLANET/SPECTRAL/STANDARD/BUFFOON
+  -- pack states run, and end_consumeable slides the SAME shop back in at
+  -- button_callbacks.lua:2603). PLAY_TAROT (using a consumable) can also
+  -- happen over the shop. Sweep it only in truly shop-less states.
+  local shop_ok = (G.STATE == G.STATES.SHOP) or is_pack_state() or
+    (G.STATE == G.STATES.PLAY_TAROT) or (G.STATE == G.STATES.ROUND_EVAL) or
+    (G.STATE == G.STATES.HAND_PLAYED) or (G.STATE == G.STATES.DRAW_TO_HAND) or
+    (G.STATE == G.STATES.NEW_ROUND)
+  if G.shop and not G.shop.REMOVED and not shop_ok then
+    victims[#victims + 1] = G.shop
+    G.shop = nil
+  end
+  -- G.round_eval is vanilla-only in ROUND_EVAL (game.lua:3298) and during the
+  -- cash-out animation (its removal event is queued there).
+  if G.round_eval and not G.round_eval.REMOVED and G.STATE ~= G.STATES.ROUND_EVAL and
+     not G.cashing_out then
+    victims[#victims + 1] = G.round_eval
+    G.round_eval = nil
+  end
+  -- G.booster_pack outside pack states is handled by sweep_pack_ui_invariants
+  -- (nils G.pack_cards too); do not double-remove here.
+  if G.blind_select and not G.blind_select.REMOVED and G.STATE == G.STATES.BLIND_SELECT then
+    -- Handled by drop_blind_select_ui's inverse (stale check above); nothing here.
+  end
+  -- The shop sign rides along with the shop panel; vanilla removes it in
+  -- toggle_shop (button_callbacks.lua:2508).
+  if G.SHOP_SIGN and not G.SHOP_SIGN.REMOVED and G.shop == nil and not shop_ok then
+    victims[#victims + 1] = G.SHOP_SIGN
+    G.SHOP_SIGN = nil
+  end
+
+  if #victims == 0 then return end
+  for _, ub in ipairs(victims) do
+    pcall(function() ub:remove() end)
+  end
+  -- Reset the settle clock so a second leak found next frame still gets the
+  -- full settle window before the next removal (prevents rapid-fire sweeps).
+  _G._sweep_state_enter = now
+  if not _G._sweep_last_print or now - _G._sweep_last_print > 5.0 then
+    _G._sweep_last_print = now
+    print("[DecideX UI Sweep] removed " .. #victims ..
+      " stale UIBox(es) in " .. current_state_name())
+  end
+  -- Force a fresh snapshot so the client immediately re-decides on the
+  -- cleaned screen instead of acting on the stale visual.
+  LAST_HAND_SIG = ""
+  LAST_SHOP_SIG = ""
+  LAST_BLIND_SIG = ""
+  LAST_EVAL_SIG = ""
+  LAST_PACK_SIG = ""
+end
+
 -- Keep blind progression monotonic while the blind-select UI is up.
 --
 -- Vanilla queues the blind-select builder inside two nested events
@@ -2293,6 +2385,10 @@ local function check_and_emit_state()
   if G.STATE ~= G.STATES.BLIND_SELECT and G.blind_select and not G.blind_select.REMOVED then
     drop_blind_select_ui("stale UI in " .. current_state_name())
   end
+  -- Generic sweep for every other cross-stage UI leak (shop panel over the
+  -- next blind, round-eval panel over the shop); full rationale on the
+  -- function.
+  pcall(sweep_stale_ui)
   local ok_blind_repair, err_blind_repair = pcall(repair_blind_select_progress)
   if not ok_blind_repair then
     print("[DecideX Blind Guard] repair failed: " .. tostring(err_blind_repair))

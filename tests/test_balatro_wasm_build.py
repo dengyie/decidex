@@ -5,6 +5,7 @@ Unit and regression tests for Balatro WebAssembly (love.js) build pipeline.
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 import threading
 import urllib.error
@@ -1594,3 +1595,77 @@ def test_bridge_populates_dead_pack_creation():
         chr(10) + "local function populate_empty_pack()", 1)[0]
     assert "_G._pack_rebuilt_at" in reb
     assert 'LAST_PACK_SIG = ""' in reb
+
+
+def test_bridge_sweeps_stale_stage_ui():
+    """v130: "进入下阶段会遗留上阶段的 UI 卡住显示".
+
+    Vanilla removes G.shop in every Game:update_* (game.lua:3042 etc.),
+    G.round_eval in cash_out (button_callbacks.lua:2940) and the shop sign
+    in toggle_shop (2508) -- all inside queued events the Event Guard drops
+    when a sibling crashed. The global then leaks into the next stage and
+    its UIBox keeps rendering on top of it (observed: shop panel over the
+    next blind, round-eval panel stuck over the shop). The bridge must
+    sweep UIBox globals that outlive their state, conservatively.
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    assert "local function sweep_stale_ui()" in content
+    body = content.split("local function sweep_stale_ui()", 1)[1].split(
+        chr(10) + "-- Keep blind progression monotonic", 1)[0]
+    # Screen transitions guard (same wipe/load locks as the blind rebuild).
+    assert "G.CONTROLLER.locks.wipe or G.CONTROLLER.locks.load" in body
+    # 1.2s settle: vanilla's own removal events run first.
+    assert "now - _G._sweep_state_enter < 1.2" in body
+    # G.shop outside SHOP -- but packs open ON TOP of a live shop and return
+    # to it (vanilla end_consumeable slides the same shop back in), so pack
+    # states and PLAY_TAROT must be excluded from the sweep.
+    assert "G.shop and not G.shop.REMOVED" in body
+    assert "local shop_ok = (G.STATE == G.STATES.SHOP) or is_pack_state()" in body
+    assert "(G.STATE == G.STATES.PLAY_TAROT)" in body
+    assert "if G.shop and not G.shop.REMOVED and not shop_ok then" in body
+    # G.round_eval outside ROUND_EVAL, kept during the cash-out animation.
+    assert "G.round_eval and not G.round_eval.REMOVED and G.STATE ~= G.STATES.ROUND_EVAL" in body
+    assert "not G.cashing_out" in body
+    # The shop sign rides along with the panel (vanilla removes it in
+    # toggle_shop, button_callbacks.lua:2508).
+    assert "G.SHOP_SIGN and not G.SHOP_SIGN.REMOVED" in body
+    # Removals are pcall-guarded and the print is throttled.
+    assert 'pcall(function() ub:remove() end)' in body
+    assert "[DecideX UI Sweep] removed " in body
+    assert "now - _G._sweep_last_print > 5.0" in body
+    # A cleaned screen must immediately re-emit to the client.
+    sig_block = body.split("#victims == 0 then return end", 1)[1]
+    for sig in ["LAST_HAND_SIG", "LAST_SHOP_SIG", "LAST_BLIND_SIG", "LAST_EVAL_SIG", "LAST_PACK_SIG"]:
+        assert f'{sig} = ""' in sig_block, sig
+    # Wired into the emit path (runs per state check, not per frame).
+    emit = content.split("local function check_and_emit_state()", 1)[1].split(
+        chr(10) + "local function decidex_execute_inner", 1)[0]
+    assert "pcall(sweep_stale_ui)" in emit
+
+
+def test_autopilot_transition_pacing_floors():
+    """v130: "自动化太快了，游戏的ui会很卡".
+
+    The 150-350ms scheduling cadence re-entered mid-transition, stacked
+    dispatches onto a main thread still running the previous stage's ease
+    events, and the 100ms no-op unlock re-entry starved it further. The
+    floors must sit above the vanilla transition times (screen wipe ~0.3s,
+    panel slide ~0.5s at GAMESPEED 4).
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    floors = content.split("getDelayForState(sname) {", 1)[1]
+    assert re.search(r'SPLASH"\s*\|\|\s*sname === "MENU"\s*\)\s*return 300;', floors)
+    assert 'if (sname === "BLIND_SELECT") return 400;' in floors
+    assert 'if (sname === "ROUND_EVAL") return 350;' in floors
+    assert 'if (sname === "SHOP") return 400;' in floors
+    assert 'if (sname === "SELECTING_HAND") return 450;' in floors
+    assert 'return 400;' in floors
+    # The no-op unlock re-entry must not be 100ms.
+    assert "const delay = executedAction ? unlockCooldownMs : 250;" in content
+    # The watchdog 350ms nudge must respect the pacing floor instead of
+    # bypassing it.
+    nudge = content.split("// never more than twice per pacing floor", 1)[1].split("}, 350);", 1)[0]
+    assert "sinceStep >= floor" in nudge
+    assert "Math.max(600, AutoPilot.getDelayForState(sname))" in nudge

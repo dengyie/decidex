@@ -508,14 +508,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
-  const EXPECTED_LOVE_SIZE = 56365395;
+  const EXPECTED_LOVE_SIZE = 56366612;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v129";
+  const ASSET_VERSION = "v130";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=129";
-  const ASSET_WASM_URL = "love.wasm.bin?v=129";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=130";
+  const ASSET_WASM_URL = "love.wasm.bin?v=130";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3984,9 +3984,17 @@ end
           return;
         }
 
-        // In actionable states, if idle, nudge execution immediately
+        // In actionable states, if idle, nudge execution immediately — but
+        // never more than twice per pacing floor: the watchdog interval used
+        // to fire executeStep every 350ms regardless of getDelayForState,
+        // bypassing the transition floors during animation ramps.
         if (["SPLASH", "MENU", "BLIND_SELECT", "SELECTING_HAND", "ROUND_EVAL", "SHOP", "TAROT_PACK", "PLANET_PACK", "SPECTRAL_PACK", "STANDARD_PACK", "BUFFOON_PACK"].includes(sname)) {
-          this.executeStep();
+          const sinceStep = now - (AutoPilot._lastNudgeTimestamp || 0);
+          const floor = Math.max(600, AutoPilot.getDelayForState(sname));
+          if (sinceStep >= floor) {
+            AutoPilot._lastNudgeTimestamp = now;
+            this.executeStep();
+          }
         }
       }, 350);
     },
@@ -4006,14 +4014,21 @@ end
       }
     },
 
+    // v130: these floors are deliberately above the vanilla UI transition
+    // times (screen wipe ~0.3s, panel slide-out ~0.5s at GAMESPEED 4). The
+    // earlier 150-350ms cadence re-entered mid-transition, stacked dispatches
+    // onto a main thread still running the previous stage's ease events, and
+    // left the previous stage's UIBox visible into the next stage. Costs ~
+    // 0.3s per hop; recovered by the bridge-side stale-UI sweep not having to
+    // fire and the watchdog not tripping.
     getDelayForState(sname) {
-      if (sname === "SPLASH" || sname === "MENU") return 150;
-      if (sname === "BLIND_SELECT") return 150;
-      if (sname === "ROUND_EVAL") return 180;
-      if (sname === "SHOP") return 220;
-      if (sname === "SELECTING_HAND") return 350;
-      if (["TAROT_PACK", "PLANET_PACK", "SPECTRAL_PACK", "STANDARD_PACK", "BUFFOON_PACK"].includes(sname)) return 300;
-      return 250;
+      if (sname === "SPLASH" || sname === "MENU") return 300;
+      if (sname === "BLIND_SELECT") return 400;
+      if (sname === "ROUND_EVAL") return 350;
+      if (sname === "SHOP") return 400;
+      if (sname === "SELECTING_HAND") return 450;
+      if (["TAROT_PACK", "PLANET_PACK", "SPECTRAL_PACK", "STANDARD_PACK", "BUFFOON_PACK"].includes(sname)) return 400;
+      return 300;
     },
 
     onActionDispatch(action, sequence) {
@@ -5155,8 +5170,11 @@ end
         executedAction = false;
         unlockCooldownMs = 150;
       } finally {
-        // If no action was dispatched, unlock busy immediately so we don't stall
-        const delay = executedAction ? unlockCooldownMs : 100;
+        // If no action was dispatched, unlock busy after the transition
+        // floor instead of instantly: the 100ms no-op re-entry used to
+        // starve the main thread during vanilla wipe/ease events and kept
+        // the previous stage's UI on screen into the next stage.
+        const delay = executedAction ? unlockCooldownMs : 250;
         setTimeout(() => {
           this.busy = false;
           if (this.enabled) {
@@ -5185,7 +5203,7 @@ end
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && AutoPilot.enabled) {
         AutoPilot._actionFailureStreak = 0;
-        AutoPilot.scheduleNextAction(150);
+        AutoPilot.scheduleNextAction(300);
       }
     });
   }
