@@ -563,6 +563,37 @@ def test_bridge_copies_are_in_sync():
     build_mod.check_bridge_copies_in_sync()
 
 
+def test_bridge_records_actual_action_at_execution_time():
+    """§D: play/discard record card identity BEFORE the vanilla animation runs.
+
+    By HAND_PLAYED emit time the selected cards have left G.hand, so the
+    snapshot can never read them from there ("打出 0 张"). The bridge must
+    capture rank/suit/enhancement at execution time and let build_state_json
+    recover the indices by matching against the hand snapshot.
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    # capture_actual records card identity from G.hand.highlighted at the
+    # moment of the action, into _decidex_actual_action.
+    assert "local function capture_actual(kind)" in content
+    assert "_G._decidex_actual_action" in content
+    assert 'capture_actual("play")' in content
+    assert 'capture_actual("discard")' in content
+    # Cleared with the rest of the round lifecycle so a stale record cannot
+    # leak into the next round's snapshots.
+    assert "_G._decidex_actual_action = nil" in content
+
+    # build_state_json backfills actual from the record when no explicit
+    # actual was passed, matching rank+suit (+enhancement first) and storing
+    # 0-BASED indices into the emitted hand array (the consumers' contract:
+    # balatro_web/app.py validates 0 <= idx < len(hand); the state-0002
+    # fixture pairs cards [0..4] with A-K-Q-J-10 of spades).
+    assert "if actual == nil then" in content
+    assert "local rec = _G._decidex_actual_action" in content
+    assert "indices[#indices + 1] = found - 1" in content
+    assert "if complete then" in content
+
+
 def test_bridge_copies_drift_is_detected(tmp_path, monkeypatch):
     """A diverged copy must raise instead of building a stale .love."""
     canonical = build_mod.BRIDGE_COPIES[0]

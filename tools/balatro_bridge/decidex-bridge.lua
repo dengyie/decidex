@@ -1768,6 +1768,58 @@ end
 
 local function build_state_json(actual)
   reset_hand_history_if_needed()
+
+  -- §D actual-action backfill: when no explicit actual action was passed,
+  -- use the one recorded at play/discard execution time. The recorded cards
+  -- left G.hand by the time the HAND_PLAYED/DRAW_TO_HAND snapshot is built,
+  -- so match each recorded card (rank:suit:enhancement) against the hand
+  -- snapshot to recover the ORIGINAL positions. Consumers treat
+  -- actual.cards as 0-BASED indices into the emitted "hand" array (see
+  -- balatro_web/app.py _get_snapshot_meta and the state-0002 fixture), so
+  -- the Lua 1-based position is stored minus one. Only entries whose cards
+  -- are ALL recovered are emitted -- a partial match must not fabricate
+  -- indices. Enhancement is matched exactly first, then ignored as a
+  -- fallback (enhancement names may differ across save/load round-trips).
+  if actual == nil then
+    local rec = _G._decidex_actual_action
+    if rec and type(rec.cards) == "table" and rec.cards[1] then
+      local hand_cards = (G.hand and G.hand.cards) or {}
+      local used = {}
+      local indices = {}
+      local complete = true
+      for _, rc in ipairs(rec.cards) do
+        local found = nil
+        -- First pass: identity + enhancement must both match.
+        for i, c in ipairs(hand_cards) do
+          if not used[i] and c.base and tostring(c.base.value or "") == rc.r
+              and tostring(c.base.suit or "") == rc.s then
+            local ce = (c.ability and c.ability.name) or ""
+            if ce == (rc.e or "") then found = i break end
+          end
+        end
+        -- Second pass: rank+suit alone (enhancement drifted).
+        if not found then
+          for i, c in ipairs(hand_cards) do
+            if not used[i] and c.base and tostring(c.base.value or "") == rc.r
+                and tostring(c.base.suit or "") == rc.s then
+              found = i break
+            end
+          end
+        end
+        if found then
+          used[found] = true
+          indices[#indices + 1] = found - 1
+        else
+          complete = false
+          break
+        end
+      end
+      if complete then
+        actual = { type = tostring(rec.type or ""), cards = indices }
+      end
+    end
+  end
+
   local hand = area_cards(G.hand)
   local jokers = area_cards(G.jokers)
   local cons = area_cards(G.consumeables)
@@ -1864,7 +1916,12 @@ local function build_state_json(actual)
     state_str = "GAME_WON"
   end
   parts[#parts + 1] = '"state_name":' .. jstr(state_str)
-  parts[#parts + 1] = '"actual":' .. (actual and jmap(actual) or "null")
+  -- jmap serializes table values through jstr, which returns "null" for any
+  -- table -- so actual.cards (an array) must be serialized with jtable here,
+  -- exactly like the original action-snapshot emitter did.
+  parts[#parts + 1] = '"actual":' ..
+    (actual and ('{"type":' .. jstr(tostring(actual.type or "")) .. ',"cards":'
+      .. jtable(actual.cards or {}) .. '}') or "null")
 
   local now = (love.timer and love.timer.getTime()) or os.clock()
   local eval_elapsed = _G._round_eval_enter_time and (now - _G._round_eval_enter_time) or 0
@@ -2205,6 +2262,9 @@ local function check_and_emit_state()
     _G._hand_play_saw_hand_played = nil
     _G._hand_discard_in_flight = nil
     _G._hand_discard_saw_draw = nil
+    -- §D: the recorded actual action belongs to the round that just ended;
+    -- a stale record must not leak into the next round's snapshots.
+    _G._decidex_actual_action = nil
   end
 
   -- Watchdog fallback to prevent any permanent lock (generous windows for animations)
@@ -2473,6 +2533,30 @@ local function decidex_execute_inner(action, args)
   if not G then return false, "no G" end
   args = args or {}
 
+  -- §D actual-action backfill: record what was really selected at the
+  -- moment of the action. By the time the snapshot is emitted the selected
+  -- cards have already left G.hand (the play/discard animation moved them
+  -- to G.play/G.discard), so a HAND_PLAYED snapshot could only report an
+  -- empty "actual" -- every history entry degenerated to "打出 0 张"/
+  -- "弃牌 0 张" with no cards, which destroyed the advisor-vs-player
+  -- pairing value. Card identity is captured HERE (rank/suit/enhancement),
+  -- then matched against the emitted hand by build_state_json, so the
+  -- recorded action survives into the snapshot with real cards.
+  local function capture_actual(kind)
+    local picked = {}
+    for _, c in ipairs((G.hand and G.hand.highlighted) or {}) do
+      if c and c.base then
+        picked[#picked + 1] = {
+          r = tostring(c.base.value or ""),
+          s = tostring(c.base.suit or ""),
+          e = (c.ability and c.ability.name) or "",
+        }
+      end
+    end
+    _G._decidex_actual_action = (#picked > 0) and
+      { type = kind, cards = picked } or nil
+  end
+
   if action == "play" or action == "discard" then
     if not (G and G.STATES and G.STATE == G.STATES.SELECTING_HAND) then
       return false, "not in SELECTING_HAND"
@@ -2596,6 +2680,7 @@ local function decidex_execute_inner(action, args)
       if G.FUNCS and G.FUNCS.play_cards_from_highlighted then
         local selected = {}
         for _, card in ipairs(G.hand.highlighted or {}) do selected[#selected + 1] = card end
+        capture_actual("play")
         _G._last_hand_action_time = now
         _G._hand_play_in_flight = true
         _G._hand_play_start_time = now
@@ -2612,6 +2697,7 @@ local function decidex_execute_inner(action, args)
       end
     elseif action == "discard" then
       if G.FUNCS and G.FUNCS.discard_cards_from_highlighted then
+        capture_actual("discard")
         _G._last_hand_action_time = now
         _G._hand_discard_in_flight = true
         _G._hand_discard_start_time = now
