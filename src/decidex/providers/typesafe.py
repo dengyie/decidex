@@ -74,7 +74,7 @@ class TypeSafeJevProvider(BaseInferenceProvider):
         api_keys: Optional[List[str]] = None,
         base_url: Optional[str] = None,
         model: str = "jev-latest",
-        timeout_s: float = 2.0,
+        timeout_s: float = 10.0,
         max_retries: int = 3,
         auto_rotate_on_rate_limit: bool = True,
         auto_quarantine_on_unauthorized: bool = True
