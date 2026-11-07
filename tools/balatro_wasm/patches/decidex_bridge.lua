@@ -935,6 +935,80 @@ local function sweep_pack_ui_invariants()
 end
 
 --[[
+  v131: synchronous revive of the vanilla event queue.
+
+  A pack whose factory event never ran (see pack_stall_watchdog) is stuck
+  because SOME event ahead of it in G.E_MANAGER.queues.base never
+  completes, and EventManager:update's blocked-head rule
+  (engine/event.lua:194-197) then skips every later blockable event
+  forever. One blind `E_MANAGER:update(1/60, true)` kick is not enough —
+  the stuck event survives every pass (probe v131: kick fired, queue
+  unchanged, packs still fell through to rebuild).
+
+  This walks the base queue MANUALLY with vanilla's exact per-event
+  semantics, so the poison is identified precisely:
+    * every event is handled exactly as a natural pass would (pcall +
+      the Event Guard inside Event:handle still apply);
+    * an event whose handle() completes is REMOVED, like vanilla;
+    * a blocking IMMEDIATE event that fails to complete in a synchronous
+      handle is permanent poison — an immediate either completes or never
+      does — and is evicted from the queue (its effects are lost, but an
+      event stuck for 1000+s was already doing nothing; probe v131: the
+      queue head was an immediate created at TOTAL=4.77s, still there at
+      TOTAL=1014s);
+    * everything else (delayed events not yet due, the by-design eternal
+      splash-spin non-blocking immediate at game.lua:2276) is LEFT ALONE.
+
+  Returns 'revived' if the walk made G.pack_cards appear, 'evicted' if a
+  poison event was removed (the chain behind it gets the next pass),
+  'stuck' otherwise.
+]]
+local function kick_pack_queue()
+  local q = G.E_MANAGER and G.E_MANAGER.queues and G.E_MANAGER.queues.base
+  if not q then return "stuck" end
+  G.ARGS.event_manager_update = G.ARGS.event_manager_update or {}
+  local results = G.ARGS.event_manager_update
+  local blocked = false
+  local evicted = false
+  local i = 1
+  while i <= #q do
+    if G.pack_cards then return "revived" end
+    local ev = q[i]
+    if not blocked or not ev.blockable then
+      results.blocking, results.completed, results.time_done, results.pause_skip = false, false, false, false
+      local ok = pcall(ev.handle, ev, results)
+      if ok and not results.pause_skip then
+        if not blocked and results.blocking then blocked = true end
+        if results.completed and results.time_done then
+          table.remove(q, i)
+        else
+          if results.blocking and ev.trigger == "immediate" then
+            -- Permanent poison: a blocking immediate that just failed to
+            -- complete synchronously will fail forever (vanilla's own
+            -- immediate branch has no retry semantics). Evict it.
+            print("[DecideX Pack Watchdog] evicted stuck blocking immediate" ..
+                  " (created_at=" .. tostring(ev.time) ..
+                  ", TOTAL=" .. tostring(G.TIMERS and G.TIMERS.TOTAL) ..
+                  ", blockable=" .. tostring(ev.blockable) .. ")")
+            table.remove(q, i)
+            evicted = true
+          else
+            i = i + 1
+          end
+        end
+      else
+        i = i + 1
+      end
+    else
+      i = i + 1
+    end
+  end
+  if G.pack_cards then return "revived" end
+  if evicted then return "evicted" end
+  return "stuck"
+end
+
+--[[
   Watchdog for the booster-pack states.
 
   Detects "we are in a pack state but the pack UI never appeared" and tries,
@@ -951,6 +1025,7 @@ local function pack_stall_watchdog()
     _G._pack_stall_time = nil
     _G._pack_stall_handled = nil
     _G._pack_rebuild_count = nil
+    _G._pack_kick_count = nil
     -- The empty-escape latch MUST reset here too: it used to reset only
     -- when an area became non-empty, so after one escape the latch stayed
     -- set and every LATER pack with lost creation events wedged forever
@@ -1048,7 +1123,18 @@ local function pack_stall_watchdog()
   end
 
   local stalled_for = now - _G._pack_stall_time
-  if stalled_for < 4.0 then return false end
+  -- v131: 4.0s -> 0.8s. Root cause (probe v131 diag, definitive): the
+  -- pack factory event (game.lua:3333) DOES run but CRASHES inside the
+  -- UIBox definition build (the same UI_definitions/card.lua family the
+  -- Event Guard already drops elsewhere, e.g. :1435 blind_prompt_box) —
+  -- the guard removes the event with completed=true BEFORE
+  -- create_UIBox_*_pack() ever assigns G.pack_cards. The queue is then
+  -- CLEAN (base=1 is the by-design eternal splash-spin event,
+  -- game.lua:2276), so no queue kick can revive a chain that already
+  -- died; rebuild_pack_ui + populate_empty_pack are the actual recovery.
+  -- Healthy native fills surface their area in <0.3s, so 0.8s is a safe
+  -- tripwire: recovery starts ~0.8s into the pack instead of v130's 4s.
+  if stalled_for < 0.8 then return false end
 
   -- Only act once per stall episode.
   if _G._pack_stall_handled then return false end
@@ -1069,6 +1155,61 @@ local function pack_stall_watchdog()
     _G._pack_stall_time = now
     _G._pack_stall_handled = nil
     return true
+  end
+
+  -- 1.5. v131: kick the vanilla event queue before rebuilding anything.
+  --
+  -- Production evidence (v130 deep probe: 79/79 packs stalled; probe_diag
+  -- v126b: `state_complete=true, pack_size=2, queues=base=1` for 4+s):
+  -- the update_<pack> factory event (game.lua:3333, immediate blocking)
+  -- sat in G.E_MANAGER.queues.base behind an event that never completed.
+  -- EventManager:update's blocked-head rule (engine/event.lua:194-197)
+  -- freezes every later blockable event behind it: G.pack_cards never
+  -- appears, STATE_COMPLETE stays true, and every pack went
+  -- stall->rebuild->populate at 6-9s instead of the native ~1s.
+  --
+  -- kick_pack_queue() below walks the base queue itself (vanilla
+  -- semantics), so the stuck event is IDENTIFIED, not guessed: a blocking
+  -- immediate that fails to complete in a synchronous handle() is
+  -- permanent poison (an immediate either completes or never does) and is
+  -- evicted; everything else is left exactly as vanilla would leave it.
+  if G.E_MANAGER and G.E_MANAGER.queues then
+    local outcome = "stuck"
+    local ok_kick, err_kick = pcall(function() outcome = kick_pack_queue() end)
+    if not ok_kick then
+      print("[DecideX Pack Watchdog] queue kick failed: " .. tostring(err_kick))
+      outcome = "stuck"
+    end
+    _G._pack_kick_count = (_G._pack_kick_count or 0) + 1
+    if G.pack_cards then
+      -- Native chain revived: the factory event executed and created the
+      -- area. Card-creation events fire next; do NOT rebuild over them.
+      -- Arm the populate safety net anyway: if the creation events turn
+      -- out to be dead too (they live behind the same broken queue), the
+      -- area would otherwise sit empty for 12s before the escape —
+      -- populate_empty_pack fills it at +0.6s instead.
+      print("[DecideX Pack Watchdog] queue kick revived native pack chain")
+      _G._pack_rebuilt_at = now
+      _G._pack_populated = nil
+      _G._pack_stall_time = nil
+      _G._pack_stall_handled = nil
+      return true
+    end
+    if outcome == "evicted" or (_G._pack_kick_count or 0) < 1 then
+      -- An eviction frees the queue; the factory event behind it needs
+      -- the next pass (natural or forced) to build the area. Give the
+      -- chain that window instead of rebuilding over a possibly-live
+      -- vanilla chain (a rebuild racing the factory event produces a
+      -- second empty area — the wedge the old comments warn about).
+      -- Budget: ONE extra window — the diag showed the queue is usually
+      -- already clean (the factory died earlier), so the window only
+      -- costs 0.8s in the common case and only saves a rebuild in the
+      -- rare true-blockage case.
+      _G._pack_stall_time = now
+      _G._pack_stall_handled = nil
+      return true
+    end
+    print("[DecideX Pack Watchdog] queue kicks exhausted this episode; falling to rebuild")
   end
 
   -- 2. Rebuild the pack UI directly — but only ONCE per pack episode.
@@ -1114,11 +1255,14 @@ end
 -- pack-UI sweep. Guards, in order:
 --   * the pack area held cards this episode (a half-created pack is
 --     transiently empty while its card-creation events are queued);
---   * no multi-choice pending (choices live in the area, so an empty
---     area already implies none — belt and braces);
---   * G.GAME.PACK_INTERRUPT is still set (a sane restore target exists
---     and no queued vanilla close is already in flight);
---   * the empty state is stable for 0.3s (anti-flicker);
+--   * no multi-choice pending: REMOVED in v131 (see the inline comment —
+--     an empty area after seen_nonempty already implies all choices spent,
+--     and the stuck pack_choices on this build made the old guard refuse
+--     to close consumed mega packs);
+--   * G.GAME.PACK_INTERRUPT must be set — REMOVED in v131b (diag build:
+--     rebuilt packs always have it nil at close time; abandon_pack falls
+--     back to the shop on its own);
+--   * the empty state is stable for 0.15s (anti-flicker);
 --   * once per episode.
 local function auto_close_consumed_pack()
   if not is_pack_state() then
@@ -1134,18 +1278,22 @@ local function auto_close_consumed_pack()
     return false
   end
   if not _G._pack_seen_nonempty then return false end
-  if (G.GAME and G.GAME.pack_choices and G.GAME.pack_choices > 1) then return false end
-  -- A rebuilt-but-unpopulated area deserves the populate window first (see
-  -- populate_empty_pack): its refill lands 1.5s after the rebuild, and
-  -- closing now would throw away a recoverable pack.
-  if _G._pack_rebuilt_at and not _G._pack_populated then return false end
-  if not (G.GAME and G.GAME.PACK_INTERRUPT) then return false end
+  -- v131b: the PACK_INTERRUPT refusal is GONE (diag build proved it: on
+  -- every REBUILT+populated pack the interrupt is already nil at close
+  -- time — this episode's abandon_pack cleared it, and vanilla's queued
+  -- 0.3s restore (button_callbacks.lua:2627) consumed whatever the pack
+  -- purchase had set). The guard therefore blocked ONLY the packs that
+  -- most need a silent close, and every refusal cost a client
+  -- force_leave round trip (~0.9s) plus a re-buy loop when the shop
+  -- still had the same pack. abandon_pack already handles a nil
+  -- interrupt: back = PACK_INTERRUPT or G.STATES.SHOP.
   local now = (love.timer and love.timer.getTime()) or os.clock()
+  if _G._pack_rebuilt_at and not _G._pack_populated then return false end
   if not _G._pack_empty_confirm then
     _G._pack_empty_confirm = now
     return false
   end
-  if now - _G._pack_empty_confirm < 0.3 then return false end
+  if now - _G._pack_empty_confirm < 0.15 then return false end
   if _G._pack_auto_closed then return false end
   _G._pack_auto_closed = true
   print("[DecideX Bridge] pack consumed (area empty); auto-closing via abandon_pack")
@@ -1162,6 +1310,37 @@ local function auto_close_consumed_pack()
   return ok
 end
 
+-- Drop cards above the pack size from a bridge-populated pack area.
+--
+-- With populate firing at +0.6s (v131), a vanilla emplace event that was
+-- merely DELAYED (not dead) can still land afterwards: our refilled cards
+-- plus vanilla's originals would exceed pack_size, and the extras sit
+-- unpickable at the end of the area. Trim to pack_size every tick until
+-- the area fits. No-op unless this episode was bridge-populated/kicked.
+local function trim_overfull_pack()
+  if not is_pack_state() then return false end
+  if not (_G._pack_populated or _G._pack_rebuilt_at) then return false end
+  local cards = G.pack_cards and G.pack_cards.cards
+  if not (cards and cards[1]) then return false end
+  local size = tonumber(G.GAME and G.GAME.pack_size) or 2
+  if #cards <= size then return false end
+  local trimmed = 0
+  for i = #cards, size + 1, -1 do
+    local c = cards[i]
+    if c then pcall(function()
+      G.pack_cards:remove_card(c)
+      c:remove()
+    end) end
+    trimmed = trimmed + 1
+  end
+  if trimmed > 0 then
+    print("[DecideX Pack Watchdog] trimmed " .. tostring(trimmed) ..
+          " overfull pack card(s) (late vanilla emplace after bridge populate)")
+    LAST_PACK_SIG = ""
+  end
+  return trimmed > 0
+end
+
 -- Fill a rebuilt pack area whose vanilla card-creation events are dead.
 --
 -- Vanilla creates pack cards in QUEUED events (card.lua:1721: delay
@@ -1174,10 +1353,12 @@ end
 -- pack was abandoned at 6s with its contents lost.
 --
 -- This mirrors vanilla's own creation loop (same sets, voucher odds, seeds
--- and edition polling) into the rebuilt area, 1.5s after the rebuild — long
--- enough for a healthy backlog to deliver the originals, short enough to
--- beat the client's patience. If vanilla's emplace event fires late anyway,
--- the pack-size trim below drops the duplicates.
+-- and edition polling) into the rebuilt area, 0.6s after the rebuild —
+-- v131: production showed the vanilla creation chain dead in 79/79
+-- episodes, so the old 1.5s wait was pure dead time; a merely-delayed
+-- vanilla emplace that lands late is trimmed by trim_overfull_pack
+-- instead. If vanilla's emplace event fires before the window, the
+-- non-empty check below yields to the originals.
 local function populate_empty_pack()
   if not is_pack_state() then
     _G._pack_rebuilt_at = nil
@@ -1186,7 +1367,13 @@ local function populate_empty_pack()
   end
   if not (_G._pack_rebuilt_at and not _G._pack_populated) then return false end
   local now = (love.timer and love.timer.getTime()) or os.clock()
-  if now - _G._pack_rebuilt_at < 1.5 then return false end
+  -- v131: 1.5s -> 0.6s. The prod deep probe showed the rebuilt area empty
+  -- in 79/79 episodes: vanilla's creation events are dead behind the same
+  -- broken queue that killed the factory event, so the 1.5s wait was pure
+  -- dead time on every refill. 0.6s still outraces the native emplace
+  -- event (which lands >= 1.3s after creation at GAMESPEED 1), and the
+  -- duplicate class is covered by trim_overfull_pack below either way.
+  if now - _G._pack_rebuilt_at < 0.6 then return false end
   if not (G.pack_cards and G.booster_pack) then return false end
   if G.pack_cards.cards and G.pack_cards.cards[1] then
     -- Vanilla delivered after all; nothing to fill.
@@ -1207,7 +1394,7 @@ local function populate_empty_pack()
     end
   end
   _G._pack_populated = true
-  print("[DecideX Pack Watchdog] rebuilt area still empty after 1.5s; populating " ..
+  print("[DecideX Pack Watchdog] rebuilt area still empty after 0.6s; populating " ..
         tostring(size) .. " cards (vanilla creation events dead)")
   local ok, err = pcall(function()
     for i = 1, size do
@@ -3580,6 +3767,10 @@ local function decidex_maintenance()
   -- dead (must run before the auto-close so a recoverable pack gets its
   -- populate window instead of an instant abandon).
   pcall(populate_empty_pack)
+
+  -- v131: trim duplicates a LATE vanilla emplace can leave behind after a
+  -- bridge populate (our cards + vanilla's would exceed pack_size).
+  pcall(trim_overfull_pack)
 
   -- Consumed-pack fast exit (see the comment on auto_close_consumed_pack).
   pcall(auto_close_consumed_pack)

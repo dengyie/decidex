@@ -1523,11 +1523,21 @@ def test_bridge_auto_closes_consumed_pack():
     # Only close packs whose contents were actually seen (half-created packs
     # are transiently empty while their card-creation events run).
     assert "_G._pack_seen_nonempty" in body
-    # Anti-flicker stability window before closing.
-    assert "now - _G._pack_empty_confirm < 0.3" in body
+    # Anti-flicker stability window before closing (v131: 0.15s — with the
+    # native-fill kick the area empties the instant the last card is
+    # picked, and each extra 100ms here is a client force_leave round trip).
+    assert "now - _G._pack_empty_confirm < 0.15" in body
     # end_consumeable restores G.STATE from PACK_INTERRUPT and nils it; a
     # second call would write nil into G.STATE.
-    assert "G.GAME.PACK_INTERRUPT" in body
+    # v131b: the PACK_INTERRUPT guard is GONE — the diag build proved that
+    # rebuilt+populated packs ALWAYS have it nil at close time (cleared by
+    # this episode's abandon_pack and by vanilla's queued 0.3s restore,
+    # button_callbacks.lua:2627), so the guard only ever blocked the packs
+    # that most need a silent close, each refusal costing a client
+    # force_leave round trip and re-buy loops. abandon_pack already falls
+    # back to the shop when the interrupt is nil.
+    assert "G.GAME.PACK_INTERRUPT" not in body
+    assert 'back = (G.GAME and G.GAME.PACK_INTERRUPT) or G.STATES.SHOP' in content
     # The instant exit path (end_consumeable's queued restore chain never
     # lands on this build: 0/7 self-restores in probe v122).
     assert "abandon_pack()" in body
@@ -1572,10 +1582,13 @@ def test_bridge_populates_dead_pack_creation():
     assert "local function populate_empty_pack()" in content
     body = content.split("local function populate_empty_pack()", 1)[1].split(
         chr(10) + "local function force_advance_to_shop()", 1)[0]
-    # Only after a rebuild, with a settle window (healthy backlogs deliver
-    # the originals), and only while the area is still empty.
+    # Only after a rebuild, with a settle window (v131: 0.6s — production
+    # showed the vanilla creation chain dead in 79/79 episodes so the old
+    # 1.5s wait was pure dead time; a merely-delayed vanilla emplace is
+    # handled by trim_overfull_pack), and only while the area is still
+    # empty.
     assert "_G._pack_rebuilt_at" in body
-    assert "now - _G._pack_rebuilt_at < 1.5" in body
+    assert "now - _G._pack_rebuilt_at < 0.6" in body
     assert "if G.pack_cards.cards and G.pack_cards.cards[1] then" in body
     # Mirror of vanilla card.lua:1732-1775 (sets, voucher odds, seeds).
     for fragment in ['"Tarot", G.pack_cards', '"Planet", G.pack_cards', '"Spectral", G.pack_cards',
@@ -1595,6 +1608,66 @@ def test_bridge_populates_dead_pack_creation():
         chr(10) + "local function populate_empty_pack()", 1)[0]
     assert "_G._pack_rebuilt_at" in reb
     assert 'LAST_PACK_SIG = ""' in reb
+
+
+def test_bridge_kicks_stuck_event_queue():
+    """v131: tag-opened packs lost their creation chain to event crashes.
+
+    Charm/Meteor/Ethereal/Standard/Buffoon Tag open their (mega) pack via
+    G.FUNCS.use_card from the blind-select context (tag.lua:209-282). On
+    this WASM build the queued chain dies: the update_<pack> factory
+    event (game.lua:3333) crashes inside its UIBox definition build and
+    the Event Guard drops it BEFORE create_UIBox_*_pack() assigns
+    G.pack_cards -- leaving state_complete=true, G.pack_cards=nil and a
+    CLEAN queue (base=1 is the by-design eternal splash-spin event,
+    game.lua:2276, which never completes on purpose). Production
+    evidence: every stall dump read `state_complete=true, queues=base=1`
+    for 4+s, and 79/79 packs in the v130 deep probe went through
+    stall->rebuild->populate at 6-9s each instead of the native ~1s.
+
+    The watchdog must: trip early (0.8s, healthy fills surface their area
+    in <0.3s), try one precise queue kick (walks the base queue with
+    vanilla semantics; evicts a permanently-stuck blocking immediate —
+    the only case where the chain is merely BLOCKED rather than dead),
+    then fall through to the proven rebuild+populate ladder.
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    assert "local function pack_stall_watchdog()" in content
+    body = content.split("local function pack_stall_watchdog()", 1)[1].split(
+        chr(10) + "local function auto_close_consumed_pack()", 1)[0]
+    # Stall floor lowered: healthy native fills surface their area in
+    # <0.3s; 4s burned 3+ extra seconds on every tag pack before recovery
+    # even started (v130 prod: 79/79 packs stalled).
+    assert "if stalled_for < 0.8 then return false end" in body
+    # Queue kick: walks the base queue with vanilla semantics, evicts a
+    # permanently-stuck blocking immediate, revives when pack_cards
+    # appears.
+    assert "local function kick_pack_queue()" in content
+    assert "G.E_MANAGER:update(1/60, true)" not in body  # manual walk, not a blind forced pass
+    assert "evicted stuck blocking immediate" in content
+    # The kick is bounded per episode (one extra window) before the
+    # rebuild ladder: the diag showed the queue is usually already clean
+    # (the factory event crashed and was dropped by the Event Guard), so
+    # rebuild+populate is the actual recovery, not the kick.
+    assert "_G._pack_kick_count" in body
+    assert "(_G._pack_kick_count or 0) < 1" in body
+    # After a successful kick the populate safety net arms (creation
+    # events live behind the same broken chain and may still be dead).
+    assert "_G._pack_rebuilt_at = now" in body
+    assert "queue kick revived native pack chain" in body
+    # Kick counter resets outside pack states (fresh episode budget).
+    assert "_G._pack_kick_count = nil" in body
+    # v131: a late vanilla emplace after a bridge populate must not leave
+    # unpickable extras in the area.
+    assert "local function trim_overfull_pack()" in content
+    trim_body = content.split("local function trim_overfull_pack()", 1)[1].split(
+        chr(10) + "local function populate_empty_pack()", 1)[0]
+    assert "#cards <= size" in trim_body
+    assert "trimmed " in content  # trim prints its count
+    maint = content.split("local function decidex_maintenance()", 1)[1].split(chr(10) + "end", 1)[0]
+    assert "pcall(trim_overfull_pack)" in maint
+    assert "pcall(populate_empty_pack)" in maint
 
 
 def test_bridge_sweeps_stale_stage_ui():
