@@ -79,9 +79,14 @@ class TypeSafeJevProvider(BaseInferenceProvider):
         auto_rotate_on_rate_limit: bool = True,
         auto_quarantine_on_unauthorized: bool = True
     ):
-        # Explicit base_url wins; otherwise DECIDEX_BASE_URL (e.g. MindsHub free gateway
-        # https://api.mindshub.ai/v1/decisions); otherwise official TypeSafe API.
-        resolved_base = base_url or os.environ.get("DECIDEX_BASE_URL") or "https://api.typesafe.ai/v1"
+        # Explicit base_url wins; otherwise DECIDEX_BASE_URL or MANGOAPI_BASE_URL
+        # (e.g. MangoApi gateway https://api.mangoqwq.com/v1/systemone); otherwise fallback.
+        resolved_base = (
+            base_url
+            or os.environ.get("DECIDEX_BASE_URL")
+            or os.environ.get("MANGOAPI_BASE_URL")
+            or "https://api.typesafe.ai/v1"
+        )
         self.base_url = resolved_base.rstrip("/")
         self.model = model
         self.timeout_s = timeout_s
