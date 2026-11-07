@@ -508,14 +508,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
-  const EXPECTED_LOVE_SIZE = 56371195;
+  const EXPECTED_LOVE_SIZE = 56371692;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v132";
+  const ASSET_VERSION = "v133";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=132";
-  const ASSET_WASM_URL = "love.wasm.bin?v=132";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=133";
+  const ASSET_WASM_URL = "love.wasm.bin?v=133";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -4816,6 +4816,9 @@ end
             this._packSigSince = null;
             this._packEpochSince = now;
             this._packSawCardsThisEpisode = false;
+            // v133: two packs can hold identical contents — the in-flight
+            // pick guard must never carry across episodes.
+            this._lastPackPick = null;
           }
           // Hard episode cap: ANY pack episode that outlives 75s is
           // abandoned no matter what the snapshots showed. The empty-pack
@@ -5007,6 +5010,23 @@ end
             }
 
             if (bestCard && canUsePackCard(bestCard, state)) {
+              // v133: the picked card leaves the area via a QUEUED vanilla
+              // event. Until it lands the snapshot is unchanged, and picking
+              // the same card again would run use_card a SECOND time —
+              // planets leveled the hand once per re-pick (production
+              // report: one planet pack leveled the same hand repeatedly).
+              // Keyed on the content signature: once ANY card is consumed
+              // the sig changes and the next pick is free. Reset per pack
+              // episode below (two packs can hold identical contents).
+              const pickId = `${bestCard.name}|${bestCard.index}`;
+              if (this._lastPackPick && this._lastPackPick.id === pickId &&
+                  this._lastPackPick.sig === packSig &&
+                  Date.now() - this._lastPackPick.at < 5000) {
+                this.updateStatus("等待补充包卡结算...", true);
+                console.log("[AutoPilot] Pick in flight for", bestCard.name, "- waiting for the queued removal");
+                executedAction = false;
+                unlockCooldownMs = 400;
+              } else {
               let targetIndices = null;
               const targets = selectConsumableTargets(bestCard.name, state.hand, state.jokers);
               if (targets && targets.length > 0) {
@@ -5015,6 +5035,7 @@ end
               const targetDesc = targetIndices ? ` (目标手牌: ${targetIndices.join(', ')})` : '';
               this.updateStatus(`补充包选择: ${bestCard.name || '卡牌'}${targetDesc}`, true);
               console.log("[AutoPilot] Selecting pack card:", bestCard.name, "at index", bestCard.index || 1, "targets:", targetIndices);
+              this._lastPackPick = { id: pickId, sig: packSig, at: Date.now() };
               window.executeSelectPackCard(bestCard.index || 1, targetIndices);
               // NOTE: dispatching is NOT progress -- a rejected selection
               // re-dispatches and would reset the failure breaker forever
@@ -5029,6 +5050,7 @@ end
               this._lastProgressTimestamp = Date.now();
               executedAction = true;
               unlockCooldownMs = 600;
+              }
             } else if (state.can_skip_booster) {
               this.updateStatus("跳过补充包...", true);
               console.log("[AutoPilot] Skipping booster pack (no usable card)");

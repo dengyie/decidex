@@ -3549,6 +3549,24 @@ local function decidex_execute_inner(action, args)
     local c = G.pack_cards.cards[idx]
     if not c then return false, "pack card not found at index " .. tostring(idx) end
 
+    -- v133: ONE use per card per pack episode. The picked card leaves the
+    -- area via a QUEUED vanilla event; until it lands, the emitted snapshot
+    -- is unchanged and a re-dispatch runs use_card a SECOND time — each run
+    -- queues its own hand-level-up (production report: one planet pack
+    -- leveled the same hand repeatedly). sort_id is object-unique, so this
+    -- only ever refuses a card that was dispatched and is STILL present —
+    -- exactly the double-apply case. Legit retries (joker slots freed,
+    -- transient gates) never reach use_card, so they are never marked.
+    -- The refusal reason contains "in progress" so the client classifies
+    -- it transient (wait + strike) instead of a hard failure.
+    if G.pack_cards ~= _G._decidex_used_area then
+      _G._decidex_used_area = G.pack_cards
+      _G._pack_dispatched = {}
+    end
+    if c.sort_id and _G._pack_dispatched and _G._pack_dispatched[c.sort_id] then
+      return false, "duplicate use in progress (card already dispatched once this pack)"
+    end
+
     -- Check if card is a Joker and whether slots are available
     if c.ability and c.ability.set == "Joker" and G.jokers and G.jokers.cards then
       local max_jokers = (G.jokers.config and G.jokers.config.card_limit) or 5
@@ -3578,6 +3596,13 @@ local function decidex_execute_inner(action, args)
     end
 
     if G.FUNCS and G.FUNCS.use_card then
+      -- Mark BEFORE the call: any dispatch attempt (success or mid-body
+      -- crash) has already queued this card's effects; a repeat must be
+      -- refused even if this very call errors.
+      if c.sort_id then
+        _G._pack_dispatched = _G._pack_dispatched or {}
+        _G._pack_dispatched[c.sort_id] = true
+      end
       local ok, err = pcall(G.FUNCS.use_card, {config = {ref_table = c, button = 'use_card'}})
       if ok then return true, "selected pack card: " .. tostring(c.ability and c.ability.name or idx) end
       return false, "use_card failed: " .. tostring(err)

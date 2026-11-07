@@ -1685,6 +1685,46 @@ def test_bridge_kicks_stuck_event_queue():
     # when the bridge boots — install latches and retries per tick).
     maint = content.split("local function decidex_maintenance()", 1)[1].split(chr(10) + "end", 1)[0]
     assert "pcall(install_pack_factory_markers)" in maint
+
+
+def test_bridge_and_client_refuse_duplicate_pack_use():
+    """v133: one USE per pack card per episode.
+
+    The picked card leaves the area via a QUEUED vanilla event. Until it
+    lands the emitted snapshot is unchanged, and re-picking the same card
+    ran use_card a SECOND time — each run queues its own hand-level-up
+    (production report: one planet pack leveled the same hand several
+    times). Two independent guards:
+
+    - bridge: sort_id is object-unique, so a dispatched-and-STILL-present
+      card is refused ("duplicate use in progress" — transient-classified);
+      the mark happens BEFORE use_card so even a mid-body crash cannot be
+      re-applied. Legit retries never reach use_card and stay unmarked.
+    - client: an identical (name|index) pick while the content signature is
+      unchanged waits quietly instead of re-dispatching; reset per episode
+      (two packs can hold identical contents).
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+    sel = content.split('if action == "select_pack_card" then', 1)[1].split(
+        chr(10) + '  if action == ', 1)[0]
+    # Per-episode reset keyed on the pack area identity.
+    assert "if G.pack_cards ~= _G._decidex_used_area then" in sel
+    assert "_G._pack_dispatched = {}" in sel
+    # The dedupe refusal, transient-classified for the client.
+    assert "duplicate use in progress (card already dispatched once this pack)" in sel
+    # Marked BEFORE use_card (a mid-body crash must not be re-appliable).
+    assert "_G._pack_dispatched[c.sort_id] = true" in sel
+    dispatch_pos = sel.find("pcall(G.FUNCS.use_card")
+    mark_pos = sel.find("_G._pack_dispatched[c.sort_id] = true")
+    assert 0 < mark_pos < dispatch_pos
+
+    js = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    # In-flight pick guard keyed on name|index + content signature.
+    assert "const pickId = `${bestCard.name}|${bestCard.index}`;" in js
+    assert "this._lastPackPick.sig === packSig" in js
+    assert "Pick in flight for" in js
+    # Per-episode reset (identical contents in a fresh pack must pick freely).
+    assert "this._lastPackPick = null;" in js
     # v131: a late vanilla emplace after a bridge populate must not leave
     # unpickable extras in the area.
     assert "local function trim_overfull_pack()" in content
