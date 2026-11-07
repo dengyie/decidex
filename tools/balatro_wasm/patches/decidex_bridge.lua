@@ -794,6 +794,52 @@ local function install_can_skip_booster_guard()
 end
 
 --[[
+  v131c: mark every pack-UI factory call (crash or not) and surface the real
+  crash message.
+
+  The factory event is the ONLY thing that can open a pack NATIVELY (with
+  the real open animation and the vanilla card-creation events). Knowing
+  whether it ran — and with what error — separates "never queued" (the
+  update_<pack> STATE_COMPLETE gate was skipped; fixable by re-arming) from
+  "ran and crashed" (needs rebuild_pack_ui). Without this wrapper the crash
+  only shows up as a rate-limited Event Guard drop, and a first-occurrence
+  print is easily consumed by an earlier same-signature crash.
+
+  The wrapper preserves vanilla failure semantics: on crash it re-raises so
+  the Event Guard drops the host event exactly as before.
+]]
+local function install_pack_factory_markers()
+  if _G._decidex_factory_markers then return false end
+  local names = { "create_UIBox_arcana_pack", "create_UIBox_celestial_pack",
+                  "create_UIBox_spectral_pack", "create_UIBox_standard_pack",
+                  "create_UIBox_buffoon_pack" }
+  local installed = 0
+  for _, name in ipairs(names) do
+    local orig = rawget(_G, name)
+    if type(orig) == "function" then
+      rawset(_G, name, function(...)
+        _G._pack_factory_seen = (G and G.STATE) or true
+        _G._pack_factory_at = (love.timer and love.timer.getTime()) or os.clock()
+        local ok, def = pcall(orig, ...)
+        if not ok then
+          print("[DecideX Pack Diag] factory " .. tostring(name) ..
+                " crashed in state " .. tostring(G and G.STATE) .. ": " .. tostring(def))
+          error(def, 2)
+        end
+        return def
+      end)
+      installed = installed + 1
+    end
+  end
+  if installed > 0 then
+    _G._decidex_factory_markers = true
+    print("[DecideX Pack Diag] factory markers installed on " ..
+          tostring(installed) .. "/5 pack factories")
+  end
+  return installed > 0
+end
+
+--[[
   Guard Moveable.align_to_major (engine/moveable.lua:138-165).
 
   A UIE/Moveable whose role.major was removed keeps erroring here EVERY
@@ -1026,6 +1072,10 @@ local function pack_stall_watchdog()
     _G._pack_stall_handled = nil
     _G._pack_rebuild_count = nil
     _G._pack_kick_count = nil
+    -- v131c: the factory marker is per-episode — a fresh pack of the same
+    -- state must get its own native-open attempt.
+    _G._pack_factory_seen = nil
+    _G._pack_rearm_count = nil
     -- The empty-escape latch MUST reset here too: it used to reset only
     -- when an area became non-empty, so after one escape the latch stayed
     -- set and every LATER pack with lost creation events wedged forever
@@ -1152,6 +1202,43 @@ local function pack_stall_watchdog()
     dismiss_blocking_overlay()
     if G.SETTINGS then G.SETTINGS.paused = false end
     -- Give the game a few frames to recover before forcing anything.
+    _G._pack_stall_time = now
+    _G._pack_stall_handled = nil
+    return true
+  end
+
+  -- 1.2. v131c: give the VANILLA factory a chance before we rebuild.
+  --
+  -- The factory event is queued exactly once, when update_<pack> observes
+  -- STATE_COMPLETE false. A pack state entered with STATE_COMPLETE already
+  -- true (stale from the previous stage) never queues it: the pack waits
+  -- for our rebuild, which works but pops the UI in with NO open
+  -- animation, needs bridge-populated cards, and is exactly the "卡 UI"
+  -- feel reported from production. Re-arm the gate and vanilla opens the
+  -- pack natively on the next update pass. Only when the factory provably
+  -- never ran for THIS state (the wrapper marks every call, crash or not —
+  -- a crashed factory keeps its marker so we fall through to the
+  -- kick/rebuild ladder instead of re-arming forever).
+  if G.STATE_COMPLETE and _G._pack_factory_seen ~= G.STATE
+      and (_G._pack_rearm_count or 0) < 1 then
+    -- Budget: ONE re-arm per episode (probe v131c: a tag double-pack with
+    -- Sigil/Ouija crash storms re-armed 3x — each re-arm re-queues a FULL
+    -- vanilla chain, and the crash churn that follows is what the budget
+    -- must bound; after one attempt the kick/rebuild ladder takes over).
+    _G._pack_rearm_count = (_G._pack_rearm_count or 0) + 1
+    G.STATE_COMPLETE = false
+    -- Pre-arm the populate safety net for the fresh native area. Probe
+    -- v131c: re-armed opens are NATIVE (rebuild/populate counters hit 0)
+    -- but the card-creation events are dead on this path too — native
+    -- opens sat EMPTY for the full 12s escape (18 abandons, 13.5s dwells),
+    -- while the minority whose creation events survived filled natively.
+    -- populate_empty_pack yields to vanilla if the real cards race in
+    -- before its 0.6s window; trim_overfull_pack (armed by rebuilt_at)
+    -- drops the reverse race; auto-close stays suppressed until populate
+    -- resolves, so a recovering pack is never closed early.
+    _G._pack_rebuilt_at = now
+    _G._pack_populated = nil
+    print("[DecideX Pack Watchdog] factory never ran for this pack state; re-arming STATE_COMPLETE for a native open")
     _G._pack_stall_time = now
     _G._pack_stall_handled = nil
     return true
@@ -3740,6 +3827,10 @@ local function decidex_maintenance()
   -- can_skip_booster is polled every frame by the pack UI; a stale
   -- G.pack_cards global used to error it 3600 frames in a row.
   pcall(install_can_skip_booster_guard)
+
+  -- v131c: factory markers (installed on the first tick after
+  -- UI_definitions.lua defines the create_UIBox_*_pack globals).
+  pcall(install_pack_factory_markers)
 
   -- A Moveable aligned to a dead major aborts G:update every frame.
   pcall(install_align_to_major_guard)

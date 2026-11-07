@@ -1658,6 +1658,33 @@ def test_bridge_kicks_stuck_event_queue():
     assert "queue kick revived native pack chain" in body
     # Kick counter resets outside pack states (fresh episode budget).
     assert "_G._pack_kick_count = nil" in body
+    # v131c: before the kick/rebuild ladder, re-arm STATE_COMPLETE when the
+    # vanilla factory provably never ran for this state — that opens the
+    # pack NATIVELY (real open animation + vanilla creation events) instead
+    # of the abrupt rebuild users reported as "卡 UI". A crashed factory
+    # keeps its marker, so the re-arm cannot loop.
+    assert "if G.STATE_COMPLETE and _G._pack_factory_seen ~= G.STATE" in body
+    assert "(_G._pack_rearm_count or 0) < 1" in body
+    assert "G.STATE_COMPLETE = false" in body
+    assert "re-arming STATE_COMPLETE for a native open" in body
+    assert "_G._pack_rearm_count = nil" in body
+    # The factory marker resets per episode (a fresh pack of the same state
+    # gets its own native-open attempt).
+    assert "_G._pack_factory_seen = nil" in body
+    # The marker wrapper installs on the create_UIBox_*_pack globals,
+    # preserves vanilla failure semantics (re-raise), and prints the real
+    # crash message (Event Guard rate-limiting would otherwise swallow it).
+    assert "local function install_pack_factory_markers()" in content
+    markers_body = content.split("local function install_pack_factory_markers()", 1)[1].split(
+        chr(10) + "local function", 1)[0]
+    assert "create_UIBox_celestial_pack" in markers_body
+    assert "_G._pack_factory_seen = (G and G.STATE) or true" in markers_body
+    assert "error(def, 2)" in markers_body
+    assert "[DecideX Pack Diag] factory " in markers_body
+    # Wired into the per-frame maintenance path (globals may not exist yet
+    # when the bridge boots — install latches and retries per tick).
+    maint = content.split("local function decidex_maintenance()", 1)[1].split(chr(10) + "end", 1)[0]
+    assert "pcall(install_pack_factory_markers)" in maint
     # v131: a late vanilla emplace after a bridge populate must not leave
     # unpickable extras in the area.
     assert "local function trim_overfull_pack()" in content
