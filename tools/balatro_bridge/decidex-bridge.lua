@@ -2898,6 +2898,48 @@ local function check_and_emit_state()
   end
 end
 
+-- v134: one dispatch per card object for the NON-idempotent shop/hand
+-- actions (buy, sell, use). Same bug class as the v133 pack-pick fix: the
+-- card/object leaves its area via a QUEUED vanilla event, and until it
+-- lands the snapshot is unchanged — a re-dispatch runs the action a SECOND
+-- time (double charge on buy, double refund on sell, double effect on a
+-- hand consumable such as a planet level-up or a Hermit payout).
+-- sort_id is object-unique per session, so a dead entry can never block a
+-- different card; the set grows one byte per dispatched card and is capped.
+local function decidex_once_refused(c, label)
+  if c and c.sort_id then
+    _G._decidex_once_ids = _G._decidex_once_ids or {}
+    if _G._decidex_once_ids[c.sort_id] then
+      return false, "duplicate " .. label ..
+        " in progress (card already dispatched once)"
+    end
+  end
+  return true
+end
+
+local function decidex_once_mark(c)
+  if c and c.sort_id then
+    _G._decidex_once_ids = _G._decidex_once_ids or {}
+    if _G._decidex_once_count and _G._decidex_once_count > 512 then
+      _G._decidex_once_ids = {}
+      _G._decidex_once_count = 0
+    end
+    if not _G._decidex_once_ids[c.sort_id] then
+      _G._decidex_once_ids[c.sort_id] = true
+      _G._decidex_once_count = (_G._decidex_once_count or 0) + 1
+    end
+  end
+end
+
+local function decidex_once_unmark(c)
+  if c and c.sort_id and _G._decidex_once_ids then
+    if _G._decidex_once_ids[c.sort_id] then
+      _G._decidex_once_ids[c.sort_id] = nil
+      _G._decidex_once_count = math.max((_G._decidex_once_count or 1) - 1, 0)
+    end
+  end
+end
+
 -- Programmatic execution of actions
 local function decidex_execute_inner(action, args)
   if not G then return false, "no G" end
@@ -3266,15 +3308,19 @@ local function decidex_execute_inner(action, args)
       if c.cost and c.cost > 0 and c.cost > available_money then
         return false, "cannot afford booster pack: cost=" .. tostring(c.cost) .. ", available=" .. tostring(available_money)
       end
+      local once_ok, once_err = decidex_once_refused(c, "booster buy")
+      if not once_ok then return false, once_err end
       if G.FUNCS and G.FUNCS.use_card then
         -- Card:open() charges the cost itself via ease_dollars(-self.cost)
         -- (card.lua:1716); charging here as well would double-charge.
+        decidex_once_mark(c)
         local btn = { config = { ref_table = c, button = 'use_card' } }
         local ok, err = pcall(G.FUNCS.use_card, btn)
         if ok then return true, "opened booster pack via use_card" end
         return false, "use_card failed for booster: " .. tostring(err)
       end
       if c.open then
+        decidex_once_mark(c)
         local ok, err = pcall(function() c:open() end)
         if ok then return true, "opened booster pack directly" end
         return false, "booster open failed: " .. tostring(err)
@@ -3288,12 +3334,16 @@ local function decidex_execute_inner(action, args)
       if c.cost and c.cost > 0 and c.cost > available_money then
         return false, "cannot afford voucher: cost=" .. tostring(c.cost) .. ", available=" .. tostring(available_money)
       end
+      local once_ok, once_err = decidex_once_refused(c, "voucher buy")
+      if not once_ok then return false, once_err end
       local btn = { config = { ref_table = c, button = 'use_card' } }
       if G.FUNCS and G.FUNCS.use_card then
+        decidex_once_mark(c)
         local ok, err = pcall(G.FUNCS.use_card, btn)
         if ok then return true, "redeemed voucher via use_card" end
       end
       if c.redeem then
+        decidex_once_mark(c)
         local ok, err = pcall(function() c:redeem() end)
         if ok then return true, "redeemed voucher directly" end
       end
@@ -3302,13 +3352,23 @@ local function decidex_execute_inner(action, args)
 
     -- Standard card / joker / consumable purchase
     if G.FUNCS and G.FUNCS.buy_from_shop then
+      local once_ok, once_err = decidex_once_refused(c, "buy")
+      if not once_ok then return false, once_err end
       local btn = { config = { ref_table = c, id = 'buy_button' } }
+      decidex_once_mark(c)
       local ok, res = pcall(G.FUNCS.buy_from_shop, btn)
       -- buy_from_shop returns false when check_for_buy_space() refuses the
       -- purchase (joker/consumable slots are full). pcall alone would treat
       -- that as success.
       if not ok then return false, "buy_from_shop error: " .. tostring(res) end
-      if res == false then return false, "no space to buy " .. tostring(c.name or "card") end
+      if res == false then
+        -- Graceful refusal: NOTHING was charged or emplaced — the client
+        -- sells a joker and legitimately re-buys this card, so release the
+        -- once-mark (an exception throw would have kept it: a mid-body
+        -- crash may have queued partial effects).
+        decidex_once_unmark(c)
+        return false, "no space to buy " .. tostring(c.name or "card")
+      end
       return true, "bought card"
     end
     return false, "no buy_from_shop func"
@@ -3624,13 +3684,20 @@ local function decidex_execute_inner(action, args)
     local idx = tonumber(args.index) or 1
     local c = area.cards[idx]
     if not c then return false, "card not found at index " .. tostring(idx) end
+    -- v134: a used/sold card leaves its area via a queued event; a
+    -- re-dispatch while it lingers would double-apply the effect (planet
+    -- level-up, Hermit payout, sell refund).
+    local once_ok, once_err = decidex_once_refused(c, action)
+    if not once_ok then return false, once_err end
     if action == "use_card" and G.FUNCS and G.FUNCS.use_card then
       if args.target_indices then
         prepare_and_highlight_targets(c, args.target_indices)
       end
+      decidex_once_mark(c)
       local ok, err = pcall(G.FUNCS.use_card, {config = {ref_table = c, button = 'use_card'}})
       return ok, tostring(err or "used card")
     elseif action == "sell_card" and G.FUNCS and G.FUNCS.sell_card then
+      decidex_once_mark(c)
       local ok, err = pcall(G.FUNCS.sell_card, {config = {ref_table = c, button = 'sell_card'}})
       return ok, tostring(err or "sold card")
     end

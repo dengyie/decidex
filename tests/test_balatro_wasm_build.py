@@ -1725,6 +1725,42 @@ def test_bridge_and_client_refuse_duplicate_pack_use():
     assert "Pick in flight for" in js
     # Per-episode reset (identical contents in a fresh pack must pick freely).
     assert "this._lastPackPick = null;" in js
+
+
+def test_bridge_once_dedupe_covers_buy_sell_use():
+    """v134: the v133 double-apply class extends beyond pack picks.
+
+    The card/object leaves its area via a QUEUED vanilla event; until it
+    lands the snapshot is unchanged and a re-dispatch runs the action a
+    SECOND time: buy charges twice, sell refunds twice, a hand consumable
+    applies twice (planet level-up, Hermit payout). play/discard already
+    have in-flight gates; buy (all three branches), sell and use get a
+    shared sort_id once-set:
+    - refused message contains "in progress" -> client-classified transient;
+    - the mark lands BEFORE the vanilla call (mid-body crash cannot be
+      re-applied);
+    - buy's graceful no-space refusal UNMARKS (sell-then-rebuy stays legal),
+      while an exception throw keeps it (partial effects may exist).
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+    # Shared helpers exist and cap the set.
+    assert "local function decidex_once_refused(c, label)" in content
+    assert "local function decidex_once_mark(c)" in content
+    assert "local function decidex_once_unmark(c)" in content
+    assert "_G._decidex_once_count > 512" in content
+
+    buy = content.split('if action == "buy_card" or action == "buy_from_shop" then', 1)[1].split(
+        chr(10) + '  if action == "reroll_shop"', 1)[0]
+    # All three branches check + mark.
+    assert buy.count('decidex_once_refused(c,') == 3
+    # booster: use_card + open; voucher: use_card + redeem; standard: 1 -> 5
+    assert buy.count("decidex_once_mark(c)") == 5
+    assert "decidex_once_unmark(c)" in buy  # graceful no-space releases the mark
+
+    us = content.split('if action == "use_card" or action == "sell_card" then', 1)[1].split(
+        chr(10) + '  if action == "reorder_jokers"', 1)[0]
+    assert 'decidex_once_refused(c, action)' in us
+    assert us.count("decidex_once_mark(c)") == 2
     # v131: a late vanilla emplace after a bridge populate must not leave
     # unpickable extras in the area.
     assert "local function trim_overfull_pack()" in content
