@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56372431;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v134";
+  const ASSET_VERSION = "v135";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=134";
-  const ASSET_WASM_URL = "love.wasm.bin?v=134";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=135";
+  const ASSET_WASM_URL = "love.wasm.bin?v=135";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -2859,19 +2859,33 @@ end
     for (const v of vouchers) {
       const vname = v.name || "Voucher";
       const cost = Number(v.cost) || 10;
-      const vScore = VOUCHER_BASE_SCORES[vname] || 65;
+      // v135: vouchers are PERMANENT run upgrades — they used to starve
+      // behind a flat $25 buffer (money-cost>=25 = $35+ needed) while the
+      // booster priority spent the shop cash first, so production never
+      // bought one. Tiered buffers now: a strong voucher (>=85: Antimatter,
+      // Grabber, Nacho Tong, Observatory, Money Tree, Palette) only needs
+      // to leave $3; mid vouchers leave $12; unknown/weak leave $25.
+      // Unknown names fall back to 70 (was 65) instead of dead weight.
+      const vScore = VOUCHER_BASE_SCORES[vname] || 70;
       const canAfford = money >= cost;
-      const budgetAllowed = (money - cost >= 25) || (canAfford && vScore >= 85);
+      const keepAfter = vScore >= 85 ? 3 : (vScore >= 75 ? 12 : 25);
+      const budgetAllowed = canAfford && (money - cost >= keepAfter);
       evaluatedVouchers.push({
         ...v,
         name: vname,
         cost: cost,
         score: vScore,
         canAfford: canAfford,
+        keepAfter: keepAfter,
         budgetAllowed: budgetAllowed,
         recommendation: budgetAllowed && vScore >= 80 ? "强烈推荐" : (budgetAllowed ? "值得购买" : "资金暂缓")
       });
     }
+    // v135: highest-scored voucher present (affordable or not) — drives the
+    // save-up mode so the model actually accumulates money for it instead
+    // of trickling the shop cash into boosters and mediocre cards.
+    evaluatedVouchers.sort((a, b) => (b.score - a.score) || (a.cost - b.cost));
+    const topVoucher = evaluatedVouchers[0] || null;
     evaluatedVouchers.sort((a, b) => b.score - a.score);
     const bestVoucher = evaluatedVouchers.find(v => v.canAfford && v.budgetAllowed) || null;
 
@@ -2937,6 +2951,7 @@ end
       bestBooster: bestBooster,
       evaluatedVouchers: evaluatedVouchers,
       bestVoucher: bestVoucher,
+      topVoucher: topVoucher,
       sellRecommendation: sellRecommendation,
       boosters: boosters,
       interestAdvice: interestAdvice,
@@ -4680,14 +4695,37 @@ end
             const bestCard = shopAdv && shopAdv.bestCard;
             const bestBooster = shopAdv && shopAdv.bestBooster;
             const bestVoucher = shopAdv && shopAdv.bestVoucher;
+            const topVoucher = shopAdv && shopAdv.topVoucher;
             const sellRec = shopAdv && shopAdv.sellRecommendation;
             const jokersCount = (state.jokers || []).length;
+            // v135: save-up mode for a worthwhile voucher. The model used to
+            // trickle the shop cash into boosters/mediocre cards and never
+            // accumulated the $10+buffer a voucher needs (user report: never
+            // saw it buy one). While saving: only strong cards (>=82), no
+            // boosters, no rerolls. Emergency early-buffoon (Priority 1)
+            // still outranks saving.
+            // NOTE: `money` is a local of findBestShopPurchases — the step
+            // scope reads state.money (using the bare name here wedged every
+            // shop with ReferenceError, probe v135).
+            const cash = Number(state.money) || 0;
+            const savingVoucher = topVoucher && !bestVoucher &&
+              topVoucher.score >= 75 &&
+              cash < topVoucher.cost + (topVoucher.keepAfter || 12);
+            if (savingVoucher) {
+              const need = Math.max(0, topVoucher.cost + (topVoucher.keepAfter || 12) - cash);
+              this.updateStatus(`攒钱买券: ${topVoucher.name} (还需 $${need})`, false);
+            }
             const shouldBuyCard = bestCard && bestCard.canAfford && bestCard.hasSlot && (
               bestCard.recommendation === "强烈推荐" ||
               (jokersCount < 2 && bestCard.score >= 45) ||
               (jokersCount === 0 && bestCard.score >= 35) ||
               (bestCard.isConsumable && bestCard.score >= 60)
-            );
+            ) && (!(savingVoucher || bestVoucher) || bestCard.score >= 82);
+            // The trailing gate: while saving for a voucher — or when the
+            // voucher is ALREADY buyable (within its buffer) — a mediocre
+            // card purchase would spend the exact money the voucher needs
+            // and flap the boundary forever. Only a strong card (>=82)
+            // outranks the voucher.
 
             const cardKey = bestCard ? `card_${bestCard.index}_${bestCard.name}` : null;
             const voucherKey = bestVoucher ? `voucher_${bestVoucher.index}_${bestVoucher.name}` : null;
@@ -4731,8 +4769,23 @@ end
               window.executeBuyAction(bestCard.index, "shop_jokers");
               executedAction = true;
               unlockCooldownMs = 600;
-            } else if (bestBooster && !this._shopAttemptedItems.has(`booster_${bestBooster.index}`)) {
-              // Priority 3: Buy affordable booster pack
+            } else if (bestVoucher && voucherKey && !this._shopAttemptedItems.has(voucherKey)) {
+              // Priority 3 (v135, was 4): buy the recommended voucher BEFORE
+              // booster packs. Vouchers are permanent run upgrades; boosters
+              // are one-shot consumables that used to eat the shop cash
+              // first and starved vouchers entirely (user report: never saw
+              // the model buy one).
+              this._shopAttemptedItems.add(voucherKey);
+              this._lastProgressTimestamp = now;
+              this.updateStatus(`购买优惠券: ${bestVoucher.name}`, true);
+              console.log("[AutoPilot] Auto buy voucher:", bestVoucher.name, "at index", bestVoucher.index, "score:", bestVoucher.score);
+              window.executeBuyAction(bestVoucher.index, "shop_vouchers");
+              executedAction = true;
+              unlockCooldownMs = 600;
+            } else if (bestBooster && !this._shopAttemptedItems.has(`booster_${bestBooster.index}`) && !savingVoucher) {
+              // Priority 4 (v135, was 3): buy affordable booster pack.
+              // Skipped entirely while saving for a voucher — boosters were
+              // exactly the spend that starved vouchers for the whole run.
               const bKey = `booster_${bestBooster.index}`;
               this._shopAttemptedItems.add(bKey);
               this._lastProgressTimestamp = now;
@@ -4741,17 +4794,10 @@ end
               window.executeBuyAction(bestBooster.index, "shop_booster");
               executedAction = true;
               unlockCooldownMs = 600;
-            } else if (bestVoucher && voucherKey && !this._shopAttemptedItems.has(voucherKey)) {
-              // Priority 4: Buy recommended voucher
-              this._shopAttemptedItems.add(voucherKey);
-              this._lastProgressTimestamp = now;
-              this.updateStatus(`购买优惠券: ${bestVoucher.name}`, true);
-              console.log("[AutoPilot] Auto buy voucher:", bestVoucher.name, "at index", bestVoucher.index, "score:", bestVoucher.score);
-              window.executeBuyAction(bestVoucher.index, "shop_vouchers");
-              executedAction = true;
-              unlockCooldownMs = 600;
-            } else if (shopAdv && shopAdv.shouldReroll && !this._shopRerolled) {
-              // Priority 5: Reroll shop if cash is abundant or genuine emergency
+            } else if (shopAdv && shopAdv.shouldReroll && !this._shopRerolled && !savingVoucher) {
+              // Priority 5: Reroll shop if cash is abundant or genuine emergency.
+              // Never while saving for a voucher — a reroll spends the exact
+              // money the voucher needs.
               this._shopRerolled = true;
               this._lastProgressTimestamp = now;
               this.updateStatus(`刷新商店 ($${shopAdv.rerollCost})...`, true);
