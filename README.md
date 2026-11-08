@@ -1,10 +1,18 @@
-# DecideX: High-Performance System One Decision Foundation
+<div align="center">
 
-[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Pydantic](https://img.shields.io/badge/Pydantic-v2-e92063.svg)](https://pydantic.dev)
-[![Tests](https://img.shields.io/badge/pytest-86%20passed-brightgreen.svg)]()
-[![CI/CD](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions%20%2B%20SSH%20Deploy-success.svg)]()
+# DecideX
+
+**Industrial Decision Foundation Layer for System One Game-Playing Models**
+
+[![License](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
+[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg?style=flat-square)](https://www.python.org/)
+[![Pydantic](https://img.shields.io/badge/Pydantic-v2-e92063.svg?style=flat-square)](https://pydantic.dev)
+[![Tests](https://img.shields.io/badge/pytest-86%20passed-brightgreen.svg?style=flat-square)]()
+[![CI/CD](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions%20%2B%20SSH%20Deploy-success.svg?style=flat-square)]()
+
+</div>
+
+---
 
 **DecideX** 是专为 **System One（快思考）超低延迟结构化决策模型**（如 TypeSafe Jev、开源 NanoJev 及专用二分类/多选小模型 SLM）量身打造的工业级通用决策基座框架。
 
