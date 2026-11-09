@@ -508,14 +508,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
-  const EXPECTED_LOVE_SIZE = 56373536;
+  const EXPECTED_LOVE_SIZE = 56373811;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v138";
+  const ASSET_VERSION = "v139";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=138";
-  const ASSET_WASM_URL = "love.wasm.bin?v=138";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=139";
+  const ASSET_WASM_URL = "love.wasm.bin?v=139";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {

@@ -2127,3 +2127,56 @@ def test_client_start_run_waits_out_run_creation():
     assert "v138" in content[guard_pos:guard_pos + 300]
     # It stays inside the busy-lock watchdog (before the anti-hang section).
     assert guard_pos < budget_pos
+def test_bridge_stall_waits_for_pending_factory():
+    """v139: G.STATE_COMPLETE == true with no factory marker means vanilla
+    consumed the state-entry gate and the factory event is queued but
+    pending behind the purchase/open chain (diag139: base=40 events; can
+    legitimately take >0.8s to reach). The old 0.8s tripwire re-armed
+    STATE_COMPLETE there, queueing a SECOND factory behind the first and
+    forcing the rebuild+populate detour on ~60% of packs. The watchdog
+    must now wait up to 2.5s for a pending factory before treating it as
+    lost, and the stall print carries factory_seen for observability.
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    # The pending-factory wait sits BEFORE the 0.8s tripwire and before
+    # the stall handling print.
+    assert ("if G.STATE_COMPLETE == true and not _G._pack_factory_seen "
+            "and stalled_for < 2.5 then") in content
+    pending_pos = content.index(
+        "if G.STATE_COMPLETE == true and not _G._pack_factory_seen "
+        "and stalled_for < 2.5 then")
+    trip_pos = content.index("if stalled_for < 0.8 then return false end",
+                             pending_pos)
+    print_pos = content.index('print("[DecideX Pack Watchdog] pack stalled for')
+    assert pending_pos < trip_pos
+    assert trip_pos < print_pos
+
+    # The v131 0.8s tripwire stays (non-pending path: factory ran but
+    # produced no area, or COMPLETE=false and nothing was queued).
+    assert "if stalled_for < 0.8 then return false end" in content
+
+    # Observability: the stall print now carries factory_seen.
+    assert 'factory_seen=" .. tostring(_G._pack_factory_seen ~= nil)' in content
+
+
+def test_build_patches_tarot_conversion_guards():
+    """v139: the queued tarot/spectral conversion events (card.lua use_card
+    chain) index G.hand.highlighted[i] at fire time; the bridge's combat
+    actions can remove highlighted cards within the 0.4s conversion
+    window, crashing each event ("attempt to index field '?'", 20 per
+    40min soak) and PARTIALLY applying the tarot. build.py now guards all
+    six queued event bodies so a vanished card is skipped and the chain
+    still lands.
+    """
+    vanilla = ROOT / ".pytest_tmp" / "vanilla" / "card.lua"
+    content = vanilla.read_text(encoding="utf-8")
+    patched = build_mod.patch_card_conversion_guards(content)
+    assert patched != content
+    # 4 guarded single-line conversions (flip / suit_conv / set_ability /
+    # tarot2 flip).
+    assert patched.count("if G.hand.highlighted[i] then") == 4
+    # Death copy guard + Strength rank-up guard.
+    assert ("if G.hand.highlighted[i] and G.hand.highlighted[i] ~= rightmost"
+            ) in patched
+    assert "if not card then return true end" in patched

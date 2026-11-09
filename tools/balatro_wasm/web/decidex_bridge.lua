@@ -1216,6 +1216,18 @@ local function pack_stall_watchdog()
   end
 
   local stalled_for = now - _G._pack_stall_time
+  -- v139: G.STATE_COMPLETE == true with no factory marker means vanilla
+  -- CONSUMED the state-entry gate and the factory event is queued but
+  -- still pending — it sits behind the purchase/open event chain
+  -- (diag139: base=40 events) and can legitimately take >0.8s to reach.
+  -- That is healthy progress, not a stall: the old 0.8s tripwire re-armed
+  -- STATE_COMPLETE here, queueing a SECOND factory behind the first and
+  -- forcing the rebuild+populate detour on ~60% of packs. Give the
+  -- pending factory 2.5s before treating it as lost; the common case now
+  -- resolves as a clean native open with the real animation.
+  if G.STATE_COMPLETE == true and not _G._pack_factory_seen and stalled_for < 2.5 then
+    return false
+  end
   -- v131: 4.0s -> 0.8s. Root cause (probe v131 diag, definitive): the
   -- pack factory event (game.lua:3333) DOES run but CRASHES inside the
   -- UIBox definition build (the same UI_definitions/card.lua family the
@@ -1237,6 +1249,7 @@ local function pack_stall_watchdog()
         "s (state=" .. tostring(G.STATE) .. ", paused=" .. tostring(G.SETTINGS and G.SETTINGS.paused) ..
         ", overlay=" .. tostring(not not G.OVERLAY_MENU) ..
         ", state_complete=" .. tostring(G.STATE_COMPLETE) ..
+        ", factory_seen=" .. tostring(_G._pack_factory_seen ~= nil) ..
         ", pack_size=" .. tostring(G.GAME and G.GAME.pack_size) ..
         ", queues=" .. event_queue_diagnostics() .. ")")
 

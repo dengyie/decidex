@@ -538,6 +538,64 @@ def patch_event(content: str) -> str:
     return content
 
 
+def patch_card_conversion_guards(content: str) -> str:
+    """
+    Guard the queued tarot/spectral conversion events (card.lua use_card
+    chain) against hand cards that vanish before the delayed event fires.
+
+    The bridge's combat actions (play/discard) can remove highlighted
+    cards within the 0.4s conversion window; each queued per-card event
+    then indexes G.hand.highlighted[i] (nil) and crashes — the Event
+    Guard drops it and the tarot's effect applies only PARTIALLY (diag
+    v139: 8 dropped conversions per 5min; soak v137: 20 per 40min).
+    Each guard skips the vanished card and lets the event complete so the
+    rest of the chain still lands.
+    """
+    guards = [
+        # Pre-chain flip (card.lua:1107)
+        (
+            "G.E_MANAGER:add_event(Event({trigger = 'after',delay = 0.15,func = function() G.hand.highlighted[i]:flip();play_sound('card1', percent);G.hand.highlighted[i]:juice_up(0.3, 0.3);return true end }))",
+            "G.E_MANAGER:add_event(Event({trigger = 'after',delay = 0.15,func = function() if G.hand.highlighted[i] then G.hand.highlighted[i]:flip();play_sound('card1', percent);G.hand.highlighted[i]:juice_up(0.3, 0.3) end;return true end }))",
+        ),
+        # Death: copy onto the vanished card (card.lua:1117)
+        (
+            "if G.hand.highlighted[i] ~= rightmost then\n"
+            "                        copy_card(rightmost, G.hand.highlighted[i])\n"
+            "                    end",
+            "if G.hand.highlighted[i] and G.hand.highlighted[i] ~= rightmost then\n"
+            "                        copy_card(rightmost, G.hand.highlighted[i])\n"
+            "                    end",
+        ),
+        # Strength: rank-up the vanished card (card.lua:1124)
+        (
+            "local card = G.hand.highlighted[i]\n"
+            "                    local suit_prefix = string.sub(card.base.suit, 1, 1)..'_'",
+            "local card = G.hand.highlighted[i]\n"
+            "                    if not card then return true end\n"
+            "                    local suit_prefix = string.sub(card.base.suit, 1, 1)..'_'",
+        ),
+        # suit_conv (card.lua:1138)
+        (
+            "G.E_MANAGER:add_event(Event({trigger = 'after',delay = 0.1,func = function() G.hand.highlighted[i]:change_suit(self.ability.consumeable.suit_conv);return true end }))",
+            "G.E_MANAGER:add_event(Event({trigger = 'after',delay = 0.1,func = function() if G.hand.highlighted[i] then G.hand.highlighted[i]:change_suit(self.ability.consumeable.suit_conv) end;return true end }))",
+        ),
+        # mod_conv set_ability (card.lua:1142)
+        (
+            "G.E_MANAGER:add_event(Event({trigger = 'after',delay = 0.1,func = function() G.hand.highlighted[i]:set_ability(G.P_CENTERS[self.ability.consumeable.mod_conv]);return true end }))",
+            "G.E_MANAGER:add_event(Event({trigger = 'after',delay = 0.1,func = function() if G.hand.highlighted[i] then G.hand.highlighted[i]:set_ability(G.P_CENTERS[self.ability.consumeable.mod_conv]) end;return true end }))",
+        ),
+        # Post-chain flip (card.lua:1147)
+        (
+            "G.E_MANAGER:add_event(Event({trigger = 'after',delay = 0.15,func = function() G.hand.highlighted[i]:flip();play_sound('tarot2', percent, 0.6);G.hand.highlighted[i]:juice_up(0.3, 0.3);return true end }))",
+            "G.E_MANAGER:add_event(Event({trigger = 'after',delay = 0.15,func = function() if G.hand.highlighted[i] then G.hand.highlighted[i]:flip();play_sound('tarot2', percent, 0.6);G.hand.highlighted[i]:juice_up(0.3, 0.3) end;return true end }))",
+        ),
+    ]
+    for old, new in guards:
+        if old in content:
+            content = content.replace(old, new)
+    return content
+
+
 def build_balatro_love(
     exe_path: str | Path,
     output_love: str | Path,
@@ -633,6 +691,11 @@ def build_balatro_love(
                 elif item.filename == "engine/event.lua":
                     text = extracted_data.decode("utf-8", errors="ignore")
                     patched = patch_event(text)
+                    extracted_data = patched.encode("utf-8")
+                    stats["files_patched"] += 1
+                elif item.filename == "card.lua":
+                    text = extracted_data.decode("utf-8", errors="ignore")
+                    patched = patch_card_conversion_guards(text)
                     extracted_data = patched.encode("utf-8")
                     stats["files_patched"] += 1
 
