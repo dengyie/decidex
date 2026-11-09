@@ -45,6 +45,7 @@ const NEEDS = [
   "RANK_NUM", "RANK_VALUES", "POKER_HANDS", "POKER_HAND_TIERS",
   "JOKER_PILLAR_MAP", "PLANET_HAND_MAP",
   "isStraight", "getJokerFlags", "getScoringCards", "detectConstraints",
+  "bannedHandTypeReason",
   "evaluateHandScore", "findBestPlays", "isProtectedHeldCard",
   "findBestDiscards", "optimizePlayWithJunkFilter", "arbitrateAction",
 ];

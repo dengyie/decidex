@@ -230,6 +230,54 @@ GOLDEN_CASES = [
         ],
         "expect": {"verdict": "DISCARD"},
     },
+    # --- v136 boss-blind gates (previously detected but never enforced) ---
+    {
+        # The Flint: level base halved exactly (vanilla mod_chips/mod_mult
+        # do NOT floor mid-scoring; only the final product floors).
+        # High Card K: chips 5/2 + 10 = 12.5, mult 1/2, floor(12.5*0.5) = 6.
+        "name": "flint_halves_level_base",
+        "fn": "evaluateHandScore",
+        "args": [[card("K", "S", 0)], [], {"name": "The Flint", "chips": 300}, {}],
+        "expect": {"chips": 12.5, "mult": 0.5, "totalScore": 6},
+    },
+    {
+        # The Eye: Three of a Kind already played this round -> the trips
+        # line is banned to 0 and the best LEGAL line (pair of 5s) ranks top.
+        "name": "eye_bans_already_played_hand_type",
+        "fn": "findBestPlays",
+        "args": [{"hand": [card("5", "H", 0), card("5", "D", 1), card("5", "C", 2),
+                           card("9", "H", 3), card("2", "D", 4)],
+                  "jokers": [], "blind": {"name": "The Eye", "chips": 300, "scored": 0},
+                  "hand_played_round": {"Three of a Kind": 1},
+                  "hands_left": 3, "discards_left": 2}],
+        "expect": {"handName": "Pair", "totalScore": 40},
+    },
+    {
+        # The Mouth: Pair was the round's first (and therefore only legal)
+        # type -- the higher-scoring Two Pair line (48*2=96) is banned to 0
+        # and the best legal pair (9s: 28*2) tops.
+        "name": "mouth_locks_first_played_hand_type",
+        "fn": "findBestPlays",
+        "args": [{"hand": [card("5", "H", 0), card("5", "D", 1), card("9", "C", 2),
+                           card("9", "S", 3), card("2", "H", 4)],
+                  "jokers": [], "blind": {"name": "The Mouth", "chips": 300, "scored": 0},
+                  "hand_played_round": {"Pair": 1},
+                  "hands_left": 3, "discards_left": 2}],
+        "expect": {"handName": "Pair", "totalScore": 56},
+    },
+    {
+        # The Ox: playing the most-played type (Pair, 20*2=40) wipes ALL
+        # money; while it cannot win the blind outright it is downgraded to
+        # 30% (12), so the High Card line (14) tops instead.
+        "name": "ox_downgrades_most_played_hand_while_accumulating",
+        "fn": "findBestPlays",
+        "args": [{"hand": [card("5", "H", 0), card("5", "D", 1), card("9", "C", 2),
+                           card("2", "S", 3), card("3", "H", 4)],
+                  "jokers": [], "blind": {"name": "The Ox", "chips": 300, "scored": 0},
+                  "most_played_hand": "Pair",
+                  "hands_left": 4, "discards_left": 3}],
+        "expect": {"handName": "High Card", "totalScore": 14},
+    },
 ]
 
 

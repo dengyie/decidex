@@ -1845,3 +1845,156 @@ def test_autopilot_transition_pacing_floors():
     nudge = content.split("// never more than twice per pacing floor", 1)[1].split("}, 350);", 1)[0]
     assert "sinceStep >= floor" in nudge
     assert "Math.max(600, AutoPilot.getDelayForState(sname))" in nudge
+
+
+def test_client_enforces_eye_mouth_hand_type_gates():
+    """v136 root fix: The Eye / The Mouth "blocks play" rejection loop.
+
+    Both constraints were DETECTED in detectConstraints but never consumed:
+    vanilla sets blind.block_play for a forbidden type, the bridge refuses
+    with "blind blocks play", the client transient-classifies it and re-
+    dispatches the SAME top-ranked (forbidden) play forever — the round can
+    never advance and no strike counter ever trips. The root fix bans the
+    forbidden types at RANKING time in findBestPlays, from the bridge's
+    authoritative per-type played_this_round counts.
+
+    - shared helper bannedHandTypeReason (The Eye: repeats; The Mouth: any
+      type other than the played one once one exists);
+    - findBestPlays zeroes a banned candidate (rawTotalScore keeps the
+      physical prediction for calibration);
+    - optimizePlayWithJunkFilter must not attach junk that converts a legal
+      play into a banned type (Pair -> Two Pair under The Mouth);
+    - the client resyncs the snapshot on a "blocks play" rejection so the
+      ban applies on the very next ranking.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    helper = content.split("function bannedHandTypeReason(state, constraints, handName)", 1)[1]
+    assert "constraints.noRepeatedHands" in helper
+    assert "The Eye 禁止重复牌型" in helper
+    assert "constraints.singleHandType" in helper
+    assert "The Mouth 本轮只允许" in helper
+    assert "hand_played_round" in helper
+
+    # Ranking-time gate inside findBestPlays' combine loop.
+    search = content.split("function findBestPlays(state)", 1)[1].split(
+        "function findBestDiscards", 1)[0]
+    assert "const bannedReason = bannedHandTypeReason(state, constraints, evalRes.handName);" in search
+    banned_pos = search.find("if (bannedReason) {")
+    push_pos = search.find("candidates.push(evalRes);")
+    assert 0 < banned_pos < push_pos
+    assert "evalRes.totalScore = 0;" in search
+
+    # Junk filter must not create a forbidden type.
+    junk = content.split("function optimizePlayWithJunkFilter(basePlay, state)", 1)[1].split(
+        "function arbitrateAction", 1)[0]
+    assert "if (bannedHandTypeReason(state, constraints, testEval.handName)) continue;" in junk
+
+    # The "blocks play" transient rejection triggers a snapshot resync.
+    failure = content.split("onActionDispatchFailure(action, error, sequence) {", 1)[1].split(
+        "onStateUpdated(state) {", 1)[0]
+    assert 'errMsg.includes("blocks play")' in failure
+    assert "window.decidexReEvaluate();" in failure
+
+
+def test_client_avoids_the_ox_and_predicts_the_flint():
+    """v136: two detected-but-unused boss constraints wired into decisions.
+
+    - The Ox wipes ALL money when the most-played hand is played. While the
+      Ox hand cannot win the blind outright it is downgraded to 30% so a
+      legal alternative accumulates instead; a win-outright Ox hand keeps
+      its full score (survival beats cash). most_played_hand also joins the
+      findBestPlays memo signature so a changed target re-ranks.
+    - The Flint halves base Chips/Mult — evaluateHandScore must halve the
+      hand-level base too, or every steady-accumulation verdict and the
+      calibration stream overestimate ~2x.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    search = content.split("function findBestPlays(state)", 1)[1].split(
+        "function findBestDiscards", 1)[0]
+    assert "state.idol_rank, state.idol_suit, state.most_played_hand," in search
+    assert "constraints.wipesMoneyOnMostPlayed && state.most_played_hand" in search
+    assert "evalRes.handName === state.most_played_hand" in search
+    assert "evalRes.totalScore * 0.3" in search
+    # Downgrade only when the hand does not win outright.
+    ox_block = search.split("constraints.wipesMoneyOnMostPlayed", 1)[1]
+    assert "if (evalRes.totalScore < oxNeed)" in ox_block
+
+    eval_fn = content.split("function evaluateHandScore(selectedCards, jokers, blind, stateContext)", 1)[1].split(
+        "function findBestPlays(state)", 1)[0]
+    assert "constraints.halvedBase" in eval_fn
+    assert "{ chips: lvlBase.chips / 2, mult: lvlBase.mult / 2 }" in eval_fn
+    # Halving must happen to a COPY of the level base (POKER_HANDS is the
+    # shared module-level table — mutating it in place permanently halved
+    # the hand for every later evaluation in the session), BEFORE card
+    # chips are added.
+    assert "const base = constraints.halvedBase" in eval_fn
+    flint_pos = eval_fn.find("constraints.halvedBase")
+    chips_pos = eval_fn.find("let chips = base.chips + cardChips;")
+    assert 0 < flint_pos < chips_pos
+
+
+def test_client_use_card_rejection_breaker():
+    """v136: use_card transient-refusal loop breaker.
+
+    The v134 once-mark is set BEFORE vanilla use_card runs, so a mid-body
+    failure leaves the card marked AND still in its area: the client then
+    re-selected it forever ("duplicate use_card in progress" is transient-
+    classified), and because consumable use outranks play (combat) and
+    shop-toggle, the state wedged with no strike counter to save it.
+
+    - every consumable dispatch stamps _pendingConsKey for attribution;
+    - a "duplicate" refusal skips the card for this episode immediately;
+    - other transient refusals skip after 2 strikes;
+    - the skip set clears on every state change (targets/slots may appear)
+      and on toggle; the evaluators honour it.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    # Evaluators take and honour the skip set.
+    assert "function findBestConsumableToUse(state, skipSet) {" in content
+    assert "function findBestNonCombatConsumableToUse(state, skipSet) {" in content
+    assert content.count('if (skipSet && skipSet.has(name + "|" + idx)) continue;') == 2
+
+    # All three dispatch sites stamp the pending key.
+    assert content.count("this._pendingConsKey = nonCombatCons.card.name") == 2
+    assert "this._pendingConsKey = bestCons.card.name" in content
+
+    # Breaker in the transient branch of onActionDispatchFailure.
+    failure = content.split("onActionDispatchFailure(action, error, sequence) {", 1)[1].split(
+        "onStateUpdated(state) {", 1)[0]
+    dup_pos = failure.find('errMsg.includes("duplicate")')
+    strike_pos = failure.find("this._consUseFailStreak[consKey] >= 2")
+    pending_pos = failure.find("const consKey = this._pendingConsKey;")
+    assert 0 < pending_pos < dup_pos < strike_pos
+    assert 'this._consUseSkipped.add(consKey);' in failure
+
+    # Success clears the pending attribution; state change clears all.
+    assert 'if (action === "use_card") this._pendingConsKey = null;' in content
+    reset = content.split('if (sname !== "SELECTING_HAND") this._handsExhaustedSince = null;', 1)[1]
+    assert "this._consUseSkipped.clear();" in reset
+    assert "this._consUseFailStreak = {};" in reset
+
+
+def test_client_step_error_streak_breaker():
+    """v136: decision-layer exception loop breaker.
+
+    executeStep's catch used to retry at 150-250ms forever with no
+    escalation (v135: "money is not defined" wedged every shop for 75s+
+    until a human read the logs). Consecutive step exceptions now resync
+    the snapshot at 5 and auto-pause with the visible reason at 12 (same
+    budget as hard action failures); one clean step resets the streak.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    step = content.split("async executeStep() {", 1)[1].split("window.AutoPilot = AutoPilot;", 1)[0]
+    assert "let stepThrew = false;" in step
+    assert "stepThrew = true;" in step
+    assert "this._stepErrorStreak >= 12" in step
+    assert "决策连续异常" in step
+    assert "this.toggle(false, { preserveStatus: true });" in step
+    assert "this._stepErrorStreak >= 5" in step
+    finally_pos = step.find("if (!stepThrew) this._stepErrorStreak = 0;")
+    catch_pos = step.find("stepThrew = true;")
+    assert 0 < catch_pos < finally_pos

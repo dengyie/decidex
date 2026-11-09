@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56372431;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v135";
+  const ASSET_VERSION = "v136";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=135";
-  const ASSET_WASM_URL = "love.wasm.bin?v=135";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=136";
+  const ASSET_WASM_URL = "love.wasm.bin?v=136";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -1459,9 +1459,19 @@ end
     // Base chips/mult: use the run's leveled hand values when the bridge
     // reported them (Planet cards level hands up beyond the level-1 table).
     const lvlInfo = stateContext && stateContext.hand_levels && stateContext.hand_levels[handName];
-    const base = lvlInfo
+    const lvlBase = lvlInfo
       ? { chips: Number(lvlInfo[1]) || POKER_HANDS[handName].chips, mult: Number(lvlInfo[2]) || POKER_HANDS[handName].mult }
-      : (POKER_HANDS[handName] || { chips: 10, mult: 1 });
+      : { chips: (POKER_HANDS[handName] || { chips: 10, mult: 1 }).chips,
+          mult: (POKER_HANDS[handName] || { chips: 10, mult: 1 }).mult };
+    // The Flint: Base Chips and Base Mult are halved — vanilla applies
+    // mod_chips/mod_mult(/2) with NO floor mid-scoring (only the final
+    // product floors). Applied to a COPY: POKER_HANDS is the shared
+    // module-level level-1 table and must never be mutated in place (an
+    // in-place halve poisons every later prediction of that hand for the
+    // whole session — the flint golden case caught exactly this).
+    const base = constraints.halvedBase
+      ? { chips: lvlBase.chips / 2, mult: lvlBase.mult / 2 }
+      : lvlBase;
     let chips = base.chips + cardChips;
     let mult = base.mult + cardMult;
 
@@ -1718,7 +1728,7 @@ end
         state.state_name, state.hands_left, state.discards_left, state.money,
         state.deck_count, blind.chips, blind.scored, blind.type, blind.name,
         state.starting_deck_size, state.deck_cards_total, state.tarots_used,
-        state.idol_rank, state.idol_suit,
+        state.idol_rank, state.idol_suit, state.most_played_hand,
         JSON.stringify(state.hand_levels || null),
         JSON.stringify(state.hand_played || null),
         JSON.stringify(state.hand_played_round || null),
@@ -1865,6 +1875,28 @@ end
               } else if (evalRes.totalScore >= Number(state.blind?.chips || 300)) {
                 evalRes.totalScore = Math.floor(evalRes.totalScore * 0.95);
               }
+            }
+          }
+
+          // v136 boss-blind gates, applied at RANKING time so a forbidden
+          // type can never sit above a legal one:
+          //   The Eye / The Mouth — banned types score 0 (rawTotalScore
+          //     keeps the physical prediction for calibration);
+          //   The Ox — playing the most-played hand wipes ALL money, so
+          //     while the hand cannot win the blind outright it is down-
+          //     graded to 30%: a legal alternative accumulates instead.
+          //     If it wins outright, the money loss is the price of the
+          //     round and the full score stands (survival > cash).
+          const bannedReason = bannedHandTypeReason(state, constraints, evalRes.handName);
+          if (bannedReason) {
+            evalRes.totalScore = 0;
+            evalRes.violation = bannedReason;
+          } else if (constraints.wipesMoneyOnMostPlayed && state.most_played_hand &&
+                     evalRes.handName === state.most_played_hand) {
+            const oxNeed = Math.max(0, Number(state.blind?.chips || 300) - Number(state.blind?.scored || 0));
+            if (evalRes.totalScore < oxNeed) {
+              evalRes.totalScore = Math.floor(evalRes.totalScore * 0.3);
+              evalRes.isOxRisk = true;
             }
           }
 
@@ -2121,6 +2153,32 @@ end
     "Flush Five": 12
   };
 
+  // Boss-blind hand-type gate shared by the play search and junk filtering.
+  // Returns a human-readable reason when handName is forbidden this round,
+  // or null when it is legal:
+  //   The Eye   — no hand type may be played twice this round;
+  //   The Mouth — only ONE hand type (the first played) is allowed all round.
+  // Data source: the bridge emits vanilla's per-type played_this_round
+  // counts (state.hand_played_round), maintained for every play including
+  // manual ones — authoritative with zero bridge change. Banning HERE (at
+  // ranking time) is the root fix for the "blocks play" rejection loop:
+  // the bridge refusal used to be transient-classified and re-dispatched
+  // the same forbidden type forever.
+  function bannedHandTypeReason(state, constraints, handName) {
+    if (!state || !constraints || !handName) return null;
+    const playedRound = state.hand_played_round || {};
+    if (constraints.noRepeatedHands && (Number(playedRound[handName]) || 0) > 0) {
+      return "The Eye 禁止重复牌型 (" + handName + " 本轮已打过)";
+    }
+    if (constraints.singleHandType) {
+      const playedTypes = Object.keys(playedRound).filter(t => (Number(playedRound[t]) || 0) > 0);
+      if (playedTypes.length > 0 && !playedTypes.includes(handName)) {
+        return "The Mouth 本轮只允许 " + playedTypes.join("/") + " (已锁定)";
+      }
+    }
+    return null;
+  }
+
   // Hand Filtering Optimizer: Piggyback unwanted cards onto a sub-5-card play
   function optimizePlayWithJunkFilter(basePlay, state) {
     if (!basePlay || !basePlay.cards || basePlay.cards.length === 0) return basePlay;
@@ -2315,6 +2373,10 @@ end
 
       // Ensure testEval doesn't degrade score or violate fatal constraints
       if (testEval.violation) continue;
+      // The Eye / The Mouth: attached junk must not convert a legal play
+      // into a forbidden type (e.g. Pair -> Two Pair under The Mouth would
+      // re-create the "blocks play" rejection loop this release fixes).
+      if (bannedHandTypeReason(state, constraints, testEval.handName)) continue;
       if (testEval.totalScore < basePlay.totalScore * 0.99) continue;
 
       // Verify that hand ranking didn't degrade
@@ -3090,7 +3152,7 @@ end
   const selectTarotHandTargets = selectConsumableTargets;
 
   // Consumable Evaluation System
-  function findBestConsumableToUse(state) {
+  function findBestConsumableToUse(state, skipSet) {
     const cons = state.consumables || [];
     if (cons.length === 0) return null;
     const PLANET_NAMES = ["Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune", "Pluto", "Planet X", "Ceres", "Eris"];
@@ -3107,6 +3169,7 @@ end
       const isPlanet = (c.set === "Planet") || PLANET_NAMES.includes(name) || (c.type === "planet");
       if (c.can_use === false && !isPlanet) continue;
       const idx = c.index !== undefined ? c.index : (i + 1);
+      if (skipSet && skipSet.has(name + "|" + idx)) continue;
 
       // Black Hole: upgrades ALL poker hands +1 level!
       if (name === "Black Hole") {
@@ -3161,7 +3224,7 @@ end
   }
 
   // Non-combat consumable evaluation (SHOP, BLIND_SELECT)
-  function findBestNonCombatConsumableToUse(state) {
+  function findBestNonCombatConsumableToUse(state, skipSet) {
     const cons = state.consumables || [];
     if (cons.length === 0) return null;
     const PLANET_NAMES = ["Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune", "Pluto", "Planet X", "Ceres", "Eris"];
@@ -3172,6 +3235,7 @@ end
       const isPlanet = (c.set === "Planet") || PLANET_NAMES.includes(name) || (c.type === "planet");
       if (c.can_use === false && !isPlanet) continue;
       const idx = c.index !== undefined ? c.index : (i + 1);
+      if (skipSet && skipSet.has(name + "|" + idx)) continue;
 
       // Black Hole: upgrades ALL poker hands +1 level!
       if (name === "Black Hole") {
@@ -3910,6 +3974,18 @@ end
     _shopAttemptedItems: new Set(),
     _playSawHandPlayed: false,
     _discardSawDraw: false,
+    // v136 rejection breakers:
+    // _consUseSkipped — consumables the bridge refused for THIS state
+    //   episode (duplicate once-mark or 2 transient strikes); cleared on
+    //   every state change so newly available targets are retried.
+    // _pendingConsKey — the consumable about to be dispatched, so a
+    //   use_card failure can be attributed to a card.
+    // _stepErrorStreak — consecutive executeStep exceptions (the v135
+    //   "money is not defined" class used to loop forever).
+    _consUseSkipped: new Set(),
+    _consUseFailStreak: {},
+    _pendingConsKey: null,
+    _stepErrorStreak: 0,
 
     toggle(enable, opts) {
       const options = opts || {};
@@ -3928,6 +4004,10 @@ end
         this._lastFailureReason = "";
         this._lastFailureAction = "";
         this._lastProgressTimestamp = Date.now();
+        this._consUseSkipped = new Set();
+        this._consUseFailStreak = {};
+        this._pendingConsKey = null;
+        this._stepErrorStreak = 0;
         this.startWatchdog();
         this.scheduleNextAction(200);
       } else {
@@ -4085,6 +4165,7 @@ end
           console.log(`[AutoPilot] Action ${action} confirmed by Lua: ${info}`);
           this._actionFailureStreak = 0;
           this._lastProgressTimestamp = Date.now();
+          if (action === "use_card") this._pendingConsKey = null;
         }
       }
     },
@@ -4160,6 +4241,36 @@ end
             this._skipCurrentPack = true;
             console.warn(`[AutoPilot] select_pack_card rejected 3x (${errStr.slice(0, 90)}); forcing pack leave`);
           }
+        }
+        // v136 use_card rejection breaker. The bridge marks a card BEFORE
+        // running vanilla use_card, so "duplicate ... in progress" means the
+        // effect is already queued — retrying that card can never help and
+        // used to loop forever (combat use outranks play, shop use outranks
+        // toggle). "duplicate" skips the card for this episode immediately;
+        // any other transient refusal gets 2 strikes first (readiness gates
+        // resolve within one retry). State changes clear both, so a card
+        // that becomes usable later (targets appeared, slots freed) is
+        // retried in the new episode.
+        if (action === "use_card" && this._pendingConsKey) {
+          const consKey = this._pendingConsKey;
+          this._pendingConsKey = null;
+          if (errMsg.includes("duplicate")) {
+            this._consUseSkipped.add(consKey);
+            console.warn(`[AutoPilot] use_card refused as duplicate for ${consKey}; skipping this card this episode`);
+          } else {
+            this._consUseFailStreak[consKey] = (this._consUseFailStreak[consKey] || 0) + 1;
+            if (this._consUseFailStreak[consKey] >= 2) {
+              this._consUseSkipped.add(consKey);
+              console.warn(`[AutoPilot] use_card transiently refused 2x for ${consKey}; skipping this card this episode`);
+            }
+          }
+        }
+        // A "blocks play" rejection means the snapshot's hand_played_round
+        // lagged the game (The Eye / The Mouth ban applied too late). Pull a
+        // fresh snapshot so the next ranking bans the forbidden type instead
+        // of re-dispatching it (v136 root fix lives in findBestPlays).
+        if (errMsg.includes("blocks play") && typeof window.decidexReEvaluate === "function") {
+          window.decidexReEvaluate();
         }
         if (isStateMismatch) {
           // Ask the bridge for a fresh snapshot so the next decision is made
@@ -4335,6 +4446,7 @@ end
       const sname = state.state_name;
       let executedAction = false;
       let unlockCooldownMs = 300;
+      let stepThrew = false;
 
       // Ignore transient UNKNOWN states (during screen wipe / UI destruction) so we don't clear action locks or reset dwell times
       if (!sname || sname === "UNKNOWN") {
@@ -4369,6 +4481,12 @@ end
           this._loggedShelf = false;
         }
         if (sname !== "SELECTING_HAND") this._handsExhaustedSince = null;
+        // A new state episode may legitimately make a previously refused
+        // consumable usable (targets appeared, slots freed) — restart the
+        // rejection breakers instead of carrying them across episodes.
+        this._consUseSkipped.clear();
+        this._consUseFailStreak = {};
+        this._pendingConsKey = null;
       }
 
       this.busy = true;
@@ -4414,10 +4532,11 @@ end
             unlockCooldownMs = 300;
           } else {
             // Priority 0: Use non-combat consumables (Planets, Hermit, Temperance, Wheel) before entering blind
-            const nonCombatCons = findBestNonCombatConsumableToUse(state);
+            const nonCombatCons = findBestNonCombatConsumableToUse(state, this._consUseSkipped);
             if (nonCombatCons && (!this._lastConsumableTime || now - this._lastConsumableTime > 1200)) {
               this._lastConsumableTime = now;
               this._lastProgressTimestamp = now;
+              this._pendingConsKey = nonCombatCons.card.name + "|" + nonCombatCons.index;
               this.updateStatus(`盲注前使用消耗牌: ${nonCombatCons.card.name}`, true);
               console.log("[AutoPilot] Blind select auto-using consumable:", nonCombatCons.card.name, nonCombatCons.reason);
               window.executeUseCard(nonCombatCons.index, null, "consumeables");
@@ -4570,10 +4689,11 @@ end
               unlockCooldownMs = 400;
             } else {
               // Priority 2: Check if beneficial consumables can be used before playing/discarding
-              const bestCons = findBestConsumableToUse(state);
+              const bestCons = findBestConsumableToUse(state, this._consUseSkipped);
               if (bestCons && (!this._lastConsumableTime || now - this._lastConsumableTime > 1200)) {
                 this._lastConsumableTime = now;
                 this._lastProgressTimestamp = now;
+                this._pendingConsKey = bestCons.card.name + "|" + bestCons.index;
                 this.updateStatus(`使用消耗牌: ${bestCons.card.name}`, true);
                 console.log("[AutoPilot] Auto-using consumable:", bestCons.card.name, bestCons.reason);
                 window.executeUseCard(bestCons.index, bestCons.targetIndices || null, "consumeables");
@@ -4732,10 +4852,11 @@ end
 
             // Priority 0: Use non-combat consumables (Planets, Hermit, Temperance, Wheel, Judgement)
             // to gain cash, free consumable slots for buying, or level up hands!
-            const nonCombatCons = findBestNonCombatConsumableToUse(state);
+            const nonCombatCons = findBestNonCombatConsumableToUse(state, this._consUseSkipped);
             if (nonCombatCons && (!this._lastConsumableTime || now - this._lastConsumableTime > 1200)) {
               this._lastConsumableTime = now;
               this._lastProgressTimestamp = now;
+              this._pendingConsKey = nonCombatCons.card.name + "|" + nonCombatCons.index;
               this.updateStatus(`商店使用消耗牌: ${nonCombatCons.card.name}`, true);
               console.log("[AutoPilot] Shop auto-using consumable:", nonCombatCons.card.name, nonCombatCons.reason);
               window.executeUseCard(nonCombatCons.index, null, "consumeables");
@@ -5237,12 +5358,32 @@ end
         console.error("[AutoPilot] Error during step:", e);
         executedAction = false;
         unlockCooldownMs = 150;
+        // v136: a decision-layer exception used to loop forever at 150-250ms
+        // with no escalation (v135: "money is not defined" wedged every shop
+        // for 75s+ until a human read the logs). Count consecutive step
+        // errors: resync the snapshot at 5, auto-pause with the visible
+        // reason at 12 (same budget as hard action failures).
+        stepThrew = true;
+        this._stepErrorStreak = (this._stepErrorStreak || 0) + 1;
+        const stepErrText = (e && e.message ? String(e.message) : String(e)).replace(/\s+/g, " ").trim();
+        if (this._stepErrorStreak >= 12) {
+          this.updateStatus(`决策连续异常(${this._stepErrorStreak}次)已暂停：${stepErrText}`.slice(0, 120), false);
+          this.toggle(false, { preserveStatus: true });
+        } else {
+          if (this._stepErrorStreak >= 5 && typeof window.decidexReEvaluate === "function") {
+            window.decidexReEvaluate();
+          }
+          this.updateStatus(`决策异常(${this._stepErrorStreak}/12): ${stepErrText}`.slice(0, 100), false);
+        }
       } finally {
         // If no action was dispatched, unlock busy after the transition
         // floor instead of instantly: the 100ms no-op re-entry used to
         // starve the main thread during vanilla wipe/ease events and kept
         // the previous stage's UI on screen into the next stage.
         const delay = executedAction ? unlockCooldownMs : 250;
+        // A step that completed without throwing proves the decision layer
+        // is healthy again — restart the exception breaker.
+        if (!stepThrew) this._stepErrorStreak = 0;
         setTimeout(() => {
           this.busy = false;
           if (this.enabled) {
