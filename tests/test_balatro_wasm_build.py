@@ -1154,7 +1154,9 @@ def test_play_discard_wait_gates_aligned_with_bridge_latches():
     assert "now - (this._lastPlayActionTime || 0) > 6000" in js_content
     assert "now - (this._lastDiscardActionTime || 0) > 5500" in js_content
     # The interval watchdog budgets must match (no more 15s/8s stranding).
-    assert '(this._actionInFlight === "play") ? 6500 : ((this._actionInFlight === "discard") ? 6000 : 3800)' in js_content
+    # v138: start_run carries its own 12s budget (run-creation sequence
+    # emits no snapshots for 4-7s; see test_client_start_run_waits_out_run_creation).
+    assert '(this._actionInFlight === "play") ? 6500 : ((this._actionInFlight === "discard") ? 6000 : ((this._actionInFlight === "start_run") ? 12000 : 3800))' in js_content
 
 
 def test_pack_selection_emits_content_progress():
@@ -2098,3 +2100,30 @@ def test_bridge_dispatch_clears_pack_exit_window():
     gate = content.split('if action == "select_pack_card" then', 1)[1]
     assert '_G._decidex_pack_exit_until and now_gate < _G._decidex_pack_exit_until' in gate
     assert '"pack exit in progress"' in gate
+def test_client_start_run_waits_out_run_creation():
+    """v138: every game start was force-cleared at ~3.8s ("Action start_run
+    stuck") because the run-creation sequence (wipe_on -> delete_run -1
+    limbo -> G:start_run full init -> BLIND_SELECT) emits no snapshots for
+    4-7s (soak: 7s when a deep dead run is deleted first) while the
+    anti-hang watchdog used the 3800ms default budget. start_run now gets
+    its own 12s budget (same carve-out class as select_blind), and the
+    3s busy-lock auto-clear preserves its in-flight lock like the blind
+    actions.
+    """
+    content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    # Own anti-hang budget, positioned after the play/discard ternaries.
+    assert '(this._actionInFlight === "start_run") ? 12000 : 3800' in content
+    budget_pos = content.index('(this._actionInFlight === "start_run") ? 12000 : 3800')
+    assert "v138" in content[budget_pos - 700:budget_pos]
+    # The budget sits inside the anti-hang watchdog (after the comment
+    # block that explains the force-clear discipline).
+    assert content.index("const maxStuckTime") < budget_pos
+
+    # The 3s busy-lock auto-clear must not drop a start_run in-flight lock.
+    guard = 'this._actionInFlight !== "discard" && this._actionInFlight !== "start_run"'
+    assert guard in content
+    guard_pos = content.index(guard)
+    assert "v138" in content[guard_pos:guard_pos + 300]
+    # It stays inside the busy-lock watchdog (before the anti-hang section).
+    assert guard_pos < budget_pos

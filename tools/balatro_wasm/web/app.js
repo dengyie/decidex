@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56373536;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v137";
+  const ASSET_VERSION = "v138";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=137";
-  const ASSET_WASM_URL = "love.wasm.bin?v=137";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=138";
+  const ASSET_WASM_URL = "love.wasm.bin?v=138";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -4036,7 +4036,9 @@ end
         if (this.busy && this._busyTimestamp && (now - this._busyTimestamp > maxBusyTime)) {
           console.warn(`[AutoPilot Watchdog] Busy lock held > ${maxBusyTime}ms for action ${this._actionInFlight}, auto-clearing busy lock`);
           this.busy = false;
-          if (this._actionInFlight !== "select_blind" && this._actionInFlight !== "skip_blind" && this._actionInFlight !== "play" && this._actionInFlight !== "discard") {
+          if (this._actionInFlight !== "select_blind" && this._actionInFlight !== "skip_blind" && this._actionInFlight !== "play" && this._actionInFlight !== "discard" && this._actionInFlight !== "start_run") {
+            // v138: start_run rides the same carve-out as the blind actions —
+            // the run-creation sequence outlives the 3s busy budget legitimately.
             this._actionInFlight = null;
           }
           this._busyTimestamp = null;
@@ -4055,7 +4057,13 @@ end
         // discard 5s in-progress gate + 1.5s debounce): the force-clear
         // must fire AFTER a legitimate animation window, never as the
         // routine unlock path it used to be when set to 15s/8s.
-        const maxStuckTime = (this._actionInFlight === "play") ? 6500 : ((this._actionInFlight === "discard") ? 6000 : 3800);
+        // v138: the run-creation sequence (wipe_on -> delete_run -1 limbo ->
+        // G:start_run full init -> BLIND_SELECT) emits no snapshots for 4-7s
+        // (measured: 7s when a deep dead run is deleted first) and is a
+        // legitimate animation window, same class as the select_blind
+        // carve-out below. Its own budget stops the 3800ms default from
+        // force-clearing every game start.
+        const maxStuckTime = (this._actionInFlight === "play") ? 6500 : ((this._actionInFlight === "discard") ? 6000 : ((this._actionInFlight === "start_run") ? 12000 : 3800));
         if (now - this._lastProgressTimestamp > maxStuckTime) {
           if (this._actionInFlight) {
             if ((this._actionInFlight === "select_blind" || this._actionInFlight === "skip_blind") && curStateName === "BLIND_SELECT") {
