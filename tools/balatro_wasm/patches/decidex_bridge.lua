@@ -632,6 +632,7 @@ local function abandon_pack()
   if not is_pack_state() then return false end
   local ok = pcall(function()
     local back = (G.GAME and G.GAME.PACK_INTERRUPT) or G.STATES.SHOP
+    local dying_area = G.pack_cards
     if G.booster_pack then
       pcall(function() G.booster_pack:remove() end)
       G.booster_pack = nil
@@ -651,7 +652,29 @@ local function abandon_pack()
     -- updates cheaply and harmlessly; the align_to_major guard covers any
     -- layout fallout.
     step("pack_cards_ref", function() G.pack_cards = nil end)
-    step("pack_interrupt", function() G.GAME.PACK_INTERRUPT = nil end)
+    step("pack_cards_zombie", function()
+      -- v137: booster_pack:remove() cascades into the pack_cards
+      -- CardArea (a UI child) and CardArea:remove() nils .cards. A
+      -- stale use_card restore event queued before this abandon still
+      -- holds the area object and indexes area.cards[1] at fire time
+      -- (button_callbacks.lua:2283 — 61 crashes per 40min soak, still
+      -- firing whenever a congested queue delivers the restore late).
+      -- Give the zombie an empty living table so the late restore
+      -- evaluates area.cards[1] as falsy and skips gracefully.
+      if dying_area and dying_area.cards == nil then
+        dying_area.cards = {}
+      end
+    end)
+    step("pack_interrupt", function()
+      -- v137: leave a VALID state value (where we are returning to)
+      -- instead of nil. Vanilla's queued end_consumeable tail
+      -- (button_callbacks.lua:2625) reads G.GAME.PACK_INTERRUPT at FIRE
+      -- time and writes it straight into G.STATE; after this abandon
+      -- nil'd the field that tail wrote nil and the nil-STATE repair
+      -- fired 10+ times per episode. With a valid value the same tail
+      -- re-writes the state we already set, then self-clears the field.
+      G.GAME.PACK_INTERRUPT = back
+    end)
     step("tarot_interrupt", function() G.TAROT_INTERRUPT = nil end)
     step("state", function()
       G.STATE = back
@@ -1088,6 +1111,26 @@ local function pack_stall_watchdog()
 
   local now = (love.timer and love.timer.getTime()) or os.clock()
 
+  -- v137: a stale vanilla restore event (use_card's +0.3s
+  -- "G.STATE = prev_state", end_consumeable's +0.2s
+  -- "G.STATE = G.GAME.PACK_INTERRUPT") can re-enter the pack we JUST
+  -- abandoned. Full recovery churn on such a ghost costs seconds per
+  -- cycle (stall tripwire -> STATE_COMPLETE re-arm -> rebuild ->
+  -- populate -> auto-close) and ends in another abandon anyway. If we
+  -- abandoned within the exit window and no live pack UI exists,
+  -- re-abandon in one frame. Any dispatched action clears the window
+  -- first (decidex_execute_inner), so a freshly purchased pack is never
+  -- mistaken for a ghost.
+  if _G._decidex_pack_exit_until and now < _G._decidex_pack_exit_until
+      and not G.booster_pack then
+    local gpc = G.pack_cards
+    if not gpc or not gpc.cards or not gpc.cards[1] then
+      print("[DecideX Pack Watchdog] ghost pack state after abandon (stale vanilla restore); re-abandoning")
+      abandon_pack()
+      return true
+    end
+  end
+
   -- The pack UI is healthy as soon as G.pack_cards exists AND holds the
   -- pack's cards. An EMPTY area for >12s is a dead end, not health: when
   -- the watchdog rebuild raced the queued card-creation events, those
@@ -1349,7 +1392,8 @@ end
 --   * G.GAME.PACK_INTERRUPT must be set — REMOVED in v131b (diag build:
 --     rebuilt packs always have it nil at close time; abandon_pack falls
 --     back to the shop on its own);
---   * the empty state is stable for 0.15s (anti-flicker);
+--   * the empty state is stable for 0.45s (anti-flicker + v137: the
+--     queued vanilla restore chain for the last used card lands first);
 --   * once per episode.
 local function auto_close_consumed_pack()
   if not is_pack_state() then
@@ -1380,7 +1424,15 @@ local function auto_close_consumed_pack()
     _G._pack_empty_confirm = now
     return false
   end
-  if now - _G._pack_empty_confirm < 0.15 then return false end
+  -- v137: 0.15 -> 0.45. The queued vanilla restore chain for the last
+  -- used pack card lands at ~+0.3s (use_card: +0.2s dissolve, +0.1s
+  -- "G.STATE = prev_state"). Closing before it fires raced the event:
+  -- the restore then re-wrote the abandoned pack state (ghost churn)
+  -- and indexed the cascade-removed area (button_callbacks.lua:2283,
+  -- 61 crashes per 40min soak). At 0.45s the restore lands while the
+  -- pack is still open: the area is alive-but-empty so the restore
+  -- skips gracefully and vanilla's own self-close gets its chance.
+  if now - _G._pack_empty_confirm < 0.45 then return false end
   if _G._pack_auto_closed then return false end
   _G._pack_auto_closed = true
   print("[DecideX Bridge] pack consumed (area empty); auto-closing via abandon_pack")
@@ -2944,6 +2996,17 @@ end
 local function decidex_execute_inner(action, args)
   if not G then return false, "no G" end
   args = args or {}
+
+  -- v137: any dispatched action proves a live decision-maker, so the
+  -- post-abandon exit window no longer applies: without this, a pack
+  -- legitimately purchased seconds after an abandon would be killed by
+  -- the ghost-state guard in pack_stall_watchdog. select_pack_card is
+  -- the exception — it keeps its own post-abandon gate below, whose
+  -- whole job is refusing a stuck retry that lands in a resurrected
+  -- empty pack.
+  if action ~= "select_pack_card" then
+    _G._decidex_pack_exit_until = nil
+  end
 
   -- §D actual-action backfill: record what was really selected at the
   -- moment of the action. By the time the snapshot is emitted the selected

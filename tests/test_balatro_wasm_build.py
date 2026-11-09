@@ -1523,10 +1523,12 @@ def test_bridge_auto_closes_consumed_pack():
     # Only close packs whose contents were actually seen (half-created packs
     # are transiently empty while their card-creation events run).
     assert "_G._pack_seen_nonempty" in body
-    # Anti-flicker stability window before closing (v131: 0.15s — with the
-    # native-fill kick the area empties the instant the last card is
-    # picked, and each extra 100ms here is a client force_leave round trip).
-    assert "now - _G._pack_empty_confirm < 0.15" in body
+    # Anti-flicker stability window before closing. v131: 0.15s. v137:
+    # 0.45s — the queued vanilla restore chain for the last used card
+    # lands at ~+0.3s; closing before it fires raced the event (ghost
+    # pack state resurrect + button_callbacks.lua:2283 crash on the
+    # cascade-removed area, 61 per 40min soak).
+    assert "now - _G._pack_empty_confirm < 0.45" in body
     # end_consumeable restores G.STATE from PACK_INTERRUPT and nils it; a
     # second call would write nil into G.STATE.
     # v131b: the PACK_INTERRUPT guard is GONE — the diag build proved that
@@ -1998,3 +2000,101 @@ def test_client_step_error_streak_breaker():
     finally_pos = step.find("if (!stepThrew) this._stepErrorStreak = 0;")
     catch_pos = step.find("stepThrew = true;")
     assert 0 < catch_pos < finally_pos
+def test_bridge_abandon_leaves_valid_pack_interrupt():
+    """v137: abandon_pack must NOT nil G.GAME.PACK_INTERRUPT.
+
+    Vanilla's queued end_consumeable tail (button_callbacks.lua:2625)
+    reads G.GAME.PACK_INTERRUPT at FIRE time (+0.2s) and writes it
+    straight into G.STATE. After the abandon nil'd the field, that tail
+    wrote nil into G.STATE and the nil-STATE repair fired 10+ times per
+    episode (soak v137-diag: 13 repairs per 40min). Leaving the state we
+    are returning to keeps the tail's write valid; the tail then
+    self-clears the field exactly as vanilla designed.
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+    body = content.split("local function abandon_pack()", 1)[1].split(
+        chr(10) + "local function ", 1)[0]
+
+    # The interrupt step normalizes to the return state instead of nil.
+    assert "step(\"pack_interrupt\", function()" in body
+    assert "G.GAME.PACK_INTERRUPT = back" in body
+    assert "G.GAME.PACK_INTERRUPT = nil" not in body
+    # back is computed before the steps run (used by both the state step
+    # and the interrupt step).
+    assert "local back = (G.GAME and G.GAME.PACK_INTERRUPT) or G.STATES.SHOP" in body
+    # The interrupt step must come after `back` is bound (order sanity:
+    # back-pos < interrupt-pos).
+    back_pos = body.index("local back = (G.GAME and G.GAME.PACK_INTERRUPT) or G.STATES.SHOP")
+    int_pos = body.index("G.GAME.PACK_INTERRUPT = back")
+    assert back_pos < int_pos
+
+    # v137 F4: the cascade-removed pack area becomes a zombie with a
+    # living empty table, so a late use_card restore evaluates
+    # area.cards[1] as falsy instead of crashing (button_callbacks
+    # :2283, 61 per 40min soak when the congested queue delivers the
+    # restore after the abandon).
+    assert "local dying_area = G.pack_cards" in body
+    assert "pack_cards_zombie" in body
+    assert "if dying_area and dying_area.cards == nil then" in body
+    assert "dying_area.cards = {}" in body
+    # Capture must precede the ref-nil step (capture-pos < ref-pos).
+    cap_pos = body.index("local dying_area = G.pack_cards")
+    ref_pos = body.index('step("pack_cards_ref", function() G.pack_cards = nil end)')
+    assert cap_pos < ref_pos
+
+
+def test_bridge_ghost_state_reabandon_guard():
+    """v137: a stale vanilla restore event re-enters the pack we just
+    abandoned (use_card's +0.3s "G.STATE = prev_state"). Full recovery
+    churn on that ghost (stall tripwire -> STATE_COMPLETE re-arm ->
+    rebuild -> populate -> auto-close) costs seconds per cycle and ends
+    in another abandon anyway. The watchdog must re-abandon in one frame
+    when the exit window is active, no pack UI exists, and the area is
+    gone/empty — before any of the recovery machinery runs. Dispatched
+    actions clear the window, so a freshly purchased pack is never a
+    ghost.
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+    body = content.split("local function pack_stall_watchdog()", 1)[1].split(
+        chr(10) + "local function ", 1)[0]
+
+    # The ghost guard is present and uses the exit window + UI absence.
+    assert "_G._decidex_pack_exit_until and now < _G._decidex_pack_exit_until" in body
+    assert "and not G.booster_pack then" in body
+    assert "if not gpc or not gpc.cards or not gpc.cards[1] then" in body
+    assert "ghost pack state after abandon" in body
+    assert "abandon_pack()" in body
+    # The guard runs BEFORE the empty-area health logic and the stall
+    # tripwire (guard-pos < G.pack_cards health check).
+    guard_pos = body.index("_G._decidex_pack_exit_until and now < _G._decidex_pack_exit_until")
+    health_pos = body.index("if G.pack_cards then")
+    assert guard_pos < health_pos
+    # And before the stall tripwire print.
+    trip_pos = body.index("pack stalled for")
+    assert guard_pos < trip_pos
+
+
+def test_bridge_dispatch_clears_pack_exit_window():
+    """v137: any dispatched action proves a live decision-maker, so
+    decidex_execute_inner must clear the post-abandon exit window --
+    otherwise the ghost-state guard in pack_stall_watchdog would kill a
+    pack legitimately purchased seconds after an abandon. select_pack_card
+    is exempt: its own gate ("pack exit in progress") must keep refusing
+    a stuck retry that lands in a resurrected empty pack.
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+    body = content.split("local function decidex_execute_inner(action, args)", 1)[1].split(
+        chr(10) + "local function ", 1)[0]
+
+    assert 'if action ~= "select_pack_card" then' in body
+    assert "_G._decidex_pack_exit_until = nil" in body
+    clear_pos = body.index("_G._decidex_pack_exit_until = nil")
+    # The clear runs before the first action branch (§D capture helpers
+    # are defined at the top; the first action handler follows it).
+    first_action = body.index('if action == "play" or action == "discard" then')
+    assert clear_pos < first_action
+
+    # The select_pack_card gate survives.
+    gate = content.split('if action == "select_pack_card" then', 1)[1]
+    assert '_G._decidex_pack_exit_until and now_gate < _G._decidex_pack_exit_until' in gate
+    assert '"pack exit in progress"' in gate
