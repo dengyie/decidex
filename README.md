@@ -1,156 +1,220 @@
+<!-- markdownlint-disable-file MD033 MD045 -->
 <div align="center">
 
 # DecideX
 
-**Industrial Decision Foundation Layer for System One Game-Playing Models**
+**Industrial Decision Foundation Layer & Safe Inference Runtime for System One Fast-Thinking Models**
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
-[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg?style=flat-square)](https://www.python.org/)
-[![Pydantic](https://img.shields.io/badge/Pydantic-v2-e92063.svg?style=flat-square)](https://pydantic.dev)
-[![Tests](https://img.shields.io/badge/pytest-86%20passed-brightgreen.svg?style=flat-square)]()
-[![CI/CD](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions%20%2B%20SSH%20Deploy-success.svg?style=flat-square)]()
+[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![Pydantic](https://img.shields.io/badge/Pydantic-v2-E92063.svg?style=flat-square&logo=pydantic&logoColor=white)](https://pydantic.dev)
+[![FastAPI](https://img.shields.io/badge/Framework-FastAPI-009688.svg?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Tests](https://img.shields.io/badge/tests-552%20passed-brightgreen.svg?style=flat-square)]()
+
+[English](./README.md) · [简体中文](./README.zh-CN.md) · [Core Features](#core-features) · [Architecture](#system-architecture) · [Primitives](#core-decision-primitives) · [Quick Start](#quick-start) · [Model Failover](#model-provider--failover-hierarchy)
+
+<br>
+
+<p align="center">
+  <b>Terminates high-latency overhead and hallucinatory text generation pitfalls of general LLMs in real-time gaming and high-frequency control.</b><br>
+  Provides an industrial-grade runtime for sub-100ms System One structured decision models (TypeSafe Jev, Nace Drex, NanoJev) with calibrated safety gates, multi-head isolation, and deadlock prevention.<br>
+  Features a five-stage formal decision pipeline, 1,170+ account pool management with amortized O(1) round-robin scheduling and exponential backoff, and production adapters for competitive games.
+</p>
 
 </div>
 
 ---
 
-**DecideX** 是专为 **System One（快思考）超低延迟结构化决策模型**（如 TypeSafe Jev、开源 NanoJev 及专用二分类/多选小模型 SLM）量身打造的工业级通用决策基座框架。
+## Motivation & Architecture Comparison
 
-浏览器工具入口：启动 Balatro Web 服务后访问 `/`；Balatro WASM 游戏位于 `/play`，远程实时控制台位于 `/stream`。Hearthstone 回放服务可独立部署，并可在入口页配置其地址。
+Traditional generative Large Language Models (LLMs) suffer from high latency (500ms–3s), unpredictable text hallucination, and lack of calibrated mathematical confidence. DecideX strictly decouples intent evaluation ("What") from physical actuation ("How"):
 
-传统生成式大语言模型（LLM）因**延迟高（500ms~3s）**、**自由文本易幻觉**、**难以微分**以及**缺乏严格数学置信度**，难以胜任毫秒级即时对抗与复杂状态树博弈。DecideX 彻底将**“意图研判（What）”**与**“物理执行（How）”**解耦，确立了**五阶段形式化决策演算管道**，在确保毫秒级推理速度的同时，提供严格的安全门控、多头隔离、防死循环熔断与确定性降级保障。
+| Evaluation Dimension | DecideX Foundation | Conventional Generative LLM | Pure Rule Engine / Heuristic |
+| :--- | :--- | :--- | :--- |
+| **Inference Latency** | Sub-100ms discrete decision tokens | 500ms - 3000ms autoregressive generation | < 1ms static execution |
+| **Output Space** | Strongly typed discrete actions (`BOOLEAN`, `CHOICE`, `SCORE`) | Free-form unstructured text | Fixed pre-programmed conditional branches |
+| **Confidence Calibration** | Temperature-scaled Softmax ($p \in [0, 1]$) with Logit shifts | Uncalibrated token log-probabilities | Binary rule matches without uncertainty modeling |
+| **Safety Gating** | Real-time oscillation detection, deadlocks, and fallback switches | Post-hoc regex matching or guardrail models | Static manual exception handling |
+| **Egress Resilience** | Multi-provider failover across 1,170+ pooled accounts | Single API endpoint or gateway failover | Local calculation, no external network risk |
+| **Generalization** | Adapts to novel state spaces via fast-thinking System One weights | Broad reasoning but too sluggish for real-time control | Brittle, zero adaptability to unforeseen states |
 
 ---
 
-## 架构总览与五阶段决策演算
+## Core Features
 
-DecideX 的核心设计哲学是：**“模型给出直觉，代码守死边界，基座提供容灾”**。
+| Module | Feature Highlight | Technical Implementation & Advantage |
+| :--- | :--- | :--- |
+| **Five-Stage Pipeline** | End-to-end decision lifecycle | Formalized five phases: Evidence Assembly, Bounded Inference, Safety Gating, Deterministic Fallback, and Telemetry Update. |
+| **Safety Gating Guard** | Numerical stability & anti-oscillation | Implements max-shifted Softmax ($z_i - z_{\max}$) preventing overflow, cyclic deadlock detection ($[A,B,A,B]$), and multi-head action whitelists. |
+| **Decision Primitives** | Strongly typed inference contracts | Built on Pydantic v2: `BOOLEAN` (binary truth), `CHOICE` (discrete selection), `SCORE` (scalar utility $[-1.0, 1.0]$), and `MULTI_CHOICE`. |
+| **Multi-Provider Failover** | Tiered priority routing engine | Hierarchical fallback: FuturePPO (free tier) -> Nace Drex -> MindsHub -> TypeSafe 1,170+ enterprise pool with circuit breakers. |
+| **Fleet KeyPool Hub** | High-concurrency account orchestrator | Amortized $O(1)$ ring-pointer scheduling, dynamic `Retry-After` header extraction, exponential backoff ($60\text{s} \times 2^k$), and atomic file persistence. |
+| **Real-Time Game Adapters** | Production-tested game runtimes | Production integrations for ARK 2048 (CDP 9222 + Canvas hook), Super Mario (predictive frame clock), Balatro, and Hearthstone. |
 
-```
+---
+
+## System Architecture
+
+```text
                     ┌────────────────────────────────────────┐
                     │       1. Evidence Assembly             │
-                    │   (多模态/语义特征提取与上下文装配)      │
+                    │ (Multimodal / Feature Context Packing) │
                     └───────────────────┬────────────────────┘
                                         │
                                         ▼
                     ┌────────────────────────────────────────┐
                     │     2. Bounded Model Judgment          │
-                    │   (System One 极速二分类 / 多选推理)    │
+                    │   (System One Discrete Inference SLM)  │
                     └───────────────────┬────────────────────┘
                                         │
                                         ▼
                     ┌────────────────────────────────────────┐
                     │     3. Calibrated Safety Gating        │
-                    │   (置信度校准 / 振荡检测 / 动作防呆)    │
+                    │ (Softmax Bounds / Cycle Loop Detection)│
                     └───────┬────────────────────────┬───────┘
-                            │ [通过]                 │ [拒绝/越界]
+                            │ [Pass]                 │ [Reject / Out-of-Bounds]
                             ▼                        ▼
                     ┌───────────────┐        ┌───────────────┐
-                    │ 采用模型决策   │        │ 4. Fallback   │
-                    │ (Target Act)  │        │ (确定性启发保底)│
+                    │ Adopt Model   │        │ 4. Fallback   │
+                    │ Verdict       │        │ Deterministic │
                     └───────┬───────┘        └───────┬───────┘
                             │                        │
                             └───────────┬────────────┘
                                         ▼
                     ┌────────────────────────────────────────┐
                     │ 5. Telemetry Feedback & Memory Update  │
-                    │   (时序记忆追加、动作沉降与遥测刷盘)     │
+                    │ (Temporal Ring Buffer / fcntl Logging) │
                     └────────────────────────────────────────┘
 ```
 
-### 1. 五阶段演算定义
-1. **Evidence Assembly（证据装配）**：提取游戏核心状态事实，将连续空间与高阶特征压缩为正反向语义准则（Semantic Criteria）。
-2. **Bounded Model Judgment（模型研判）**：调用 System One 决策模型，毫秒级输出带校准置信度的离散决策。
-3. **Calibrated Safety Gating（安全门控）**：
-   - **最大值平移 Softmax**：$p_i = \frac{\exp(z_i - z_{\max})}{\sum_j \exp(z_j - z_{\max})}$，杜绝极端 Logit 或 $T \to 0$ 导致的数值溢出。
-   - **多头动作隔离**：按 `question.id` 独立路由候选集，显式空列表 `[]`（如角色被控无合法操作）严格阻断。
-   - **周期振荡检测**：滑动窗口识别 $[A, B, A, B]$ 或 $[A, B, C, A, B, C]$ 往复循环死锁。
-   - **连续动作安全防呆**：智能区分生产性动作（如 2048 连续向下合并）与无效停滞（`BLOCKED`、`STUCK`）。
-4. **Deterministic Fallback（确定性保底）**：模型超时、网络异常、置信度不足或被安全门拦截时，平滑降级至启发式算法。
-5. **Telemetry Feedback & Memory Update（遥测回流与记忆）**：时序记忆追加、动作沉降防假结算、`fcntl.flock` 跨进程安全落盘。
+### Five-Stage Pipeline Details
 
-### 2. 四大核心决策原语 (Decision Primitives)
-| 原语名称 | 类型枚举 | 输出形态 | 典型应用场景 |
+1. **Evidence Assembly**: Compresses continuous game states and observation matrices into semantic criteria without redundant token waste.
+2. **Bounded Model Judgment**: Dispatches structured requests to System One inference endpoints, receiving discrete choices and posterior distributions.
+3. **Calibrated Safety Gating**:
+   - **Max-Shifted Softmax**: Computes $p_i = \frac{\exp(z_i - z_{\max})}{\sum_j \exp(z_j - z_{\max})}$, eliminating numerical overflow at extreme logits or $T \to 0$.
+   - **Multi-Head Action Isolation**: Independently routes question choices and strictly halts if an active question produces an empty legal action candidate set.
+   - **Cyclic Oscillation Detection**: Sliding window buffer detects repetitive behavioral loops such as $[A, B, A, B]$ or $[A, B, C, A, B, C]$.
+   - **Productive Action Gating**: Distinguishes between intentional repetitive inputs (e.g., merging 2048 downward tiles) versus trapped stall states (`BLOCKED`, `STUCK`).
+4. **Deterministic Fallback**: Automatically downgrades to algorithmic heuristics when inference times out, network fails, or confidence drops below target thresholds.
+5. **Telemetry Feedback & Memory Update**: Appends transitions to ring-buffer temporal memory, registers state settling guards, and flushes audit records via `fcntl.flock`.
+
+---
+
+## Core Decision Primitives
+
+| Primitive | Value Type | Output Specification | Typical Scenarios |
 | :--- | :--- | :--- | :--- |
-| **`BOOLEAN`** | 二值真假 | 布尔真值 + 校准置信度 ($p \in [0, 1]$) | 是否跳跃、是否交法术反制、是否提前交大招 |
-| **`CHOICE`** | 单选/多选 | 选定分支 + 全概率后验分布 ($p_i$) | 战术动作选择、手牌出牌/弃牌、走子方向 |
-| **`SCORE`** | 标量估值 | 连续分值估算 ($s \in [-1.0, 1.0]$) | 盘面危险度评分、斩杀概率、预期胜率估值 |
-| **`MULTI_CHOICE`** | 多标签判定 | 离散子集集合 | 复合招式组合、多目标协同攻击 |
+| **`BOOLEAN`** | Binary True / False | Truth value + calibrated confidence ($p \in [0, 1]$) | Jump timing, spell countering, defensive shield activation |
+| **`CHOICE`** | Single / Multi-Option | Selected candidate + posterior probability distribution | Tactical maneuvers, card play vs. discard, chess move selection |
+| **`SCORE`** | Continuous Scalar | Normalized utility estimation ($s \in [-1.0, 1.0]$) | Board danger index, lethal damage probability, expected win rate |
+| **`MULTI_CHOICE`**| Multi-Label Subset | Discrete set of valid choices | Combo sequence execution, multi-target coordinated focus |
 
 ---
 
-## 已接入实战项目矩阵
+## Production Implementations
 
-DecideX 已经过多品类真实场景验证，涵盖即时动作、回合制卡牌、数学推演与大规模号池集群：
+### 1. ARK 2048 Autonomous Matcher (`examples/play_2048_live.py`)
+- **Real-Time Environment**: Connects directly to live browser sessions via Chrome DevTools Protocol (CDP 9222).
+- **Single-Step Decision Guarantee**: Strictly executes individual step-by-step model evaluations, rejecting multi-step batching shortcuts.
+- **Canvas Memory Hook**: Non-intrusively injects JS hooks intercepting `CanvasRenderingContext2D.prototype.fillText` to capture live 4x4 matrix states.
+- **Expectimax Foresight**: Uses uniform grid stride sampling with snake-pattern monotonicity scoring to calculate anchor rewards.
+- **Zero-Flicker Rendering**: Replaces disruptive shell clears with ANSI in-place cursor overwrites (`\033[2J\033[H`).
 
-### 🎮 1. ARK 2048 实战单步对战 (`examples/play_2048_live.py`)
-- **真实环境**：通过 Chrome DevTools Protocol (CDP 9222) 附着真实在线对战页面（`https://game.ark717.com/`）。
-- **严格遵循单步实时决策**：**坚决贯彻“每一步均由 Jev 独立研判，拒绝多步打包合并”**，真机毫秒级实时对决。
-- **Canvas Hook 盘面感知**：向网页无侵入注入 JS 拦截器，使用 `saveDepth` 嵌套深度计数器拦截 `CanvasRenderingContext2D.prototype.fillText`，精准提取 4x4 实时矩阵。
-- **无偏 Expectimax 前瞻估值**：采用均匀网格步长（Uniform Grid Stride）采样消除上方偏置，精准计算蛇形单调性（Snake Pattern）与角锚定得分。
-- **实战防抖与终端渲染**：内置 `StateSettlementGuard` 消除幽灵过渡帧；采用 ANSI 原地字符覆盖（`\033[2J\033[H`）取代 `os.system("clear")`，实现控制台 0 闪烁低延迟渲染。
+### 2. Super Mario Reactive Controller (`examples/mario_reactive_demo.py`)
+- **Dual-Frequency Clock**: `PredictiveFrameController` decouples 120Hz micro-physics simulation ticks from 15Hz macro inference evaluation.
+- **Inertial Lookahead**: Maintains previous movement momentum during network inference round-trips, eliminating frame drops.
 
-### 🍄 2. 超级马里奥 Mario 实时反应式对战 (`examples/mario_reactive_demo.py`)
-- **双轨分频时钟调度**：通过 `PredictiveFrameController` 将 120Hz 微观物理帧与 15Hz 宏观意图推理帧解耦。
-- **异步双缓冲前瞻**：在云端网络推理延迟期间维持前帧惯性动作，有效抗网络抖动，高帧率游戏无感掉帧。
+### 3. Balatro Turn-Based Tactics (`examples/balatro_turn_demo.py`)
+- **Combinatorial Pruning**: `CandidatePruner` trims 50+ hand permutations down to Top-3 viable tactical subsets to avoid probability dilution.
+- **Multi-Head Evaluation**: Jointly evaluates play vs. discard choices, tarot trigger windows, and chip multiplier expectations.
 
-### 🃏 3. 小丑牌 Balatro 战术回合决策 (`examples/balatro_turn_demo.py`)
-- **组合爆炸空间剪枝**：利用 `CandidatePruner` 启发式粗排，将 50+ 组合空间实时剪枝至 Top-3 候选，防止模型概率过度稀释。
-- **多头协同研判**：单步协同决策“出牌 vs 弃牌”、“塔罗牌触发时机”与“筹码乘区期望”。
+### 4. Hearthstone Game-Tree Reasoning
+- **Multi-Head Routing**: Enforces strict action routing across `{"play_card": [...], "target_unit": [...]}` dictionaries.
+- **Rigid Rule Engine**: Incorporates mana crystal constraints, taunt minion targeting requirements, and lethal calculations.
 
-### ⚔️ 4. 炉石传说 Hearthstone 博弈树决策
-- **多头动作隔离路由**：精准实现 `{"play_card": [...], "target_unit": [...]}` 字典级合法动作路由。
-- **硬性规则校验**：集成费用水晶刚性约束、嘲讽怪强制吸收攻击与斩杀线预测。
-
-### 🗝️ 5. Fleet KeyPool 账号集群调度中枢 (`decidex/pool.py`)
-- **1,171+ 现网账号纳管**：支撑大规模高并发调用场景。
-- **$O(1)$ 摊销 Round-Robin**：环形指针避免重复分配推导列表，单步决策开销降低 90%。
-- **容灾防封断路器**：智能解析 HTTP 429 的 `Retry-After` 响应头，支持指数退避（$60\text{s} \times 2^k$）；精准 401 隔离；临时文件 `os.replace` 原子防崩落盘。
+### 5. Fleet KeyPool Account Hub (`decidex/pool.py`)
+- **1,170+ Live Accounts**: Manages enterprise token pools under high-throughput production workloads.
+- **Amortized O(1) Scheduling**: Ring pointers eliminate repetitive allocation overhead, slashing single-step dispatch latency by 90%.
+- **Circuit Breaker & Backoff**: Automatically reads HTTP 429 `Retry-After` headers for exponential backoff ($60\text{s} \times 2^k$) and isolates invalid 401 keys atomically.
 
 ---
 
-## 快速上手与使用指南
+## Model Provider & Failover Hierarchy
 
-### 1. 环境安装
-DecideX 采用现代 Python 标准打包（`pyproject.toml` + `hatchling`）：
+DecideX provides resilient multi-route orchestration across heterogeneous providers through `PriorityFailoverProvider`:
+
+```text
+Priority 1: FuturePPO Free Gateway  ──► [HTTP 429/529 / Cooldown]
+    │
+    ▼
+Priority 2: Nace Drex (drex-latest) ──► [HTTP 429/529 / Cooldown]
+    │
+    ▼
+Priority 3: MindsHub Aggregator     ──► [HTTP 429 / Quota Exhaustion]
+    │
+    ▼
+Priority 4: TypeSafe Enterprise Pool (1,170+ Managed Keys)
+    │
+    ▼
+Fallback:   Deterministic Heuristic Safety Engine
+```
+
+### Provider Configuration
+
+```python
+from decidex.providers import PriorityFailoverProvider
+
+# Automatically configures default priority failover chain
+provider = PriorityFailoverProvider.from_default_routes()
+verdicts = await provider.infer(payload, questions)
+
+# Inspect per-route telemetry (active / cooldown / dead status)
+print(provider.stats())
+```
+
+---
+
+## Quick Start
+
+### 1. Installation
 
 ```bash
-# 克隆代码仓库
+# Clone repository
 git clone https://github.com/dengyie/decidex.git
 cd decidex
 
-# 创建并激活虚拟环境
+# Create and activate virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
 
-# 安装基础与开发依赖
+# Install package in editable mode with development dependencies
 pip install -e ".[dev]"
 ```
 
-### 2. 统一运维脚手架 (`./manage.sh`)
+### 2. Operational CLI (`./manage.sh`)
 
 ```bash
-# 查看号池容量与可用状态
+# Inspect KeyPool capacity and health statistics
 ./manage.sh stats
 
-# 并发抽验号池存活与延迟 (5并发抽查5个Key)
+# Probe live account latency (5 workers, 5 random samples)
 ./manage.sh probe --sample 5 --workers 5
 
-# 执行全量单元测试与回归套件 (86 项全绿)
+# Run complete test suite (552 passed)
 ./manage.sh test
 
-# 启动 2048 实时 CDP 实盘对战
+# Launch ARK 2048 CDP live match
 ./manage.sh play-2048 --mode hybrid --delay 0.05
 
-# 运行各场景演示 Demo
-./manage.sh demo mario     # 实时反应式
-./manage.sh demo balatro   # 回合制多头
-./manage.sh demo keypool   # 号池限频容灾
+# Run game demonstration pipelines
+./manage.sh demo mario     # Reactive real-time gaming
+./manage.sh demo balatro   # Turn-based tactical pruning
+./manage.sh demo keypool   # Account pool rate-limiting & failover
 ```
 
-### 3. Python 核心调用示例
+### 3. Python API Integration
 
-#### 回合制多头决策
 ```python
 import asyncio
 from decidex import DecisionEngine, DecisionTask, DecisionQuestion, PrimitiveType
@@ -158,146 +222,89 @@ from decidex.guards import CalibratedDecisionGuard
 from decidex.providers.typesafe import TypeSafeJevProvider
 
 async def main():
-    # 1. 初始化引擎（自动加载本地 keys.jsonl 号池）
+    # 1. Initialize engine with calibrated safety guard
     provider = TypeSafeJevProvider()
     engine = DecisionEngine(
         provider=provider,
         guard=CalibratedDecisionGuard(min_confidence=0.6, enforce_legal=True)
     )
 
-    # 2. 构造多头决策任务
+    # 2. Formulate multi-head decision task
     task = DecisionTask(
-        id="combat_turn_1",
+        id="combat_turn_01",
         questions=[
-            DecisionQuestion(id="skill", primitive=PrimitiveType.CHOICE, prompt="选择技能", options=["Attack", "Heal", "Defend"]),
-            DecisionQuestion(id="target", primitive=PrimitiveType.CHOICE, prompt="选择目标", options=["Boss", "MinionA", "Self"])
+            DecisionQuestion(
+                id="skill",
+                primitive=PrimitiveType.CHOICE,
+                prompt="Select combat skill",
+                options=["Attack", "Heal", "Defend"]
+            ),
+            DecisionQuestion(
+                id="target",
+                primitive=PrimitiveType.CHOICE,
+                prompt="Select target unit",
+                options=["Boss", "MinionA", "Self"]
+            )
         ],
         context={"player_hp": 65, "boss_hp": 20, "potions": 1}
     )
 
-    # 3. 传入多头独立动作白名单
+    # 3. Supply legal action candidate whitelist
     legal_actions = {
         "skill": ["Attack", "Defend"],
         "target": ["Boss"]
     }
     verdicts = await engine.step(task, legal_actions=legal_actions)
 
-    print(f"释放技能: {verdicts['skill'].selected} (置信度: {verdicts['skill'].calibrated_confidence:.2f})")
-    print(f"施法目标: {verdicts['target'].selected}")
+    print(f"Action: {verdicts['skill'].selected} (Confidence: {verdicts['skill'].calibrated_confidence:.2f})")
+    print(f"Target: {verdicts['target'].selected}")
 
 if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-### 3. 接入真实 Jev 模型（MindsHub 免费通道 / TypeSafe 官方）
-`TypeSafeJevProvider` 支持 System One 决策协议（`state` + `questions` → `answers`），可直连 TypeSafe 官方 API，也可走 **MindsHub 聚合网关**（OpenAI 兼容 `POST /v1/decisions` 端点，无需 TypeSafe key，上线期免费）：
-
-```bash
-# MindsHub 免费通道：控制台 (console.mindshub.ai) 领取 key
-export MINDSHUB_API_KEY="mdb_..."
-```
-
-```python
-import os
-from decidex.providers.typesafe import TypeSafeJevProvider
-
-# MindsHub 通道：显式传 api_key + base_url。
-# mindshub key 不会被官方号池定位器（KeyPool.from_default_locations）自动识别——
-# 防止它被默认打到 api.typesafe.ai 后 401 熔断。
-provider = TypeSafeJevProvider(
-    api_key=os.environ["MINDSHUB_API_KEY"],
-    base_url="https://api.mindshub.ai/v1/decisions",
-    model="jev",
-)
-verdicts = await provider.infer(payload, questions)
-
-# 官方 TypeSafe 号池：默认构造即可
-provider = TypeSafeJevProvider()
-```
-
-base_url 解析优先级：构造参数 `base_url` > 环境变量 `DECIDEX_BASE_URL` > 官方 `https://api.typesafe.ai/v1`（自动追加 `/systemone`）。以 `/systemone`、`/decide`、`/decisions` 结尾的 base_url 视为完整端点直连。官方号池读取优先级：`DECIDEX_KEY_FILE` > `TYPESAFE_API_KEY` / `DECIDEX_API_KEY` > 本地 `keys.jsonl|keys.json|keys.txt`（已被 .gitignore 排除；`org=mindshub` / `org=nace` 标记的条目仅由故障转移构建器识别）。
-
-### 3b. 接入 Nace Drex（与 Jev 线协议兼容）
-**Nace Drex**（[console.nace.ai](https://console.nace.ai)，[drex.nace.ai](https://drex.nace.ai)）是官方明示“wire-compatible with TypeSafe's Jev”的决策模型（`drex-latest` = `drex-v1.5`，131K 上下文）。其 `POST /v1/systemone` 的 `state`/`questions`/`answers` 结构与 decidex 客户端完全一致，因此**无需新增 provider**，直接复用 `TypeSafeJevProvider` 换 `base_url` + `model` 即可：
-
-```bash
-# Nace 控制台（drex.nace.ai/login → API Keys）领取 key
-export NACE_API_KEY="nace_sk_..."   # 亦可用 DREX_API_KEY
-```
-
-```python
-from decidex.providers.typesafe import TypeSafeJevProvider
-
-provider = TypeSafeJevProvider(
-    api_key=os.environ["NACE_API_KEY"],
-    base_url="https://console.nace.ai/v1",   # 自动追加 /systemone
-    model="drex-latest",                     # 必须改：默认是 jev-latest
-    timeout_s=3.0,                           # Nace 上游超时 55s，建议放宽
-)
-verdicts = await provider.infer(payload, questions)
-```
-
-要点：Nace 按**输入 token** 计费（输出不计费；$0.051/1M input tokens，注册送 $25 + 每月 $5），免费档 120 RPM / 8 并发，付费档 600 RPM / 16 并发；`state` 可传字符串、对象或列表，decidex 发送的 dict（`observation`/`memory`/…）被渲染为缩进文本。Nace 的 `score` 返回概率加权的**档位索引**，decidex 会自动把索引映射回问题的 `[min, max]` 数值域（默认 5 档，或按 `criteria` 档位数），并从 `probabilities` 取众数档位后验作为置信度，因此 SCORE verdict 的 `selected` 始终是 scale 域内的真实分数；`choice`/`noul` 与现有解析完全兼容。自托管开源权重（`nace-ai/drex-decision-models`，llama.cpp/Ollama）服务同一 `/v1/systemone`，把 `base_url` 指向本地即可（注意 v1.5 权重为 Nace.AI Open RAIL-M 许可）。
-
-### 4. 优先级故障转移（FuturePPO 免费主源优先，依次 Nace Drex / MindsHub / 官方号池）
-`PriorityFailoverProvider` 按优先级逐路由尝试：主路由 429 限流按 `Retry-After`（或 Nace 的 `Retry-After-Ms`）冷却并自动回落下一路由；402（钱包/额度耗尽）、401（key 吊销）与 400/403/404/422（确定性配置错误）直接熔断该路由；529（Nace 上游容量已满）与 429 同等对待，冷却后重试；官方号池内部的单 key 429/401 仍由 `KeyPool` 原生治理。MindsHub 当前 org 级限流：**60 RPM / 1M TPM / 20 并发**（全模型共享，未设 RPD；2026-09-25 实测 30 并发脉冲全 200）。
-
-```python
-from decidex.providers import PriorityFailoverProvider
-
-provider = PriorityFailoverProvider.from_default_routes()
-# 路由 1 "futureppo-pool"：FUTUREPPO_API_KEY / DECIDEX_FUTUREPPO_KEY env + keys 文件中 org=futureppo 标记的 key（免费主源，max_retries=0）
-# 路由 2 "nace-decision"：NACE_API_KEY / DREX_API_KEY env + keys 文件中 org=nace 标记的 key
-#                       （base_url=https://console.nace.ai/v1，model=drex-latest，max_retries=0）
-# 路由 3 "mindshub-free"：MINDSHUB_API_KEY env + keys 文件中 org=mindshub 标记的 key（max_retries=0，限流即时上抛）
-# 路由 4 "typesafe-pool"：TYPESAFE_API_KEY / DECIDEX_API_KEY env + keys 文件中未标记 org 的 key + Obsidian typesafe 账号库笔记（DECIDEX_VAULT 可覆盖 vault 根路径；生产 pxed 的 1171+ 号池）
-verdicts = await provider.infer(payload, questions)
-print(provider.stats())  # 每路由健康度遥测（active/cooldown/dead、错误与冷却剩余）
-```
-
-> 排序原则：先用免费额度（FuturePPO 内置全局降级凭据、MindsHub 推广期免费），免费通道限流后回落到低成本托管 Drex，官方 1171+ 号池作为最终稳定兜底。第三方网关 org 词表统一为 `decidex.pool.GATEWAY_ORGS`（mindshub / futureppo / nace），单一事实来源，新增网关只需在此登记。
-
-也可手工编排任意路由顺序：`PriorityFailoverProvider([("mindshub", p1), ("typesafe", p2)])`。全部路由不可用时抛 `NoAvailableProvidersError`，`DecisionEngine` 会自动进入确定性保底分支。
-
 ---
 
-## 模块结构
+## Project Module Topology
 
 ```text
 decidex/
 ├── src/decidex/
-│   ├── types.py            # Pydantic v2 强类型契约 (Task, Question, Verdict, etc.)
-│   ├── engine.py           # 核心调度引擎 (五阶段决策闭环、多头路由、flock 遥测)
-│   ├── guards.py           # 安全门控 (最大平移 Softmax、振荡检测、防假结算、生产性放行)
-│   ├── memory.py           # 环形时序记忆 (MemoryHarness、多通道防抖、动作频率统计)
-│   ├── planners.py         # 规划编排器 (PredictiveFrameController 双频预测时钟)
-│   ├── pool.py             # Fleet KeyPool 号池 (O(1)轮询、429退避、401隔离、原子写)
-│   ├── pruner.py           # 组合爆炸剪枝 (Top-K 粗排截断)
-│   ├── providers/          # 推理适配层 (TypeSafeJevProvider, LocalNanoJevProvider)
-│   └── tools/              # 实战工具箱 (browser_2048, solver2048, pool_manager, calibrate)
-├── examples/               # 实战场景与对战示例 (2048, Mario, Balatro, KeyPool)
-├── tests/                  # 86 项全量单元测试与回归套件
-├── .github/workflows/      # GitHub Actions CI/CD 流水线
-├── manage.sh               # 统一工程运维脚本
-└── pyproject.toml          # Hatchling 构建配置
+│   ├── types.py            # Pydantic v2 data models (Task, Question, Verdict)
+│   ├── engine.py           # Core dispatch engine (five-stage execution cycle)
+│   ├── guards.py           # Safety guards (Softmax, loop detection, settling)
+│   ├── memory.py           # Circular temporal memory (MemoryHarness)
+│   ├── planners.py         # Frame scheduler (PredictiveFrameController)
+│   ├── pool.py             # KeyPool hub (O(1) round-robin, backoff, atomic writes)
+│   ├── pruner.py           # Combinatorial space pruner (Top-K heuristic filter)
+│   ├── providers/          # Inference adapters (TypeSafe, Nace, MindsHub, NanoJev)
+│   └── tools/              # Tooling utilities (CDP 2048, solvers, pool manager)
+├── examples/               # Production scenario demos (2048, Mario, Balatro)
+├── tests/                  # Complete test suite (552 passing tests)
+├── .github/workflows/      # Automated CI/CD pipelines
+├── manage.sh               # Unified operations and benchmark harness
+└── pyproject.toml          # Hatchling package configuration
 ```
 
 ---
 
-## 自动化测试与 CI/CD 生产部署
+## Technology Stack Inventory
 
-### 1. 单元测试矩阵 (86 Passed)
-代码库具备 100% 覆盖关键决策路径的测试套件，执行耗时 $< 0.5\text{s}$：
+- **Core Runtime**: Python 3.10 / 3.11 / 3.12
+- **Data Validation & Typing**: Pydantic v2
+- **Web API & Microservice**: FastAPI / Starlette / Uvicorn
+- **Browser Automation**: Playwright / Google Chrome DevTools Protocol (CDP)
+- **Math & Probabilistic Algorithms**: NumPy / SciPy (Softmax, Bezier, Expectimax)
+- **System Concurrency**: `asyncio` / `fcntl` file locks / thread worker pools
+
+---
+
+## Contributing & License
+
+Pull requests and issues are welcome. Ensure that all unit and regression test suites pass before submitting changes:
+
 ```bash
-./manage.sh test
+uv run pytest tests/ -q
 ```
 
-### 2. GitHub Actions 自动化流水线
-- **CI 阶段**：覆盖 Python 3.10、3.11 与 3.12 多版本矩阵自动化测试与依赖校验。
-- **CD 阶段**：`main` 分支提交触发通过 SSH 自动拉取与热重载，安全同步至 Bohrium `pxed` 生产主机（`/data/decidex`）。
-- **零密钥泄漏红线**：严格遵循 `.gitignore` 规则，生产凭据 `keys.jsonl`（1,171+ 现网 Key）与运行遥测 `*.jsonl` 物理脱离版本库。
-
----
-
-## 许可证
-本项目采用 [MIT License](LICENSE) 开源协议。
+Licensed under the [MIT License](LICENSE).
