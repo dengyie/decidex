@@ -1739,12 +1739,20 @@ def test_bridge_once_dedupe_covers_buy_sell_use():
     SECOND time: buy charges twice, sell refunds twice, a hand consumable
     applies twice (planet level-up, Hermit payout). play/discard already
     have in-flight gates; buy (all three branches), sell and use get a
-    shared sort_id once-set:
+    shared once-set:
     - refused message contains "in progress" -> client-classified transient;
     - the mark lands BEFORE the vanilla call (mid-body crash cannot be
       re-applied);
     - buy's graceful no-space refusal UNMARKS (sell-then-rebuy stays legal),
       while an exception throw keeps it (partial effects may exist).
+
+    v140 root fix (65 duplicate-refusals per 5min): the set is keyed on the
+    card OBJECT (not sort_id — vanilla buy_from_shop emplaces the SAME
+    object into consumeables, so a sort_id mark from the buy refused every
+    later use_card on the now-owned consumable, for the whole run) and each
+    entry remembers the dispatch area. use_card/sell_card unmark on
+    success (vanilla removes the card from its area synchronously), and a
+    per-tick sweep releases any mark whose card has left its dispatch area.
     """
     content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
     # Shared helpers exist and cap the set.
@@ -1752,6 +1760,19 @@ def test_bridge_once_dedupe_covers_buy_sell_use():
     assert "local function decidex_once_mark(c)" in content
     assert "local function decidex_once_unmark(c)" in content
     assert "_G._decidex_once_count > 512" in content
+    # v140: object-keyed + dispatch-area tracking + sweep.
+    assert "local function decidex_once_sweep()" in content
+    sweep = content.split("local function decidex_once_sweep()", 1)[1].split(
+        chr(10) + "end", 1)[0]
+    assert "card.area and home and card.area == home" in sweep
+    assert "_G._decidex_once_area[c] = c.area" in content
+    # The set is keyed on the card object (c), NOT c.sort_id.
+    helpers = content.split("local function decidex_once_refused(c, label)", 1)[1].split(
+        "-- Programmatic execution of actions", 1)[0]
+    assert "c.sort_id] = true" not in helpers
+    assert "_decidex_once_ids[c] = true" in helpers
+    # The sweep runs in the per-tick maintenance chain.
+    assert "pcall(decidex_once_sweep)" in content
 
     buy = content.split('if action == "buy_card" or action == "buy_from_shop" then', 1)[1].split(
         chr(10) + '  if action == "reroll_shop"', 1)[0]
@@ -1765,6 +1786,8 @@ def test_bridge_once_dedupe_covers_buy_sell_use():
         chr(10) + '  if action == "reorder_jokers"', 1)[0]
     assert 'decidex_once_refused(c, action)' in us
     assert us.count("decidex_once_mark(c)") == 2
+    # v140: success releases the mark immediately (synchronous removal).
+    assert us.count("if ok then\n        decidex_once_unmark(c)") == 2
     # v131: a late vanilla emplace after a bridge populate must not leave
     # unpickable extras in the area.
     assert "local function trim_overfull_pack()" in content

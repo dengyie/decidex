@@ -2969,12 +2969,25 @@ end
 -- lands the snapshot is unchanged — a re-dispatch runs the action a SECOND
 -- time (double charge on buy, double refund on sell, double effect on a
 -- hand consumable such as a planet level-up or a Hermit payout).
--- sort_id is object-unique per session, so a dead entry can never block a
--- different card; the set grows one byte per dispatched card and is capped.
+--
+-- v140 root fix for the 65-refusals/5min noise: the v134 set was keyed on
+-- sort_id with NO release path, and the mark was set on BUY too — vanilla
+-- buy_from_shop emplaces the SAME card object (same sort_id) from the shop
+-- shelf into G.consumeables/G.jokers, so every later use_card on that
+-- now-owned consumable was refused forever ("duplicate use_card in
+-- progress": one Mercury blocked its own level-up for the whole run). The
+-- set is now keyed on the card OBJECT itself and each entry remembers the
+-- area the card occupied at dispatch time. A mark is live ONLY while the
+-- card is still sitting in that same area (the dispatch-landing window it
+-- protects); the moment the card has left that area — used (vanilla
+-- use_card removes it from the area synchronously), sold, bought into a
+-- different area, pack-picked away — the mark is dead and decidex_once_
+-- sweep releases it during maintenance. Object keys also mean a recreated
+-- card (new object after save/load) is never blocked by an old mark.
 local function decidex_once_refused(c, label)
-  if c and c.sort_id then
+  if c then
     _G._decidex_once_ids = _G._decidex_once_ids or {}
-    if _G._decidex_once_ids[c.sort_id] then
+    if _G._decidex_once_ids[c] then
       return false, "duplicate " .. label ..
         " in progress (card already dispatched once)"
     end
@@ -2983,23 +2996,50 @@ local function decidex_once_refused(c, label)
 end
 
 local function decidex_once_mark(c)
-  if c and c.sort_id then
+  if c then
     _G._decidex_once_ids = _G._decidex_once_ids or {}
+    _G._decidex_once_area = _G._decidex_once_area or {}
     if _G._decidex_once_count and _G._decidex_once_count > 512 then
       _G._decidex_once_ids = {}
+      _G._decidex_once_area = {}
       _G._decidex_once_count = 0
     end
-    if not _G._decidex_once_ids[c.sort_id] then
-      _G._decidex_once_ids[c.sort_id] = true
+    if not _G._decidex_once_ids[c] then
+      _G._decidex_once_ids[c] = true
+      -- Remember WHERE the card was dispatched from; the sweep releases
+      -- the mark once the card is anywhere else (or nowhere).
+      _G._decidex_once_area[c] = c.area
       _G._decidex_once_count = (_G._decidex_once_count or 0) + 1
     end
   end
 end
 
 local function decidex_once_unmark(c)
-  if c and c.sort_id and _G._decidex_once_ids then
-    if _G._decidex_once_ids[c.sort_id] then
-      _G._decidex_once_ids[c.sort_id] = nil
+  if c and _G._decidex_once_ids then
+    if _G._decidex_once_ids[c] then
+      _G._decidex_once_ids[c] = nil
+      if _G._decidex_once_area then _G._decidex_once_area[c] = nil end
+      _G._decidex_once_count = math.max((_G._decidex_once_count or 1) - 1, 0)
+    end
+  end
+end
+
+-- v140: release once-marks whose card has left its dispatch area. Runs in
+-- the per-tick maintenance sweep. A live mark (card still in the same
+-- area) is the protection window for a queued removal; anything else is a
+-- completed action. Never blocks long enough to outlive the card's own
+-- usefulness, so the shop-then-consumeables handoff (buy_card marking, a
+-- later use_card on the SAME object) is refused zero times.
+local function decidex_once_sweep()
+  local ids = _G._decidex_once_ids
+  local areas = _G._decidex_once_area
+  if not ids or not next(ids) then return end
+  for card, _ in pairs(ids) do
+    local home = areas and areas[card] or nil
+    -- still-live only if the card remains in the SAME area object.
+    if not (card.area and home and card.area == home) then
+      ids[card] = nil
+      areas[card] = nil
       _G._decidex_once_count = math.max((_G._decidex_once_count or 1) - 1, 0)
     end
   end
@@ -3771,10 +3811,26 @@ local function decidex_execute_inner(action, args)
       end
       decidex_once_mark(c)
       local ok, err = pcall(G.FUNCS.use_card, {config = {ref_table = c, button = 'use_card'}})
+      -- v140: vanilla use_card removes the card from its area SYNCHRONOUSLY
+      -- (button_callbacks.lua: `if card.area then card.area:remove_card(card)
+      -- end` in the function body, not a queued event). A successful call
+      -- therefore means the card is already gone and the mark protects
+      -- nothing anymore; keeping it refused every legitimate re-use of the
+      -- same object (the v134 65-refusals/5min noise: one Mercury could
+      -- never level up its own hand). On failure the mark stays only until
+      -- the area sweep re-evaluates it next tick: card left -> released,
+      -- card still there -> kept (a mid-body crash must not be re-applied).
+      if ok then
+        decidex_once_unmark(c)
+      end
       return ok, tostring(err or "used card")
     elseif action == "sell_card" and G.FUNCS and G.FUNCS.sell_card then
       decidex_once_mark(c)
       local ok, err = pcall(G.FUNCS.sell_card, {config = {ref_table = c, button = 'sell_card'}})
+      -- v140: same synchronous-removal logic as use_card above.
+      if ok then
+        decidex_once_unmark(c)
+      end
       return ok, tostring(err or "sold card")
     end
     return false, "no use/sell card func"
@@ -3995,6 +4051,11 @@ local function decidex_maintenance()
   -- can_skip_booster is polled every frame by the pack UI; a stale
   -- G.pack_cards global used to error it 3600 frames in a row.
   pcall(install_can_skip_booster_guard)
+
+  -- v140: release once-marks whose card has left its dispatch area (see
+  -- decidex_once_sweep) — keeps the v134 dedupe live only during the
+  -- dispatch-landing window.
+  pcall(decidex_once_sweep)
 
   -- v131c: factory markers (installed on the first tick after
   -- UI_definitions.lua defines the create_UIBox_*_pack globals).
