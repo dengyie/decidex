@@ -2168,9 +2168,28 @@ def test_build_patches_tarot_conversion_guards():
     40min soak) and PARTIALLY applying the tarot. build.py now guards all
     six queued event bodies so a vanished card is skipped and the chain
     still lands.
+
+    Self-contained: the fixture body quotes the six EXACT vanilla
+    snippets (the same strings build.py's replace pairs match on), so no
+    scratch vanilla snapshot is needed on CI.
     """
-    vanilla = ROOT / ".pytest_tmp" / "vanilla" / "card.lua"
-    content = vanilla.read_text(encoding="utf-8")
+    content = "\n".join([
+        # Pre-chain flip (card.lua:1107)
+        "G.E_MANAGER:add_event(Event({trigger = 'after',delay = 0.15,func = function() G.hand.highlighted[i]:flip();play_sound('card1', percent);G.hand.highlighted[i]:juice_up(0.3, 0.3);return true end }))",
+        # Death copy (card.lua:1117)
+        "if G.hand.highlighted[i] ~= rightmost then\n"
+        "                        copy_card(rightmost, G.hand.highlighted[i])\n"
+        "                    end",
+        # Strength rank-up (card.lua:1124)
+        "local card = G.hand.highlighted[i]\n"
+        "                    local suit_prefix = string.sub(card.base.suit, 1, 1)..'_'",
+        # suit_conv (card.lua:1138)
+        "G.E_MANAGER:add_event(Event({trigger = 'after',delay = 0.1,func = function() G.hand.highlighted[i]:change_suit(self.ability.consumeable.suit_conv);return true end }))",
+        # mod_conv set_ability (card.lua:1142)
+        "G.E_MANAGER:add_event(Event({trigger = 'after',delay = 0.1,func = function() G.hand.highlighted[i]:set_ability(G.P_CENTERS[self.ability.consumeable.mod_conv]);return true end }))",
+        # Post-chain flip (card.lua:1147)
+        "G.E_MANAGER:add_event(Event({trigger = 'after',delay = 0.15,func = function() G.hand.highlighted[i]:flip();play_sound('tarot2', percent, 0.6);G.hand.highlighted[i]:juice_up(0.3, 0.3);return true end }))",
+    ])
     patched = build_mod.patch_card_conversion_guards(content)
     assert patched != content
     # 4 guarded single-line conversions (flip / suit_conv / set_ability /
