@@ -506,6 +506,55 @@ def patch_button_callbacks(content: str) -> str:
     )
     content = content.replace(old_wipe_cleanup, new_wipe_cleanup)
 
+    # v141: ghost-source fix — the queued use_card restore event
+    # (button_callbacks.lua:2248) unconditionally writes
+    # "G.STATE = prev_state" at fire time. When the bridge abandoned the
+    # pack within the 0.3s delivery window, this resurrects the dead pack
+    # state (a "ghost"), and every late restore in a congested queue
+    # repeats it (prod v139 run1: 129 ghosts/60s). The bridge's ghost
+    # guard then re-abandons each one — but its own abandon extends the
+    # exit window, so the storm feeds itself. Gate the state write on a
+    # live pack: when the bridge abandoned, G.booster_pack is nil and the
+    # pack branch below would have done nothing anyway, so skipping the
+    # write loses nothing and removes the resurrection at its source.
+    old_restore_state = (
+        "            func = function()\n"
+        "                G.STATE = prev_state\n"
+        "                G.TAROT_INTERRUPT=nil\n"
+        "                G.CONTROLLER.locks.use = false"
+    )
+    new_restore_state = (
+        "            func = function()\n"
+        "                local prev_is_pack = prev_state == G.STATES.TAROT_PACK or prev_state == G.STATES.PLANET_PACK or prev_state == G.STATES.SPECTRAL_PACK or prev_state == G.STATES.STANDARD_PACK or prev_state == G.STATES.BUFFOON_PACK\n"
+        "                if prev_is_pack and not G.booster_pack then return true end\n"
+        "                G.STATE = prev_state\n"
+        "                G.TAROT_INTERRUPT=nil\n"
+        "                G.CONTROLLER.locks.use = false"
+    )
+    content = content.replace(old_restore_state, new_restore_state)
+
+    # v141: end_consumeable queues "G.booster_pack:remove()" at +0.2s; if
+    # the bridge abandoned the pack before the event fires,
+    # G.booster_pack is already nil and the bare index crashes
+    # (button_callbacks.lua:2591, ~1/40min soak). Same family as the v139
+    # card.lua conversion guards.
+    old_end_consumeable_remove = (
+        "      G.E_MANAGER:add_event(Event({trigger = 'after',delay = 0.2*delayfac,blocking = false, blockable = false,\n"
+        "      func = function()\n"
+        "          G.booster_pack:remove()\n"
+        "          G.booster_pack = nil\n"
+        "        return true\n"
+        "      end}))"
+    )
+    new_end_consumeable_remove = (
+        "      G.E_MANAGER:add_event(Event({trigger = 'after',delay = 0.2*delayfac,blocking = false, blockable = false,\n"
+        "      func = function()\n"
+        "          if G.booster_pack then G.booster_pack:remove(); G.booster_pack = nil end\n"
+        "        return true\n"
+        "      end}))"
+    )
+    content = content.replace(old_end_consumeable_remove, new_end_consumeable_remove)
+
     return content
 
 

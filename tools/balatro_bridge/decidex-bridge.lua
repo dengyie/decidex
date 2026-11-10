@@ -628,7 +628,7 @@ end
   instead of hanging. The player loses the pack contents, which is strictly
   better than an automation run that never advances again.
 ]]
-local function abandon_pack()
+local function abandon_pack(keep_exit_window)
   if not is_pack_state() then return false end
   local ok = pcall(function()
     local back = (G.GAME and G.GAME.PACK_INTERRUPT) or G.STATES.SHOP
@@ -709,9 +709,14 @@ local function abandon_pack()
     -- Exit latch: a stuck select_pack_card retry landing right after the
     -- abandon re-enters the pack state with another fresh empty area
     -- (the cards are gone) and re-wedges it. Pack actions are refused
-    -- for a short window after an abandon.
-    local now3 = (love.timer and love.timer.getTime()) or os.clock()
-    _G._decidex_pack_exit_until = now3 + 3.0
+    -- for a short window after an abandon. v141: the ghost guard's
+    -- re-abandon passes keep_exit_window — extending the window on every
+    -- ghost kill let a burst of late vanilla restores roll the window
+    -- forward indefinitely (prod: 129 ghosts/60s, each kill +3s).
+    if not keep_exit_window then
+      local now3 = (love.timer and love.timer.getTime()) or os.clock()
+      _G._decidex_pack_exit_until = now3 + 3.0
+    end
   end)
   if ok then
     print("[DecideX Pack Watchdog] abandoned wedged pack, returned to state " .. tostring(G.STATE))
@@ -1126,7 +1131,10 @@ local function pack_stall_watchdog()
     local gpc = G.pack_cards
     if not gpc or not gpc.cards or not gpc.cards[1] then
       print("[DecideX Pack Watchdog] ghost pack state after abandon (stale vanilla restore); re-abandoning")
-      abandon_pack()
+      -- v141: re-abandon WITHOUT extending the exit window — the window
+      -- must expire on schedule so a burst of late restores can't roll
+      -- it forward forever (each kill used to buy another 3s).
+      abandon_pack(true)
       return true
     end
   end

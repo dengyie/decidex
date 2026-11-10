@@ -877,7 +877,7 @@ def test_bridge_has_booster_pack_stall_watchdog():
 
     assert "local function pack_stall_watchdog()" in content
     assert "local function rebuild_pack_ui()" in content
-    assert "local function abandon_pack()" in content
+    assert "local function abandon_pack(keep_exit_window)" in content
 
     # Every pack state must be covered by the rebuild path.
     rebuild = content.split("local function rebuild_pack_ui()", 1)[1].split("\nend", 1)[0]
@@ -2037,7 +2037,7 @@ def test_bridge_abandon_leaves_valid_pack_interrupt():
     self-clears the field exactly as vanilla designed.
     """
     content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
-    body = content.split("local function abandon_pack()", 1)[1].split(
+    body = content.split("local function abandon_pack(keep_exit_window)", 1)[1].split(
         chr(10) + "local function ", 1)[0]
 
     # The interrupt step normalizes to the return state instead of nil.
@@ -2088,7 +2088,14 @@ def test_bridge_ghost_state_reabandon_guard():
     assert "and not G.booster_pack then" in body
     assert "if not gpc or not gpc.cards or not gpc.cards[1] then" in body
     assert "ghost pack state after abandon" in body
-    assert "abandon_pack()" in body
+    # v141: the ghost re-abandon must NOT extend the exit window —
+    # extending it on every kill let a burst of late vanilla restores
+    # roll the window forward indefinitely (prod v139 run1: 129 ghosts
+    # in ~60s, each kill buying another 3s).
+    assert "abandon_pack(true)" in body
+    assert "if not keep_exit_window then" in content.split(
+        "local function abandon_pack(keep_exit_window)", 1)[1].split(
+        chr(10) + "local function ", 1)[0]
     # The guard runs BEFORE the empty-area health logic and the stall
     # tripwire (guard-pos < G.pack_cards health check).
     guard_pos = body.index("_G._decidex_pack_exit_until and now < _G._decidex_pack_exit_until")
@@ -2097,6 +2104,53 @@ def test_bridge_ghost_state_reabandon_guard():
     # And before the stall tripwire print.
     trip_pos = body.index("pack stalled for")
     assert guard_pos < trip_pos
+
+
+def test_vanilla_restore_event_skips_dead_pack_state():
+    """v141: the queued use_card restore event (button_callbacks.lua
+    ~:2248) unconditionally wrote "G.STATE = prev_state" at fire time.
+    When the bridge abandoned the pack within the 0.3s delivery window,
+    this resurrected the dead pack state — the ghost the bridge guard
+    then had to keep killing. Gate the state write on a live pack: when
+    the pack is gone (G.booster_pack nil) and prev_state is a pack
+    state, skip the write entirely (the pack branch below would have
+    done nothing anyway).
+
+    Also guards end_consumeable's queued booster_pack removal
+    (~:2591 "attempt to index field 'booster_pack' (a nil value)",
+    ~1/40min when the bridge abandoned before the +0.2s event fired).
+
+    Self-contained: the fixture quotes the EXACT vanilla snippets (the
+    same strings build.py's replace pairs match on), so no vanilla
+    snapshot is needed on CI.
+    """
+    content = "\n".join([
+        # use_card restore event body (button_callbacks.lua:2246-2250)
+        "            func = function()\n"
+        "                G.STATE = prev_state\n"
+        "                G.TAROT_INTERRUPT=nil\n"
+        "                G.CONTROLLER.locks.use = false",
+        # end_consumeable's queued booster_pack removal (:2589-2594)
+        "      G.E_MANAGER:add_event(Event({trigger = 'after',delay = 0.2*delayfac,blocking = false, blockable = false,\n"
+        "      func = function()\n"
+        "          G.booster_pack:remove()\n"
+        "          G.booster_pack = nil\n"
+        "        return true\n"
+        "      end}))",
+    ])
+    patched = build_mod.patch_button_callbacks(content)
+
+    # Restore event: pack-state gate BEFORE the state write.
+    assert "local prev_is_pack = prev_state == G.STATES.TAROT_PACK or prev_state == G.STATES.PLANET_PACK" in patched
+    assert "or prev_state == G.STATES.SPECTRAL_PACK or prev_state == G.STATES.STANDARD_PACK or prev_state == G.STATES.BUFFOON_PACK" in patched
+    assert "if prev_is_pack and not G.booster_pack then return true end" in patched
+    gate_pos = patched.index("if prev_is_pack and not G.booster_pack then return true end")
+    write_pos = patched.index("G.STATE = prev_state")
+    assert gate_pos < write_pos
+
+    # end_consumeable: bare booster_pack index is nil-guarded.
+    assert "if G.booster_pack then G.booster_pack:remove(); G.booster_pack = nil end" in patched
+    assert patched.count("G.booster_pack:remove()") == 1
 
 
 def test_bridge_dispatch_clears_pack_exit_window():
