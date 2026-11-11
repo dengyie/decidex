@@ -1786,8 +1786,14 @@ def test_bridge_once_dedupe_covers_buy_sell_use():
         chr(10) + '  if action == "reorder_jokers"', 1)[0]
     assert 'decidex_once_refused(c, action)' in us
     assert us.count("decidex_once_mark(c)") == 2
-    # v140: success releases the mark immediately (synchronous removal).
-    assert us.count("if ok then\n        decidex_once_unmark(c)") == 2
+    # v140: use_card releases the mark immediately on success (synchronous
+    # removal). v142: sell_card must NOT — its removal is asynchronous
+    # (start_dissolve -> self:remove() queued at +0.7s, card.lua), so the
+    # mark has to survive until the sweep sees the card gone; unmarking on
+    # success re-opened a ~0.7s double-refund window per sale.
+    assert us.count("if ok then\n        decidex_once_unmark(c)") == 1
+    sell_body = us.split('elseif action == "sell_card"', 1)[1]
+    assert "decidex_once_unmark(c)" not in sell_body
     # v131: a late vanilla emplace after a bridge populate must not leave
     # unpickable extras in the area.
     assert "local function trim_overfull_pack()" in content
@@ -2140,11 +2146,15 @@ def test_vanilla_restore_event_skips_dead_pack_state():
     ])
     patched = build_mod.patch_button_callbacks(content)
 
-    # Restore event: pack-state gate BEFORE the state write.
+    # Restore event: pack-state gate BEFORE the state write. v142: the
+    # early return still clears TAROT_INTERRUPT and the use lock — in a
+    # non-bridge ghost path nothing else would release them and
+    # controller.locked would wedge input.
     assert "local prev_is_pack = prev_state == G.STATES.TAROT_PACK or prev_state == G.STATES.PLANET_PACK" in patched
     assert "or prev_state == G.STATES.SPECTRAL_PACK or prev_state == G.STATES.STANDARD_PACK or prev_state == G.STATES.BUFFOON_PACK" in patched
-    assert "if prev_is_pack and not G.booster_pack then return true end" in patched
-    gate_pos = patched.index("if prev_is_pack and not G.booster_pack then return true end")
+    gate = "if prev_is_pack and not G.booster_pack then G.TAROT_INTERRUPT=nil; if G.CONTROLLER and G.CONTROLLER.locks then G.CONTROLLER.locks.use = false end; return true end"
+    assert gate in patched
+    gate_pos = patched.index(gate)
     write_pos = patched.index("G.STATE = prev_state")
     assert gate_pos < write_pos
 

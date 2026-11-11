@@ -3835,10 +3835,14 @@ local function decidex_execute_inner(action, args)
     elseif action == "sell_card" and G.FUNCS and G.FUNCS.sell_card then
       decidex_once_mark(c)
       local ok, err = pcall(G.FUNCS.sell_card, {config = {ref_table = c, button = 'sell_card'}})
-      -- v140: same synchronous-removal logic as use_card above.
-      if ok then
-        decidex_once_unmark(c)
-      end
+      -- v142: sell_card's removal is NOT synchronous (unlike use_card,
+      -- whose area:remove_card sits in the function body): vanilla queues
+      -- start_dissolve -> self:remove() at +0.7s (card.lua sell_card body
+      -- + start_dissolve's queued self:remove()). The mark must stay live
+      -- through that whole dissolve window — a re-dispatch inside it would
+      -- double-refund. The sweep releases the mark as soon as the dissolve
+      -- pulls the card out of its area; unmarking on success here
+      -- (v140) re-opened the double-refund window for ~0.7s per sale.
       return ok, tostring(err or "sold card")
     end
     return false, "no use/sell card func"

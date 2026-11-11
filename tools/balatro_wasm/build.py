@@ -526,7 +526,7 @@ def patch_button_callbacks(content: str) -> str:
     new_restore_state = (
         "            func = function()\n"
         "                local prev_is_pack = prev_state == G.STATES.TAROT_PACK or prev_state == G.STATES.PLANET_PACK or prev_state == G.STATES.SPECTRAL_PACK or prev_state == G.STATES.STANDARD_PACK or prev_state == G.STATES.BUFFOON_PACK\n"
-        "                if prev_is_pack and not G.booster_pack then return true end\n"
+        "                if prev_is_pack and not G.booster_pack then G.TAROT_INTERRUPT=nil; if G.CONTROLLER and G.CONTROLLER.locks then G.CONTROLLER.locks.use = false end; return true end\n"
         "                G.STATE = prev_state\n"
         "                G.TAROT_INTERRUPT=nil\n"
         "                G.CONTROLLER.locks.use = false"
