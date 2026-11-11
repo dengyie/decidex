@@ -1230,6 +1230,34 @@ def test_pack_select_arms_watchdog_and_breaks_futile_retries():
     assert "_packStateSeen" in js_content
 
 
+def test_pack_dead_end_no_usable_card_no_skip_escalates_to_force_leave():
+    """v142b: a NON-empty pack with no usable card and no skip button is a
+    dead end. Vanilla gates the skip button itself (can_skip_booster,
+    button_callbacks.lua:2118): TAROT/SPECTRAL packs only offer skip while a
+    hand card exists, so a pack full of hand-consumers drawn on an empty
+    hand (or all-Fool packs) can neither be picked nor skipped — and the
+    bridge's 12s empty-area escape only fires on an EMPTY area, never on
+    dead-end CONTENTS (prod probe: 15.1s TAROT_PACK dwell, the client
+    idled in "等待补充包就绪" forever). The client must give the state one
+    2.5s patience window (snapshot racing the pick removal), then
+    force_leave. The dead-end clock must reset per episode and whenever
+    fresh contents arrive.
+    """
+    js_content = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    # The dead-end branch sits between the skip branch and the idle wait.
+    assert "补充包无可选卡，强制脱离..." in js_content
+    assert "this._packSawCardsThisEpisode &&" in js_content
+    assert "(!this._packDeadEndAt || now - this._packDeadEndAt > 2500)" in js_content
+    assert "window.executeForceLeavePack();" in js_content
+    # Patience first: the first dead-end observation only arms the clock.
+    assert "if (!this._packDeadEndAt) this._packDeadEndAt = now;" in js_content
+    # Clock hygiene: per-episode reset + fresh-contents reset.
+    assert "this._packDeadEndAt = 0;" in js_content
+    # The idle fallback must still exist for the remaining wait cases
+    # (never-saw-cards episodes, fresh clock armed).
+    assert "等待补充包就绪..." in js_content
+
+
 def test_scoring_applies_joker_effects_in_order():
     """Vanilla evaluate_play applies each joker's +mult before its ×mult,
     left-to-right. The old code accumulated all xmult and multiplied at the

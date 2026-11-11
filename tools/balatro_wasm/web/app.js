@@ -4991,6 +4991,8 @@ end
             this._packSigSince = null;
             this._packEpochSince = now;
             this._packSawCardsThisEpisode = false;
+            // v142b: dead-end clock (no usable card + no skip) is per-episode.
+            this._packDeadEndAt = 0;
             // v133: two packs can hold identical contents — the in-flight
             // pick guard must never carry across episodes.
             this._lastPackPick = null;
@@ -5055,6 +5057,8 @@ end
             // next empty stretch may legitimately ask for another one, and
             // an emptying from here on means the pack was consumed.
             this._packEmptyDumped = false;
+            // v142b: fresh contents -> fresh dead-end clock.
+            this._packDeadEndAt = 0;
             this._packSawCardsThisEpisode = true;
             let bestCard = null;
             if (sname === "PLANET_PACK") {
@@ -5232,6 +5236,30 @@ end
               window.executeSkipBooster();
               executedAction = true;
               unlockCooldownMs = 400;
+            } else if (this._packSawCardsThisEpisode &&
+                       (!this._packDeadEndAt || now - this._packDeadEndAt > 2500)) {
+              // v142b: a NON-empty pack with NO usable card and NO skip
+              // button is a dead end, not "not ready". Vanilla gates the
+              // skip button itself (can_skip_booster, button_callbacks
+              // .lua:2118): TAROT/SPECTRAL packs only offer skip while a
+              // hand card exists, so a pack full of hand-consumers drawn
+              // on an empty hand (or all-Fool packs) can neither be
+              // picked nor skipped -- and the bridge's 12s escape only
+              // fires on an EMPTY area, never on this dead-end contents
+              // state (prod probe: 15.1s TAROT_PACK dwell). The client
+              // used to idle here forever ("等待补充包就绪"); now: one
+              // 2.5s patience window (covers a snapshot racing the pick
+              // removal), then force_leave_pack -- abandon_pack restores
+              // the shop state synchronously, losing only the pack cost.
+              if (!this._packDeadEndAt) this._packDeadEndAt = now;
+              else {
+                console.warn("[AutoPilot] Pack has no usable card and no skip button for 2.5s (dead end); forcing leave");
+                this.updateStatus("补充包无可选卡，强制脱离...", true);
+                this._packDeadEndAt = 0;
+                window.executeForceLeavePack();
+                executedAction = true;
+                unlockCooldownMs = 1200;
+              }
             } else {
               this.updateStatus("等待补充包就绪...", false);
               executedAction = false;
