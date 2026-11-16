@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v145";
+  const ASSET_VERSION = "v146";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=145";
-  const ASSET_WASM_URL = "love.wasm.bin?v=145";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=146";
+  const ASSET_WASM_URL = "love.wasm.bin?v=146";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -2950,8 +2950,16 @@ end
         // 45min), locking the sell-upgrade chain behind `money >= cost`.
         // A $5 floor keeps hand-level progress affordable without starvation.
         safeThreshold = (bname.includes("Celestial") || bname.includes("Arcana")) ? 5 : 4;
+      } else if (bname.includes("Celestial")) {
+        // v146: the ante>=3 flat $20 gate froze Celestial packs forever
+        // (v145 soak: zero Planet use all run, death snapshots lose by
+        // 60-80 chips with hand_levels={} — the level-1 base chip/mult
+        // table is exactly that shortfall). Bleeding $1 per level-up is
+        // far cheaper than losing the round: drop the floor to $8 once
+        // any hand has been played (the planet always levels a real hand).
+        safeThreshold = (state.most_played_hand || jokersCount > 0) ? 8 : 14;
       } else {
-        safeThreshold = 20;
+        safeThreshold = 12;
       }
       const budgetAllowed = canAfford && (money - cost >= safeThreshold);
 
@@ -3096,8 +3104,16 @@ end
     return {
       evaluatedCards: evaluatedCards,
       bestCard: bestCard && bestCard.canAfford && bestCard.hasSlot
-        && (bestCard.score >= 60 || (jokersCount < 2 && bestCard.score >= 45))
-        && (money - bestCard.cost >= cashFloor) ? bestCard : null,
+        && (bestCard.score >= 60 || (jokersCount < 2 && bestCard.score >= 45)
+            // v146: ante<=3 filler path mirrors the AutoPilot-side gate —
+            // without it, bestCard was nulled here (cashFloor 6 vs wallet
+            // $0-4) so the filler branch below never even saw a candidate.
+            || ((state.ante || 1) <= 3 && jokersCount < 3 && bestCard.score >= 55))
+        && (money - bestCard.cost >= cashFloor
+            // v146: filler buys may spend down to $1 — an empty-handed shop
+            // exit at $4 was strictly worse than benching a 55-score joker.
+            || ((state.ante || 1) <= 3 && jokersCount < 3 && bestCard.score >= 55
+                && !toothUpcoming && money - bestCard.cost >= 1)) ? bestCard : null,
       evaluatedBoosters: evaluatedBoosters,
       bestBooster: bestBooster,
       evaluatedVouchers: evaluatedVouchers,
@@ -4936,7 +4952,13 @@ end
               bestCard.recommendation === "强烈推荐" ||
               (jokersCount < 2 && bestCard.score >= 45) ||
               (jokersCount === 0 && bestCard.score >= 35) ||
-              (bestCard.isConsumable && bestCard.score >= 60)
+              (bestCard.isConsumable && bestCard.score >= 60) ||
+              // v146: ante<=3 weak-joker filler. v145 soak: 48 runs, zero
+              // joker purchases — every shop was exited empty-handed at
+              // money $0-4 while runs died by 60-80 chips. A 55+ filler
+              // joker in a sub-3 slot bench beats saving for a shop that
+              // may never stock 70+ again before the run ends.
+              ((state.ante || 1) <= 3 && jokersCount < 3 && bestCard.score >= 55)
             ) && (!(savingVoucher || bestVoucher) || bestCard.score >= 82);
             // The trailing gate: while saving for a voucher — or when the
             // voucher is ALREADY buyable (within its buffer) — a mediocre
