@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v147";
+  const ASSET_VERSION = "v148";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=147";
-  const ASSET_WASM_URL = "love.wasm.bin?v=147";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=148";
+  const ASSET_WASM_URL = "love.wasm.bin?v=148";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3114,8 +3114,11 @@ end
         && (money - bestCard.cost >= cashFloor
             // v146: filler buys may spend down to $1 — an empty-handed shop
             // exit at $4 was strictly worse than benching a filler joker.
+            // v148: down to $0. Pool census showed exact-cost candidates
+            // (Greedy Joker $5 vs wallet $5) nulled by the >=1 floor, and
+            // next round's blind pays out anyway.
             || ((state.ante || 1) <= 3 && jokersCount < 3 && bestCard.score >= 50
-                && !toothUpcoming && money - bestCard.cost >= 1)) ? bestCard : null,
+                && !toothUpcoming && money - bestCard.cost >= 0)) ? bestCard : null,
       evaluatedBoosters: evaluatedBoosters,
       bestBooster: bestBooster,
       evaluatedVouchers: evaluatedVouchers,
@@ -4594,6 +4597,7 @@ end
           this._shopPurchasedBooster = false;
           this._shopAttemptedItems.clear();
           this._loggedShelf = false;
+          this._loggedGate = false;
         }
         if (sname !== "SELECTING_HAND") this._handsExhaustedSince = null;
         // A new state episode may legitimately make a previously refused
@@ -4927,6 +4931,32 @@ end
               }
             }
             const shopAdv = findBestShopPurchases(state);
+            // v148: one-line-per-shop gate telemetry (null cases included).
+            // The v146/v147 soaks showed zero card buys while shelves held
+            // affordable jokers, and the closure made the decision path
+            // unhookable from probes — so the gate values are logged at the
+            // only point they exist. Fired once per shop alongside the
+            // shelf census line.
+            if (!this._loggedGate) {
+              this._loggedGate = true;
+              const bc = shopAdv && shopAdv.bestCard;
+              const bt = shopAdv && shopAdv.topVoucher;
+              const bv = shopAdv && shopAdv.bestVoucher;
+              const sv = !!(bt && !bv && bt.score >= 75 &&
+                (Number(state.money) || 0) < bt.cost + (bt.keepAfter || 12));
+              console.log("[AutoPilot] Shop gate:", JSON.stringify({
+                money: Number(state.money) || 0,
+                ante: state.ante || 1,
+                jokers: (state.jokers || []).length,
+                pool: (shopAdv && shopAdv.evaluatedCards || []).map(c =>
+                  `${c.name}:${c.score}${c.isConsumable ? "C" : "J"}${c.canAfford ? "" : "!$"}`),
+                best: bc ? {name: bc.name, cost: bc.cost, score: bc.score,
+                            canAfford: bc.canAfford, hasSlot: bc.hasSlot,
+                            isCons: !!bc.isConsumable} : null,
+                saving: sv, voucherBuy: !!bv,
+                topVoucher: bt ? {name: bt.name, cost: bt.cost, score: bt.score} : null
+              }));
+            }
             const bestCard = shopAdv && shopAdv.bestCard;
             const bestBooster = shopAdv && shopAdv.bestBooster;
             const bestVoucher = shopAdv && shopAdv.bestVoucher;
@@ -4966,12 +4996,22 @@ end
               // cards this path was built for — the v146 soak still
               // showed zero card buys. 50 = "not worse than default".
               ((state.ante || 1) <= 3 && jokersCount < 3 && bestCard.score >= 50)
-            ) && (!(savingVoucher || bestVoucher) || bestCard.score >= 82);
+            ) && (!(savingVoucher || bestVoucher) || bestCard.score >= 82 ||
+              // v148: survival outranks saving. Gate telemetry (v148 diag,
+              // 21 shops): savingVoucher was true in most ante-1 shops
+              // (Director's Cut 84, Overstock 80 on the shelf) while the
+              // bench sat at ZERO jokers and cash was $4 — the run dies
+              // long before $22 accrues, so the voucher's value was
+              // theoretical. With <=1 joker, any affordable non-consumable
+              // scoring card (>=45) beats saving; from 2 jokers on, the
+              // old discipline holds.
+              (jokersCount <= 1 && !bestCard.isConsumable && bestCard.score >= 45));
             // The trailing gate: while saving for a voucher — or when the
             // voucher is ALREADY buyable (within its buffer) — a mediocre
             // card purchase would spend the exact money the voucher needs
-            // and flap the boundary forever. Only a strong card (>=82)
-            // outranks the voucher.
+            // and flap the boundary forever. Only a strong card (>=82) —
+            // or a survival buy with a near-empty bench (v148) — outranks
+            // the voucher.
 
             const cardKey = bestCard ? `card_${bestCard.index}_${bestCard.name}` : null;
             const voucherKey = bestVoucher ? `voucher_${bestVoucher.index}_${bestVoucher.name}` : null;
