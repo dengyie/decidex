@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v144";
+  const ASSET_VERSION = "v145";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=144";
-  const ASSET_WASM_URL = "love.wasm.bin?v=144";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=145";
+  const ASSET_WASM_URL = "love.wasm.bin?v=145";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -1989,6 +1989,23 @@ end
       }
     }
     candidates.sort((a, b) => b.totalScore - a.totalScore);
+    // v145: The Tooth charges $1 per played card (no floor — vanilla can
+    // drive dollars negative mid-round, the death-soak money=-8/-2 pattern
+    // at ante 3-5). The Ox already gets isOxRisk ranking; The Tooth had
+    // none, so a 5-card High Card that barely clears the blind always beat
+    // a 2-card play clearing it just as dead — bleeding $3-5 extra per
+    // round. Among candidates that all beat the remaining requirement,
+    // prefer the FEWEST cards (secondary sort). Non-winning candidates keep
+    // pure totalScore order (winning the round is still survival priority).
+    if (constraints.costsMoneyPerCard) {
+      const toothNeed = Math.max(0, Number(state.blind?.chips || 300) - Number(state.blind?.scored || 0));
+      candidates.sort((a, b) => {
+        const aWins = a.totalScore >= toothNeed, bWins = b.totalScore >= toothNeed;
+        if (aWins !== bWins) return aWins ? -1 : 1;
+        if (aWins && bWins) return (a.cards.length - b.cards.length) || (b.totalScore - a.totalScore);
+        return b.totalScore - a.totalScore;
+      });
+    }
     const unique = [];
     const seen = new Set();
     for (const c of candidates) {
@@ -3067,7 +3084,14 @@ end
     // weak benches froze. A per-ante floor keeps the wallet alive; survival
     // buys (early-joker slot, strong card) stay exempt via keepFloor=0.
     const survivalBuy = jokersCount < 2 || (bestCard && bestCard.score >= 82);
-    const cashFloor = survivalBuy ? 0 : ((state.ante || 1) >= 3 ? 6 : 3);
+    // v145: The Tooth is $1 per played card (up to $8-10/round for full
+    // hands). Entering that blind near $0 guarantees mid-round debt (the
+    // death-soak money=-8/-2 pattern). Raise the ordinary-purchase floor
+    // when Tooth is the NEXT boss so the wallet survives the round.
+    const toothUpcoming = ((state.blind && state.blind.upcoming_boss) === "The Tooth");
+    const cashFloor = survivalBuy ? 0 :
+      (toothUpcoming ? Math.max(10, (state.ante || 1) >= 3 ? 6 : 3) :
+      ((state.ante || 1) >= 3 ? 6 : 3));
 
     return {
       evaluatedCards: evaluatedCards,
