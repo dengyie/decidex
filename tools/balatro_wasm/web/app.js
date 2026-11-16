@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v142";
+  const ASSET_VERSION = "v143";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=142";
-  const ASSET_WASM_URL = "love.wasm.bin?v=142";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=143";
+  const ASSET_WASM_URL = "love.wasm.bin?v=143";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -2590,18 +2590,48 @@ end
     "Palette": 88,
   };
 
+  // v143: dynamic joker valuation for SELL decisions. The flat name-list
+  // buckets (everything unnamed landed in a default 40) kept real jokers
+  // like Egg / Delayed Gratification / Greedy Joker locked into a bench
+  // that never rotated, and debuffed jokers kept full value although they
+  // are dead weight for the current blind. Base list anchors a known
+  // ceiling, actual card stats push up from it, and a debuffed joker is
+  // scored at <=20 so the sell path prefers it.
   function scoreOwnedJoker(joker, synergy) {
     const jname = joker.name || "";
-    let base = 50;
+    let base;
     if (["Cavendish", "Blueprint", "Brainstorm", "Constellation", "Hologram", "Baron"].includes(jname)) base = 90;
     else if (["Card Sharp", "Blackboard", "Baseball Card", "Stuntman", "Bull", "Bootstraps"].includes(jname)) base = 80;
     else if (["Green Joker", "Ride the Bus", "Red Card", "Square Joker", "Supernova", "Golden Joker", "Mail-In Rebate", "Trading Card"].includes(jname)) base = 70;
     else if (["Half Joker", "Gros Michel", "Blue Joker", "Banner", "Scary Face", "Odd Todd"].includes(jname)) base = 55;
     else base = 40;
 
+    // Decay timers: nearly exhausted consumable-stat jokers collapse.
     if (jname === "Ice Cream" && (joker.chips || 0) <= 20) base = 25;
     else if (jname === "Popcorn" && (joker.mult || 0) <= 4) base = 25;
     else if (jname === "Gros Michel") base = 45;
+
+    // Dynamic stat weight: unnamed-bucket jokers with real output are worth
+    // keeping; the default 40 bucket was the black hole swallowing them.
+    if (base <= 48) {
+      const chips = Number(joker.chips) || 0;
+      const mult = Number(joker.mult) || 0;
+      const xmult = Number(joker.xmult) || 1;
+      let statScore = 0;
+      if (chips > 0) statScore += Math.min(18, chips / 5);        // +50 chips ≈ +10
+      if (mult > 0) statScore += Math.min(18, mult * 2.5);        // +4 mult ≈ +10
+      if (xmult > 1) statScore += Math.min(24, (xmult - 1) * 40); // ×1.5 ≈ +20
+      base = Math.min(72, Math.round(base + statScore));
+    }
+
+    // Editions raise keep value.
+    if (joker.edition === "poly") base = Math.min(95, base + 25);
+    else if (joker.edition === "holo") base = Math.min(90, base + 15);
+    else if (joker.edition === "foil") base = Math.min(85, base + 10);
+
+    // v143: a debuffed joker contributes nothing this blind — treat it as
+    // near-junk so the sell path rotates it out instead of bench-warming it.
+    if (joker.debuff) base = Math.min(base, 20);
 
     return base;
   }
@@ -2952,26 +2982,48 @@ end
     const bestVoucher = evaluatedVouchers.find(v => v.canAfford && v.budgetAllowed) || null;
 
     // Full Joker Replacement / Sell Evaluation
+    // v143: two sell paths. The old gate (slot-full AND >=80 candidate AND
+    // affordable AND weakest <=48 AND gap >=30, all ANDed) left a bench of
+    // five default-40 jokers locked in place whenever the shop didn't
+    // happen to offer an 80+ card — the death-soak pattern (money burned to
+    // $0 on a frozen weak bench). Now:
+    //   Path A (upgrade): slot-full, candidate >=70 (was 80), gap >=25 (was 30).
+    //   Path B (unfreeze): slot-full and the WHOLE bench is weak (best
+    //     bench score <55) — accept any >=65 candidate so the run can climb
+    //     instead of bench-locking to death.
     let sellRecommendation = null;
     if (jokersCount >= maxJokerSlots && state.jokers && state.jokers.length > 0 && evaluatedCards.length > 0) {
-      const bestCandidate = evaluatedCards.find(c => !c.isConsumable);
-      if (bestCandidate && bestCandidate.score >= 80 && money >= bestCandidate.cost) {
-        let weakest = null;
-        let weakestScore = 999;
-        state.jokers.forEach((j, idx) => {
-          const sc = scoreOwnedJoker(j, synergy);
-          if (sc < weakestScore) {
-            weakestScore = sc;
-            weakest = { index: idx + 1, name: j.name, score: sc };
+      let bestCandidate = evaluatedCards.find(c => !c.isConsumable);
+      let benchScores = null;
+      let weakest = null;
+      let weakestScore = 999;
+      if (bestCandidate) {
+        benchScores = state.jokers.map(j => scoreOwnedJoker(j, synergy));
+        weakestScore = Math.min(...benchScores);
+        weakest = { index: benchScores.indexOf(weakestScore) + 1, name: state.jokers[benchScores.indexOf(weakestScore)].name, score: weakestScore };
+      }
+      if (bestCandidate && bestCandidate.score >= 70 && money >= bestCandidate.cost) {
+        // Synergy-aware tie-break: when several bench members share the
+        // weakest score, prefer selling the one off-primaryNeed.
+        const benchBest = Math.max(...benchScores);
+        const benchWeak = benchBest < 55; // all-weak bench: unfreeze path
+        const minCandidate = benchWeak ? 65 : 70;
+        const minGap = benchWeak ? 20 : 25;
+        if (bestCandidate.score >= minCandidate && (bestCandidate.score - weakestScore) >= minGap) {
+          // pick weakest index with synergy tie-break
+          let sellIdx = benchScores.indexOf(weakestScore);
+          const pillarOf = (j) => JOKER_PILLAR_MAP[j.name] || (j.xmult && j.xmult > 1 ? "x_mult" : (j.mult >= 8 ? "flat_mult" : (j.chips >= 30 ? "chips" : "utility")));
+          for (let i = 0; i < benchScores.length; i++) {
+            if (benchScores[i] === weakestScore) {
+              if (pillarOf(state.jokers[i]) !== synergy.primaryNeed) { sellIdx = i; break; }
+            }
           }
-        });
-        if (weakest && weakestScore <= 48 && (bestCandidate.score - weakestScore) >= 30) {
           sellRecommendation = {
-            sellIndex: weakest.index,
-            sellName: weakest.name,
-            sellScore: weakestScore,
+            sellIndex: sellIdx + 1,
+            sellName: state.jokers[sellIdx].name,
+            sellScore: benchScores[sellIdx],
             targetCard: bestCandidate,
-            scoreGain: bestCandidate.score - weakestScore,
+            scoreGain: bestCandidate.score - benchScores[sellIdx],
           };
         }
       }
