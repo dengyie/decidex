@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v143";
+  const ASSET_VERSION = "v144";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=143";
-  const ASSET_WASM_URL = "love.wasm.bin?v=143";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=144";
+  const ASSET_WASM_URL = "love.wasm.bin?v=144";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -2928,8 +2928,11 @@ end
       if (bname.includes("Buffoon") && jokersCount < 2) {
         safeThreshold = 0;
       } else if ((state.ante || 1) <= 2) {
-        // Celestial and Arcana packs directly boost hand level or provide cleanse/cash
-        safeThreshold = (bname.includes("Celestial") || bname.includes("Arcana")) ? 0 : 4;
+        // v144: Celestial/Arcana packs used to have threshold 0 — they drained
+        // the wallet to $0 every shop (v143 soak: avg_money $1.0, max $7 over
+        // 45min), locking the sell-upgrade chain behind `money >= cost`.
+        // A $5 floor keeps hand-level progress affordable without starvation.
+        safeThreshold = (bname.includes("Celestial") || bname.includes("Arcana")) ? 5 : 4;
       } else {
         safeThreshold = 20;
       }
@@ -3058,9 +3061,19 @@ end
       interestAdvice = `资金 $${money}，差 $${nextThreshold - money} 达 $${nextThreshold} 利息线 (每 $5 结算 $1 利息)`;
     }
 
+    // v144: cash-floor discipline for ordinary purchases. The v143 soak
+    // showed the shop draining every visit (avg_money $1.0 / max $7 over
+    // 45min), so the sell-upgrade gate (`money >= cost`) never opened and
+    // weak benches froze. A per-ante floor keeps the wallet alive; survival
+    // buys (early-joker slot, strong card) stay exempt via keepFloor=0.
+    const survivalBuy = jokersCount < 2 || (bestCard && bestCard.score >= 82);
+    const cashFloor = survivalBuy ? 0 : ((state.ante || 1) >= 3 ? 6 : 3);
+
     return {
       evaluatedCards: evaluatedCards,
-      bestCard: bestCard && bestCard.canAfford && bestCard.hasSlot && (bestCard.score >= 60 || (jokersCount < 2 && bestCard.score >= 45)) ? bestCard : null,
+      bestCard: bestCard && bestCard.canAfford && bestCard.hasSlot
+        && (bestCard.score >= 60 || (jokersCount < 2 && bestCard.score >= 45))
+        && (money - bestCard.cost >= cashFloor) ? bestCard : null,
       evaluatedBoosters: evaluatedBoosters,
       bestBooster: bestBooster,
       evaluatedVouchers: evaluatedVouchers,
