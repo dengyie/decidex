@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v150";
+  const ASSET_VERSION = "v151";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=150";
-  const ASSET_WASM_URL = "love.wasm.bin?v=150";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=151";
+  const ASSET_WASM_URL = "love.wasm.bin?v=151";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -2921,7 +2921,20 @@ end
     }
 
     evaluatedCards.sort((a, b) => b.score - a.score);
-    const bestCard = evaluatedCards[0];
+    // v151: survival bias — with an empty/weak bench, a consumable must not
+    // outbid a joker. Gate diag (v151, 10 shops): ante2 money=$4 jokers=0,
+    // shelf had Scholar (50J, affordable) but bestCard went to The Star
+    // (65C, $3) purely on score; the $3 buy left $1 and every later shop
+    // was all-`!$` into a 3200-chip The Wall with ZERO jokers (scored 1492).
+    // When jokers < 2, if the top card is a consumable and any non-consumable
+    // lands within 15 points, buy the joker instead — a joker compounds every
+    // future round; a one-shot tarot does not.
+    let bestCard = evaluatedCards[0];
+    if (bestCard && bestCard.isConsumable && jokersCount < 2) {
+      const jokerAlt = evaluatedCards.find(c => !c.isConsumable && c.canAfford && c.hasSlot &&
+        c.score >= bestCard.score - 15);
+      if (jokerAlt) bestCard = jokerAlt;
+    }
 
     // Evaluate shop boosters
     const evaluatedBoosters = [];
@@ -2934,6 +2947,12 @@ end
       if (bname.includes("Buffoon")) {
         // Buffoon pack: provides jokers! Critical for early survival
         bScore = (jokersCount === 0 ? 100 : (jokersCount === 1 ? 88 : (jokersCount < maxJokerSlots ? 72 : 35)));
+        // v151: never spend the LAST dollar on a pack whose contents are
+        // random — gate diag ante1 r1: starting $4 bought the Buffoon,
+        // opened no joker (50/50), and the run entered ante2 with jokers=[]
+        // and $1. A pack bought at money == cost leaves zero emergency
+        // cash and zero guarantee; requiring cost+1 keeps a floor dollar.
+        if (money - cost < 1) bScore = Math.min(bScore, 20);
       } else if (bname.includes("Celestial")) {
         // v150: hand_levels has been {} across five soak generations
         // (v145-v149) — ante1-2 planets are dead stock (no hand has
@@ -5004,7 +5023,14 @@ end
               const need = Math.max(0, topVoucher.cost + (topVoucher.keepAfter || 12) - cash);
               this.updateStatus(`攒钱买券: ${topVoucher.name} (还需 $${need})`, false);
             }
-            const shouldBuyCard = bestCard && bestCard.canAfford && bestCard.hasSlot && (
+            const shouldBuyCard = bestCard && bestCard.canAfford && bestCard.hasSlot &&
+              // v151: with an empty/weak bench, a cheap consumable must not
+              // intercept the wallet. Gate diag: The Star 65C/$3 bought at
+              // ante2 with jokers=0 left $1 while the shelf's Scholar (50J)
+              // rotted — then The Wall (3200) killed the joker-less run at
+              // 1492 chips. Below 75 a consumable only buys from a bench
+              // that already has 2+ jokers working.
+              !(jokersCount < 2 && bestCard.isConsumable && bestCard.score < 75) && (
               bestCard.recommendation === "强烈推荐" ||
               (jokersCount < 2 && bestCard.score >= 45) ||
               (jokersCount === 0 && bestCard.score >= 35) ||
