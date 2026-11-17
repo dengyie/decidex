@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v153";
+  const ASSET_VERSION = "v154";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=153";
-  const ASSET_WASM_URL = "love.wasm.bin?v=153";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=154";
+  const ASSET_WASM_URL = "love.wasm.bin?v=154";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -2410,9 +2410,16 @@ end
       if (testEval.totalScore < basePlay.totalScore * 0.99) continue;
 
       // Verify that hand ranking didn't degrade
+      // v154: under The Psychic with the run on the brink (<=2 hands left
+      // and still behind), a rank DOWNGRADE is acceptable when it scores
+      // more — the diag154 ante1 death (scored 451/600, hands_left=0,
+      // every play a level-1 Pair ~100) died holding pairs it refused to
+      // break into Two Pair because this check vetoed the upgrade path
+      // whenever the attached junk changed the hand name downward.
+      const brink = constraints.requires5Cards && handsLeft <= 2 && basePlay.totalScore < need;
       const oldRankVal = POKER_HAND_TIERS[basePlay.handName] || 0;
       const newRankVal = POKER_HAND_TIERS[testEval.handName] || 0;
-      if (newRankVal < oldRankVal) continue;
+      if (!brink && newRankVal < oldRankVal) continue;
 
       // Accept this junk card!
       augmentedCards.push(jc);
@@ -2486,6 +2493,22 @@ end
       };
     }
 
+    // - Last hand left
+    // v154: with exactly 1 hand left a discard can NEVER pay off (the
+    // redraw goes unused — hands_left hits 0 first). The diag154 ante1
+    // death (The Psychic, 451/600, hands_left=0) burned its final hands
+    // in a discard-retry loop; force the play instead.
+    if (handsLeft === 1) {
+      return {
+        verdict: "PLAY",
+        confidence: "CRITICAL",
+        badgeClass: "arb-play",
+        title: "⚡ 决胜出牌 (最后出牌)",
+        reason: `仅剩最后 1 次出牌机会，不可再冒险弃牌，打出最高分组合${filteringNote}！`,
+        cards: bestPlay.cards
+      };
+    }
+
     // - Passive Constraints: Green Joker / The Water (strictly avoid discarding)
     if (constraints && constraints.avoidDiscard) {
       const isGreen = (state.jokers || []).some(j => j.name === "Green Joker" && !j.debuff);
@@ -2497,18 +2520,6 @@ end
         reason: isGreen
           ? `当前持有 Green Joker，弃牌会永久损失 -1 倍率，优先出牌过牌${filteringNote}！`
           : `当前处于 The Water 盲注限制，严禁弃牌，直接出牌${filteringNote}！`,
-        cards: bestPlay.cards
-      };
-    }
-
-    // - Last hand left
-    if (handsLeft === 1) {
-      return {
-        verdict: "PLAY",
-        confidence: "CRITICAL",
-        badgeClass: "arb-play",
-        title: "⚡ 决胜出牌 (最后出牌)",
-        reason: `仅剩最后 1 次出牌机会，不可再冒险弃牌，打出最高分组合${filteringNote}！`,
         cards: bestPlay.cards
       };
     }
@@ -2569,7 +2580,11 @@ end
       }
 
       // If repeating current play over all remaining hands still cannot meet the blind (mathematically doomed without drawing better)
-      if (bestPlay.totalScore * handsLeft < need) {
+      // v154: never on the LAST hand — a doomed-final-hand discard is how
+      // the diag154 ante1 run died (4 discards burned while hands drained
+      // to 0 at 451/600). Playing an extra ~100 chips beats a redraw worth
+      // zero when there is no hand left to use it.
+      if (bestPlay.totalScore * handsLeft < need && handsLeft >= 2) {
         return {
           verdict: "DISCARD",
           confidence: "CRITICAL",
