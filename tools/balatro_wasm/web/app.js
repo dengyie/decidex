@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v149";
+  const ASSET_VERSION = "v150";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=149";
-  const ASSET_WASM_URL = "love.wasm.bin?v=149";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=150";
+  const ASSET_WASM_URL = "love.wasm.bin?v=150";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -2863,6 +2863,15 @@ end
           }
         }
 
+        // v150: economy generators. Five soak generations (v145-v149) all
+        // died with money $0-4 — the run's income (blind payouts $3-5) was
+        // fully re-spent every shop with zero accumulation, so the shop
+        // could never afford the cards it wanted. A money joker compounds:
+        // Golden Joker pays $4/round (more than the blind payout itself).
+        if ((state.ante || 1) <= 3 && ["Golden Joker", "Cloud 9", "Delay the Inevitable"].includes(cname)) {
+          score += 25;
+        }
+
         // Boss Blind 针对性规避与特化加成
         const upcomingBoss = (state.blind && state.blind.upcoming_boss) || null;
         if (upcomingBoss) {
@@ -2926,9 +2935,15 @@ end
         // Buffoon pack: provides jokers! Critical for early survival
         bScore = (jokersCount === 0 ? 100 : (jokersCount === 1 ? 88 : (jokersCount < maxJokerSlots ? 72 : 35)));
       } else if (bname.includes("Celestial")) {
-        bScore = 75;
+        // v150: hand_levels has been {} across five soak generations
+        // (v145-v149) — ante1-2 planets are dead stock (no hand has
+        // been leveled, and most hands were barely played), so early
+        // Celestial packs only drained the wallet that card buys need.
+        bScore = (state.ante || 1) <= 2 ? 30 : 75;
       } else if (bname.includes("Arcana")) {
-        bScore = 72;
+        // v150: same early-game dead-stock logic — tarot enhancements
+        // need a hand base that ante1-2 runs haven't built.
+        bScore = (state.ante || 1) <= 2 ? 30 : 72;
       } else if (bname.includes("Spectral")) {
         bScore = 78;
       } else if (bname.includes("Standard")) {
@@ -2949,6 +2964,9 @@ end
         // the wallet to $0 every shop (v143 soak: avg_money $1.0, max $7 over
         // 45min), locking the sell-upgrade chain behind `money >= cost`.
         // A $5 floor keeps hand-level progress affordable without starvation.
+        // v150: with early Celestial/Arcana demoted to dead stock (30), the
+        // only ante<=2 non-Buffoon spend left is Spectral ($4-6) — keep the
+        // $5 floor for it.
         safeThreshold = (bname.includes("Celestial") || bname.includes("Arcana")) ? 5 : 4;
       } else if (bname.includes("Celestial")) {
         // v146: the ante>=3 flat $20 gate froze Celestial packs forever
