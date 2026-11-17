@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v151";
+  const ASSET_VERSION = "v152";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=151";
-  const ASSET_WASM_URL = "love.wasm.bin?v=151";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=152";
+  const ASSET_WASM_URL = "love.wasm.bin?v=152";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -5030,7 +5030,13 @@ end
               // rotted — then The Wall (3200) killed the joker-less run at
               // 1492 chips. Below 75 a consumable only buys from a bench
               // that already has 2+ jokers working.
-              !(jokersCount < 2 && bestCard.isConsumable && bestCard.score < 75) && (
+              // v152: extend to a WEAK bench. death_diag152 sample 2: ante2
+              // The Water (1600) scored 923 with [Banner, Pareidolia] (both
+              // <55) while the wallet funded The Moon 65 / The World 65 /
+              // Pluto 62 in a row — one-shot hand tarots on a bench with no
+              // engine. v151's gate only covered jokers<2.
+              !(jokersCount < 2 && bestCard.isConsumable && bestCard.score < 75) &&
+              !(weakBench && bestCard.isConsumable && bestCard.score < 75) && (
               bestCard.recommendation === "强烈推荐" ||
               (jokersCount < 2 && bestCard.score >= 45) ||
               (jokersCount === 0 && bestCard.score >= 35) ||
@@ -5062,7 +5068,12 @@ end
               // (best owned joker <55, i.e. no card in the 70+ keep
               // tiers) in ante<=3 gets the same exemption.
               (jokersCount <= 1 && !bestCard.isConsumable && bestCard.score >= 45) ||
-              ((state.ante || 1) <= 3 && jokersCount >= 2 && jokersCount < 5 &&
+              // v152: the weak-bench exemption survived to ante<=3 only —
+              // death_diag152 sample 1: ante4 r8 Small Blind lost by 336
+              // chips with [Wily, Wrathful, Blue] (all default-40 bucket)
+              // and a healthy $9 wallet, because the exemption had expired
+              // and the save-up discipline re-locked every shop.
+              ((state.ante || 1) <= 5 && jokersCount >= 2 && jokersCount < 5 &&
                !bestCard.isConsumable && bestCard.score >= 55 &&
                weakBench));
             // The trailing gate: while saving for a voucher — or when the
