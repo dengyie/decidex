@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v148";
+  const ASSET_VERSION = "v149";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=148";
-  const ASSET_WASM_URL = "love.wasm.bin?v=148";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=149";
+  const ASSET_WASM_URL = "love.wasm.bin?v=149";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -4963,6 +4963,12 @@ end
             const topVoucher = shopAdv && shopAdv.topVoucher;
             const sellRec = shopAdv && shopAdv.sellRecommendation;
             const jokersCount = (state.jokers || []).length;
+            // v149: weak-bench detection for the survival exemption. Reuses
+            // scoreOwnedJoker (same weighting the sell path uses): if NO
+            // owned joker reaches the 55 keep-tier, the bench has no real
+            // power and the voucher save-up can wait.
+            const weakBench = jokersCount > 0 &&
+              Math.max(...(state.jokers || []).map(j => scoreOwnedJoker(j, analyzeSynergy(state.jokers)))) < 55;
             // v135: save-up mode for a worthwhile voucher. The model used to
             // trickle the shop cash into boosters/mediocre cards and never
             // accumulated the $10+buffer a voucher needs (user report: never
@@ -5005,13 +5011,22 @@ end
               // theoretical. With <=1 joker, any affordable non-consumable
               // scoring card (>=45) beats saving; from 2 jokers on, the
               // old discipline holds.
-              (jokersCount <= 1 && !bestCard.isConsumable && bestCard.score >= 45));
+              // v149: the same logic applies to a WEAK bench. The v148
+              // soak died 4x at ante3 r8 with exactly 2 jokers — P1
+              // buffoon's random stock — where the discipline re-locked
+              // every shop while the run had no real power. A weak bench
+              // (best owned joker <55, i.e. no card in the 70+ keep
+              // tiers) in ante<=3 gets the same exemption.
+              (jokersCount <= 1 && !bestCard.isConsumable && bestCard.score >= 45) ||
+              ((state.ante || 1) <= 3 && jokersCount >= 2 && jokersCount < 5 &&
+               !bestCard.isConsumable && bestCard.score >= 55 &&
+               weakBench));
             // The trailing gate: while saving for a voucher — or when the
             // voucher is ALREADY buyable (within its buffer) — a mediocre
             // card purchase would spend the exact money the voucher needs
             // and flap the boundary forever. Only a strong card (>=82) —
-            // or a survival buy with a near-empty bench (v148) — outranks
-            // the voucher.
+            // or a survival buy with a near-empty/weak bench (v148/v149) —
+            // outranks the voucher.
 
             const cardKey = bestCard ? `card_${bestCard.index}_${bestCard.name}` : null;
             const voucherKey = bestVoucher ? `voucher_${bestVoucher.index}_${bestVoucher.name}` : null;
