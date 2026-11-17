@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v152";
+  const ASSET_VERSION = "v153";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=152";
-  const ASSET_WASM_URL = "love.wasm.bin?v=152";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=153";
+  const ASSET_WASM_URL = "love.wasm.bin?v=153";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -1027,7 +1027,20 @@ end
     "Card Sharp", "Blackboard", "Baron", "Baseball Card", "Stuntman",
     "Green Joker", "Ride the Bus", "Red Card", "Square Joker", "Supernova",
     "Golden Joker", "Bull", "Bootstraps", "Mail-In Rebate", "Trading Card",
-    "Half Joker", "Gros Michel", "Blue Joker", "Banner", "Scary Face", "Odd Todd"
+    "Half Joker", "Gros Michel", "Blue Joker", "Banner", "Scary Face", "Odd Todd",
+    // v153: ante>=4 census (diag153, 68 shops) — the shelf's strongest
+    // commons weren't on the list, so they scored as the plain 50 bucket
+    // and lost every shop-best race to a $3 consumable. All of these have
+    // a real engine output (Fibonacci flat mult per Ace; Duo/Trio/Family/
+    // Order/Tribe gated x_mult whose gates the scoring path already
+    // models; Photograph/Hack/Hanging Chad per-card triggers).
+    "Fibonacci", "The Duo", "The Trio", "The Family", "The Order", "The Tribe",
+    "Photograph", "Misprint", "Abstract Joker", "Hack", "Hanging Chad",
+    "Smeared Joker", "Bloodstone", "Smiley Face", "Even Steven", "Walkie Talkie",
+    "Scholar", "Clever Joker", "Wily Joker", "Devious Joker", "Crafty Joker",
+    "Sly Joker", "Jolly Joker", "Zany Joker", "Mad Joker", "Crazy Joker",
+    "Droll Joker", "Runner", "Castle", "Vampire", "Joker Stencil", "Credit Card",
+    "Fortune Teller", "Flash Card", "Lucky Cat", "Space Joker", "Showman"
   ];
 
   function analyzeSynergy(jokers) {
@@ -2856,6 +2869,22 @@ end
         else if (c.edition === "holo") score += 20;
         else if (c.edition === "foil") score += 15;
 
+        // v153: the bridge serializes ability.extra for shop cards
+        // (shop_card_json '"extra":...'), but the scorer only read the
+        // top-level mult/chips/xmult — which vanilla leaves at 0 for the
+        // whole +chips/+mult family (Wily Joker carries chips:100 ONLY in
+        // extra.chips). diag153: those jokers scored as the unnamed 40-50
+        // bucket, lost every best race, and 46/68 ante>=4 shops exited
+        // empty-handed. Mirror scoreOwnedJoker's stat weighting so shelf
+        // output strength reaches the comparison.
+        const xtr = (c.extra && typeof c.extra === "object") ? c.extra : null;
+        const effChips = Math.max(Number(c.chips) || 0, (xtr && (Number(xtr.chips) || Number(xtr.chip_mod)) || 0));
+        const effMult = Math.max(Number(c.mult) || 0, (xtr && Number(xtr.mult) || 0));
+        const effXmult = Math.max(Number(c.xmult) || 1, (xtr && Number(xtr.x_mult || xtr.xmult || xtr.Xmult)) || 1);
+        if (effChips >= 30) score += 15;
+        if (effMult >= 5) score += 15;
+        if (effXmult > 1.0) score += 20;
+
         // Early game Ante 1-2 survival boost for basic scoring jokers
         if ((state.ante || 1) <= 2 && jokersCount < 2) {
           if (c.mult || c.chips || ["Joker", "Half Joker", "Misprint", "Popcorn", "Ice Cream", "Blue Joker", "Gros Michel", "Abstract Joker"].includes(cname)) {
@@ -2900,8 +2929,18 @@ end
           const curInterest = Math.min(5, Math.floor(money / 5));
           const newInterest = Math.min(5, Math.floor(remaining / 5));
           const interestLoss = curInterest - newInterest;
-          if (interestLoss > 0 && !TOP_TIER.includes(cname) && pillar !== synergy.primaryNeed) {
-            score -= (interestLoss * 20);
+          // v153: interest loss is $1 per round of income — but dying at
+          // ante>=4 forfeits the ante-clear payout entirely. diag153: the
+          // full penalty (x20) dragged every $4-5 output joker below the
+          // consumable bar (Wily:15J, Castle:-5J at wallet $14-24), 46/68
+          // ante>=4 shops exited best:null. Halve the weight in the late
+          // game and exempt jokers with real output entirely.
+          const realOutput = effChips >= 30 || effMult >= 5 || effXmult > 1.0;
+          const weight = (state.ante || 1) >= 4 ? 10 : 20;
+          if (interestLoss > 0 && !TOP_TIER.includes(cname) &&
+              pillar !== synergy.primaryNeed &&
+              !((state.ante || 1) >= 4 && realOutput)) {
+            score -= (interestLoss * weight);
           }
         }
       }
@@ -5344,6 +5383,15 @@ end
                 if (c.xmult && c.xmult > 1.0) score += 40;
                 if (c.mult && c.mult >= 8) score += 20;
                 if (c.chips && c.chips >= 50) score += 20;
+                // v153: mirror the shop scorer's extra read — buffoon-pack
+                // jokers carry their bonus in extra.chips/mult too.
+                const xtr = (c.extra && typeof c.extra === "object") ? c.extra : null;
+                const effChips = Math.max(Number(c.chips) || 0, (xtr && (Number(xtr.chips) || Number(xtr.chip_mod)) || 0));
+                const effMult = Math.max(Number(c.mult) || 0, (xtr && Number(xtr.mult) || 0));
+                const effXmult = Math.max(Number(c.xmult) || 1, (xtr && Number(xtr.x_mult || xtr.xmult || xtr.Xmult)) || 1);
+                if (effChips >= 30) score += 15;
+                if (effMult >= 5) score += 15;
+                if (effXmult > 1.0) score += 20;
                 if (c.edition === "poly") score += 30;
                 else if (c.edition === "holo") score += 20;
                 else if (c.edition === "foil") score += 15;
