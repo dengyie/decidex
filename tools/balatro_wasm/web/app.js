@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v154";
+  const ASSET_VERSION = "v155";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=154";
-  const ASSET_WASM_URL = "love.wasm.bin?v=154";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=155";
+  const ASSET_WASM_URL = "love.wasm.bin?v=155";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -2525,13 +2525,20 @@ end
     }
 
     // - Steady accumulation check: If continuing to play best hand safely clears the blind across remaining hands, play it!
-    if (bestPlay.totalScore * handsLeft >= need && bestPlay.totalScore >= need * 0.35) {
+    // v155: repeatability-decayed projection. totalScore * handsLeft assumes the
+    // current hand replays verbatim every hand — but trips consume their pairs and
+    // xmult jokers need the exact hand back. The diag155 Manacle death (ante3,
+    // discards_left=4 unused, hands_left=0) projected full Trio score across 4
+    // hands, never discarded, and died 2473/4000 short. Project only the FIRST
+    // hand at full value; each further hand earns 55% of it.
+    const repeatScore = Math.round(bestPlay.totalScore * 0.55) * (handsLeft - 1);
+    if (bestPlay.totalScore + repeatScore >= need && bestPlay.totalScore >= need * 0.35) {
       return {
         verdict: "PLAY",
         confidence: "STEADY",
         badgeClass: "arb-play",
         title: filteringNote ? "⚡ 稳健出牌 (附带杂牌清洗)" : "⚡ 稳健出牌 (手牌足够通关)",
-        reason: `当前手牌预期得分 ${bestPlay.totalScore.toLocaleString()} 分，结合剩余 ${handsLeft} 次出牌累计可得 ${(bestPlay.totalScore * handsLeft).toLocaleString()} 分 (需 ${need.toLocaleString()} 分)${filteringNote}，无需冒险弃牌！`,
+        reason: `当前手牌预期得分 ${bestPlay.totalScore.toLocaleString()} 分，后续 ${handsLeft - 1} 手按 55% 重复折算累计可得 ${(bestPlay.totalScore + repeatScore).toLocaleString()} 分 (需 ${need.toLocaleString()} 分)${filteringNote}，无需冒险弃牌！`,
         cards: bestPlay.cards
       };
     }
@@ -2579,18 +2586,23 @@ end
         };
       }
 
-      // If repeating current play over all remaining hands still cannot meet the blind (mathematically doomed without drawing better)
-      // v154: never on the LAST hand — a doomed-final-hand discard is how
-      // the diag154 ante1 run died (4 discards burned while hands drained
-      // to 0 at 451/600). Playing an extra ~100 chips beats a redraw worth
-      // zero when there is no hand left to use it.
-      if (bestPlay.totalScore * handsLeft < need && handsLeft >= 2) {
+      // If the decayed projection (full first hand + 55% repeats) still cannot
+      // meet the blind — mathematically doomed without drawing better.
+      // v155: same decay as the STEADY check above. The diag155 Manacle death
+      // kept "steady-playing" a Trio hand whose naive projection cleared the
+      // blind while the real repeats fell far short, burning all hands with 4
+      // discards unused. Never on the LAST hand — a doomed-final-hand discard
+      // is how the diag154 ante1 run died (4 discards burned while hands
+      // drained to 0 at 451/600). Playing an extra ~100 chips beats a redraw
+      // worth zero when there is no hand left to use it.
+      const doomedProjection = bestPlay.totalScore + Math.round(bestPlay.totalScore * 0.55) * (handsLeft - 1);
+      if (doomedProjection < need && handsLeft >= 2) {
         return {
           verdict: "DISCARD",
           confidence: "CRITICAL",
           badgeClass: "arb-discard",
           title: "🗑️ 断腕弃牌 (绝境刷新)",
-          reason: `当前牌型重复打出所有手牌也仅得 ${(bestPlay.totalScore * handsLeft).toLocaleString()} 分，无法达标 (${need.toLocaleString()})，必须弃除杂牌博取爆发牌型！`,
+          reason: `当前牌型按 55% 重复折算累计仅得 ${(bestPlay.totalScore + Math.round(bestPlay.totalScore * 0.55) * (handsLeft - 1)).toLocaleString()} 分，无法达标 (${need.toLocaleString()})，必须弃除杂牌博取爆发牌型！`,
           cards: bestDiscard.cards
         };
       }
