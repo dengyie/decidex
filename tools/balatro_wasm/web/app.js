@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v155";
+  const ASSET_VERSION = "v156";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=155";
-  const ASSET_WASM_URL = "love.wasm.bin?v=155";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=156";
+  const ASSET_WASM_URL = "love.wasm.bin?v=156";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -2849,10 +2849,17 @@ end
           // Usage-aware: the most-played hand's planet is the best buy;
           // planets for hands played at least once are still decent; a
           // planet for a hand never played this run is nearly dead stock.
+          // v156: from ante>=3 the level-1 chip/mult table is the binding
+          // constraint (diag156: 5/5 deaths at hand_levels={} and money=$0,
+          // ante5 bosses needing 22000 against level-1 base values). A
+          // level-up compounds for every future hand — outbid one-shot
+          // joker buys from here on.
           const handForPlanet = PLANET_HAND_MAP[cname];
           const playedForHand = handForPlanet ? (Number(state.hand_played && state.hand_played[handForPlanet]) || 0) : 0;
           const mostPlayedPlanet = Object.entries(PLANET_HAND_MAP).find(([, h]) => h === (state.most_played_hand || ""));
-          if (mostPlayedPlanet && mostPlayedPlanet[0] === cname) {
+          if ((state.ante || 1) >= 3 && playedForHand > 0) {
+            score = (mostPlayedPlanet && mostPlayedPlanet[0] === cname) ? 95 : 92;
+          } else if (mostPlayedPlanet && mostPlayedPlanet[0] === cname) {
             score = 88;
           } else if (playedForHand > 0) {
             score = 78;
@@ -3002,6 +3009,26 @@ end
       if (jokerAlt) bestCard = jokerAlt;
     }
 
+    // v156: planet-first bias — the mirror of v151's joker-first survival
+    // bias. diag156: 5/5 deaths at ante2-5 with hand_levels={} and money=$0;
+    // every ante>=3 shop outbid planets with 115-175-score jokers so the run
+    // never leveled a single hand, and the level-1 chip/mult table caps out
+    // far below late-boss demand. Once the bench is established (>=2 jokers),
+    // a planet for an actually-played hand beats a marginal joker upgrade —
+    // the level compounds for every future hand.
+    if ((state.ante || 1) >= 3 && (state.jokers || []).length >= 2) {
+      const handLevels = state.hand_levels || {};
+      const anyLevelAboveOne = Object.values(handLevels).some(lvl => (Array.isArray(lvl) ? lvl[0] : lvl) > 1);
+      if (!anyLevelAboveOne) {
+        const planetAlt = evaluatedCards.find(c => c.isConsumable && c.pillar === "planet" &&
+          c.canAfford && c.hasSlot && c.score >= 90);
+        if (planetAlt && bestCard && !bestCard.isConsumable &&
+            planetAlt.score >= bestCard.score - 20) {
+          bestCard = planetAlt;
+        }
+      }
+    }
+
     // Evaluate shop boosters
     const evaluatedBoosters = [];
     for (const b of boosters) {
@@ -3060,7 +3087,12 @@ end
         // table is exactly that shortfall). Bleeding $1 per level-up is
         // far cheaper than losing the round: drop the floor to $8 once
         // any hand has been played (the planet always levels a real hand).
-        safeThreshold = (state.most_played_hand || jokersCount > 0) ? 8 : 14;
+        // v156: diag156 deaths all sat at money=$0 with hand_levels={} —
+        // hoarding cash does not save a level-1 build at ante>=4. $3
+        // keeps an emergency dollar but stops starving the level chain.
+        safeThreshold = (state.most_played_hand || jokersCount > 0)
+          ? ((state.ante || 1) >= 4 ? 3 : 8)
+          : 14;
       } else {
         safeThreshold = 12;
       }
