@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v156";
+  const ASSET_VERSION = "v157";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=156";
-  const ASSET_WASM_URL = "love.wasm.bin?v=156";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=157";
+  const ASSET_WASM_URL = "love.wasm.bin?v=157";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3052,6 +3052,16 @@ end
         // been leveled, and most hands were barely played), so early
         // Celestial packs only drained the wallet that card buys need.
         bScore = (state.ante || 1) <= 2 ? 30 : 75;
+        // v157: with the level chain still cold at ante>=3, a Celestial
+        // pack is the only free hand-level path (in-pack planets cost
+        // nothing) — and Mega variants carry 2-3 planets. diag157: 4/4
+        // deaths hand_levels={} because the pack itself never became
+        // affordable after joker buys drained the wallet.
+        if ((state.ante || 1) >= 3) {
+          const hls2 = state.hand_levels || {};
+          const anyAboveOne2 = Object.values(hls2).some(lvl => (Array.isArray(lvl) ? lvl[0] : lvl) > 1);
+          if (!anyAboveOne2) bScore += (bname.includes("Mega") || bname.includes("Jumbo")) ? 13 : 6;
+        }
       } else if (bname.includes("Arcana")) {
         // v150: same early-game dead-stock logic — tarot enhancements
         // need a hand base that ante1-2 runs haven't built.
@@ -5184,6 +5194,29 @@ end
             const cardKey = bestCard ? `card_${bestCard.index}_${bestCard.name}` : null;
             const voucherKey = bestVoucher ? `voucher_${bestVoucher.index}_${bestVoucher.name}` : null;
 
+            // v157: level-chain fund. diag157 (4/4 deaths hand_levels={} +
+            // money=$0; 9/10 shops gate at money=0 with the whole shelf !afford):
+            // every prior generation spent the wallet to zero on jokers, so the
+            // ante>=3 Celestial pack — the ONLY free path to hand levels, since
+            // in-pack planets cost nothing but the pack itself costs money —
+            // could never be bought. When the level chain has not started
+            // (no hand above level 1) and a mediocre joker buy (score < 82,
+            // below the strong-buy bar) would drop the wallet under $4, skip
+            // the buy this shop and keep the fund. Real output (>=82) and
+            // early-game survival (ante<=2) still spend freely.
+            if (shouldBuyCard && bestCard && !bestCard.isConsumable &&
+                (state.ante || 1) >= 3 && bestCard.score < 82 &&
+                (money - (Number(bestCard.cost) || 0)) < 4) {
+              const hls = state.hand_levels || {};
+              const anyAboveOne = Object.values(hls).some(lvl => (Array.isArray(lvl) ? lvl[0] : lvl) > 1);
+              if (!anyAboveOne) {
+                console.log("[AutoPilot] Level-chain fund: skipping joker buy", bestCard.name,
+                  "cost", bestCard.cost, "would leave $", money - (Number(bestCard.cost) || 0),
+                  "with hand_levels empty");
+                shouldBuyCard = false;
+              }
+            }
+
             // Priority 0: Use non-combat consumables (Planets, Hermit, Temperance, Wheel, Judgement)
             // to gain cash, free consumable slots for buying, or level up hands!
             const nonCombatCons = findBestNonCombatConsumableToUse(state, this._consUseSkipped);
@@ -5393,11 +5426,17 @@ end
               // hand's usage beats a fixed name priority, which wasted
               // purchases on hands never played (e.g. Jupiter for a flush-less
               // build). Zero-usage packs fall back to pack order.
+              // v157: zero-usage fallback now prefers most_played_hand's
+              // planet, then any planet, then pack order — the most-played
+              // hand is the one the level compounds on every future play.
               const playedCounts = (state && state.hand_played) || {};
               const planetCandidates = packCards
                 .filter(c => canUsePackCard(c, state) && PLANET_HAND_MAP[c.name])
                 .sort((a, b) => (Number(playedCounts[PLANET_HAND_MAP[b.name]]) || 0) - (Number(playedCounts[PLANET_HAND_MAP[a.name]]) || 0));
-              bestCard = planetCandidates[0] || packCards.find(c => canUsePackCard(c, state)) || packCards[0];
+              bestCard = planetCandidates[0] ||
+                packCards.find(c => canUsePackCard(c, state) &&
+                  (state.most_played_hand ? PLANET_HAND_MAP[c.name] === state.most_played_hand : true)) ||
+                packCards.find(c => canUsePackCard(c, state)) || packCards[0];
             } else if (sname === "BUFFOON_PACK") {
               const syn = analyzeSynergy(state.jokers);
               const jCount = (state.jokers || []).length;
