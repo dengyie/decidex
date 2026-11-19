@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v157";
+  const ASSET_VERSION = "v158";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=157";
-  const ASSET_WASM_URL = "love.wasm.bin?v=157";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=158";
+  const ASSET_WASM_URL = "love.wasm.bin?v=158";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -3103,6 +3103,17 @@ end
         safeThreshold = (state.most_played_hand || jokersCount > 0)
           ? ((state.ante || 1) >= 4 ? 3 : 8)
           : 14;
+        // v158: cold-chain floor 0 — diag158 gate money dist was {0: 45, 4: 5}
+        // with a $3 floor: wallet hovered at 0-4 and never cleared
+        // cost+3 for a $4-6 pack, so celestial_buys=0 across the whole
+        // window. At ante>=4 with the chain cold, the pack price itself
+        // IS the fund; the next blind's payout refills the wallet.
+        if ((state.ante || 1) >= 4) {
+          const hlsB = state.hand_levels || {};
+          if (!Object.values(hlsB).some(lvl => (Array.isArray(lvl) ? lvl[0] : lvl) > 1)) {
+            safeThreshold = 0;
+          }
+        }
       } else {
         safeThreshold = 12;
       }
@@ -5124,6 +5135,21 @@ end
             // scope reads state.money (using the bare name here wedged every
             // shop with ReferenceError, probe v135).
             const cash = Number(state.money) || 0;
+            // v158: a cold level chain outranks voucher saving. diag158 (5/5
+            // deaths hand_levels={} + money=$0; 45/50 gate shops money=0 with
+            // saving:true): the voucher floor ($10 + keepAfter 12 = $22 target)
+            // locked every shop, wallet hovered $0-4 forever, and the Celestial
+            // pack — the only free path to hand levels — was gated off by
+            // Priority 4's `!savingVoucher`. A $4-6 pack that compounds levels
+            // beats a $10 voucher that may never be reached before the run
+            // dies on level-1 hands. Exemption only when cold AND the pack is
+            // a Celestial (usage planets only — the pack's own scorer already
+            // handles that).
+            const hlsCold = (() => {
+              const hls = state.hand_levels || {};
+              return !Object.values(hls).some(lvl => (Array.isArray(lvl) ? lvl[0] : lvl) > 1);
+            })();
+            const coldChain = (state.ante || 1) >= 3 && hlsCold;
             const savingVoucher = topVoucher && !bestVoucher &&
               topVoucher.score >= 75 &&
               cash < topVoucher.cost + (topVoucher.keepAfter || 12);
@@ -5270,7 +5296,12 @@ end
               window.executeBuyAction(bestVoucher.index, "shop_vouchers");
               executedAction = true;
               unlockCooldownMs = 600;
-            } else if (bestBooster && !this._shopAttemptedItems.has(`booster_${bestBooster.index}`) && !savingVoucher) {
+            } else if (bestBooster && !this._shopAttemptedItems.has(`booster_${bestBooster.index}`) &&
+                       (!savingVoucher ||
+                        // v158: cold-chain Celestial exemption — the level
+                        // pack outranks voucher saving (see savingVoucher def).
+                        (coldChain && (bestBooster.name || "").includes("Celest") &&
+                         bestBooster.canAfford))) {
               // Priority 4 (v135, was 3): buy affordable booster pack.
               // Skipped entirely while saving for a voucher — boosters were
               // exactly the spend that starved vouchers for the whole run.
