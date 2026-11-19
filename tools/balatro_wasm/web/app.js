@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v158";
+  const ASSET_VERSION = "v159";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=158";
-  const ASSET_WASM_URL = "love.wasm.bin?v=158";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=159";
+  const ASSET_WASM_URL = "love.wasm.bin?v=159";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -5150,10 +5150,29 @@ end
               return !Object.values(hls).some(lvl => (Array.isArray(lvl) ? lvl[0] : lvl) > 1);
             })();
             const coldChain = (state.ante || 1) >= 3 && hlsCold;
-            const savingVoucher = topVoucher && !bestVoucher &&
+            // v159: retarget the save-up. diag159 (4/4 deaths hand_levels={};
+            // planet_buys=0 AND celestial_buys=0; wallet dist {0:45,1:5,4:6}):
+            // v158's canAfford exemption never fired because the wallet was
+            // $0 — nothing is affordable at $0, so the "lock" was never the
+            // blocker, the missing accumulation was. Saving $22 for a voucher
+            // never converges (every shop leaks); saving $5-7 for a Celestial
+            // pack converges in two blind payouts. When the chain is cold,
+            // save for the PACK first; the voucher resumes afterwards.
+            let savingPack = null;
+            if (coldChain && cash < 8 && shopAdv && Array.isArray(shopAdv.evaluatedBoosters)) {
+              const celestial = shopAdv.evaluatedBoosters.find(b =>
+                (b.name || "").includes("Celest") && b.score >= 70);
+              if (celestial) {
+                savingPack = { name: celestial.name, cost: Number(celestial.cost) || 5 };
+              }
+            }
+            const savingVoucher = !savingPack && topVoucher && !bestVoucher &&
               topVoucher.score >= 75 &&
               cash < topVoucher.cost + (topVoucher.keepAfter || 12);
-            if (savingVoucher) {
+            if (savingPack) {
+              const need = Math.max(0, savingPack.cost + 1 - cash);
+              this.updateStatus(`攒钱开包: ${savingPack.name} (还需 $${need})`, false);
+            } else if (savingVoucher) {
               const need = Math.max(0, topVoucher.cost + (topVoucher.keepAfter || 12) - cash);
               this.updateStatus(`攒钱买券: ${topVoucher.name} (还需 $${need})`, false);
             }
@@ -5243,6 +5262,17 @@ end
               }
             }
 
+            // v159: negative-money stop. diag159 ante5 r14 death at money=-13
+            // (The Tooth drains $1 per played card): once the wallet is
+            // negative, every purchase deepens the hole and interest/payout
+            // recovery stalls. Halt discretionary buys until the next blind
+            // payout climbs back to 0; free-pack opens are unaffected.
+            if (shouldBuyCard && cash < 0 && !bestCard.isConsumable) {
+              console.log("[AutoPilot] Negative-money halt: skipping", bestCard.name,
+                "while wallet is $", cash);
+              shouldBuyCard = false;
+            }
+
             // Priority 0: Use non-combat consumables (Planets, Hermit, Temperance, Wheel, Judgement)
             // to gain cash, free consumable slots for buying, or level up hands!
             const nonCombatCons = findBestNonCombatConsumableToUse(state, this._consUseSkipped);
@@ -5301,7 +5331,13 @@ end
                         // v158: cold-chain Celestial exemption — the level
                         // pack outranks voucher saving (see savingVoucher def).
                         (coldChain && (bestBooster.name || "").includes("Celest") &&
-                         bestBooster.canAfford))) {
+                         bestBooster.canAfford) ||
+                        // v159: saving-for-pack completion — once the pack
+                        // fund has accrued (cash >= cost+1), buy it NOW
+                        // before any other spend leaks the fund.
+                        (savingPack && (bestBooster.name || "").includes("Celest") &&
+                         bestBooster.canAfford &&
+                         cash >= savingPack.cost + 1))) {
               // Priority 4 (v135, was 3): buy affordable booster pack.
               // Skipped entirely while saving for a voucher — boosters were
               // exactly the spend that starved vouchers for the whole run.
@@ -5313,7 +5349,12 @@ end
               window.executeBuyAction(bestBooster.index, "shop_booster");
               executedAction = true;
               unlockCooldownMs = 600;
-            } else if (shopAdv && shopAdv.shouldReroll && !this._shopRerolled && !savingVoucher) {
+            } else if (shopAdv && shopAdv.shouldReroll && !this._shopRerolled && !savingVoucher &&
+                       // v159: a reroll spends $5 of a cold-chain fund that
+                       // two blind payouts would convert into a level pack.
+                       // diag159 wallet dist {0:45,...} — rerolls were part
+                       // of the leak keeping the fund at zero.
+                       !savingPack) {
               // Priority 5: Reroll shop if cash is abundant or genuine emergency.
               // Never while saving for a voucher — a reroll spends the exact
               // money the voucher needs.
