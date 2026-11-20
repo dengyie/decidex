@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v159";
+  const ASSET_VERSION = "v160";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=159";
-  const ASSET_WASM_URL = "love.wasm.bin?v=159";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=160";
+  const ASSET_WASM_URL = "love.wasm.bin?v=160";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -5166,12 +5166,33 @@ end
                 savingPack = { name: celestial.name, cost: Number(celestial.cost) || 5 };
               }
             }
+            // v160: the pack target must SURVIVE shops without a Celestial on
+            // the shelf. diag160: savingPack only ever fired in shops that
+            // happened to stock a Celestial (0 hits in the whole run), so the
+            // accumulation phase had no discipline at all — 82+ jokers spent
+            // every payout back to $0 (49/55 gates at money=0). Define the
+            // persistent target instead: while the chain is cold and the
+            // wallet has not reached the pack price band, savingPackTarget
+            // holds the goal so rerolls are stopped and the status shows the
+            // save-up even in shops with no booster shelf.
+            let savingPackTarget = null;
+            if (coldChain && !savingPack) {
+              const packCostGuess = cash < 4 ? 6 : 4; // realistic Celestial band $4-8
+              if (cash < packCostGuess + 1) {
+                savingPackTarget = { cost: packCostGuess };
+              }
+            }
             const savingVoucher = !savingPack && topVoucher && !bestVoucher &&
               topVoucher.score >= 75 &&
               cash < topVoucher.cost + (topVoucher.keepAfter || 12);
             if (savingPack) {
               const need = Math.max(0, savingPack.cost + 1 - cash);
               this.updateStatus(`攒钱开包: ${savingPack.name} (还需 $${need})`, false);
+            } else if (savingPackTarget) {
+              // v160: persistent accumulation phase — show the target even
+              // when this shop has no Celestial on the shelf.
+              const need = Math.max(0, savingPackTarget.cost + 1 - cash);
+              this.updateStatus(`攒钱开包: Celestial 包 (还需 $${need})`, false);
             } else if (savingVoucher) {
               const need = Math.max(0, topVoucher.cost + (topVoucher.keepAfter || 12) - cash);
               this.updateStatus(`攒钱买券: ${topVoucher.name} (还需 $${need})`, false);
@@ -5249,15 +5270,50 @@ end
             // below the strong-buy bar) would drop the wallet under $4, skip
             // the buy this shop and keep the fund. Real output (>=82) and
             // early-game survival (ante<=2) still spend freely.
+            // v160: the >=82 exemption spent the fund anyway. diag160 (5/5
+            // deaths hand_levels={} + planet_buys=0 + celestial_buys=0;
+            // wallet dist {0:49, 3:1, 4:5}; every death's LAST BUYS was a
+            // score-120 Sly Joker): an 82+ joker is affordable in nearly
+            // every shop, so the fund never survived a payout to reach the
+            // $6-8 pack convergence. While the fund is ACCUMULATING (cold
+            // chain, no Celestial on the shelf to buy yet), the strong-buy
+            // line only goes through if the wallet can absorb it: either the
+            // purchase is nearly free (cost <= 2) or it leaves the pack
+            // target (cost+2) intact. Once savingPack fires (pack IS on the
+            // shelf) the fund is spent on the pack itself, not jokers.
             if (shouldBuyCard && bestCard && !bestCard.isConsumable &&
                 (state.ante || 1) >= 3 && bestCard.score < 82 &&
-                (money - (Number(bestCard.cost) || 0)) < 4) {
+                (cash - (Number(bestCard.cost) || 0)) < 4) {
               const hls = state.hand_levels || {};
               const anyAboveOne = Object.values(hls).some(lvl => (Array.isArray(lvl) ? lvl[0] : lvl) > 1);
               if (!anyAboveOne) {
                 console.log("[AutoPilot] Level-chain fund: skipping joker buy", bestCard.name,
-                  "cost", bestCard.cost, "would leave $", money - (Number(bestCard.cost) || 0),
+                  "cost", bestCard.cost, "would leave $", cash - (Number(bestCard.cost) || 0),
                   "with hand_levels empty");
+                shouldBuyCard = false;
+              }
+            }
+            // v160: guard the ACCUMULATING phase of the cold-chain fund. The
+            // 82+ strong-buy exemption above (and in the save-up gate) let a
+            // score-120 Sly Joker spend every payout back to $0 before the
+            // $5-7 pack target could converge — savingPack requires a
+            // Celestial on the shelf, but the shelf only shows boosters
+            // intermittently, so between appearances the wallet must HOLD
+            // the fund. While cold and a Celestial is NOT on the shelf to
+            // buy this instant: an 82+ joker may only pass if the wallet
+            // keeps the pack target reachable (cash - cost >= pack cost+2,
+            // or cost <= 2 pocket change). With the pack on the shelf the
+            // exemption is untouched — the fund converts to the pack.
+            if (shouldBuyCard && bestCard && !bestCard.isConsumable && coldChain &&
+                bestCard.score >= 82 && !savingPack &&
+                (Number(bestCard.cost) || 0) > 2) {
+              const hls2 = state.hand_levels || {};
+              const anyAboveOne2 = Object.values(hls2).some(lvl => (Array.isArray(lvl) ? lvl[0] : lvl) > 1);
+              const packCost = 6; // Celestial packs are $4-8; a fixed conservative target
+              if (!anyAboveOne2 && cash - (Number(bestCard.cost) || 0) < packCost + 2) {
+                console.log("[AutoPilot] Level-chain fund hold: skipping 82+ joker buy", bestCard.name,
+                  "cost", bestCard.cost, "would leave $", cash - (Number(bestCard.cost) || 0),
+                  "below the pack target with hand_levels empty");
                 shouldBuyCard = false;
               }
             }
@@ -5354,7 +5410,7 @@ end
                        // two blind payouts would convert into a level pack.
                        // diag159 wallet dist {0:45,...} — rerolls were part
                        // of the leak keeping the fund at zero.
-                       !savingPack) {
+                       (!savingPack && !savingPackTarget)) {
               // Priority 5: Reroll shop if cash is abundant or genuine emergency.
               // Never while saving for a voucher — a reroll spends the exact
               // money the voucher needs.
