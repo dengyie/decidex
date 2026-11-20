@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v160";
+  const ASSET_VERSION = "v161";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=160";
-  const ASSET_WASM_URL = "love.wasm.bin?v=160";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=161";
+  const ASSET_WASM_URL = "love.wasm.bin?v=161";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -897,7 +897,7 @@ end
       } else {
         console.log("[DecideX] Loading love.js dynamically...");
         const script = document.createElement("script");
-        script.src = "love.js?v=61";
+        script.src = "love.js?v=161";
         script.onload = () => {
           if (typeof Love === "function") {
             try {
@@ -5159,9 +5159,15 @@ end
             // pack converges in two blind payouts. When the chain is cold,
             // save for the PACK first; the voucher resumes afterwards.
             let savingPack = null;
-            if (coldChain && cash < 8 && shopAdv && Array.isArray(shopAdv.evaluatedBoosters)) {
-              const celestial = shopAdv.evaluatedBoosters.find(b =>
-                (b.name || "").includes("Celest") && b.score >= 70);
+            // v161: shelf-price priority — diag161 gate lines show Celestial
+            // packs silently losing to cheaper boosters inside bestBooster
+            // (`Uranus:12C!$` affordable but buy went elsewhere), so the
+            // "pack on the shelf" branch (which exempts the fund-hold) almost
+            // never armed. Find the affordable Celestial FIRST; only fall
+            // back to the generic bestBooster when none is on the shelf.
+            if (coldChain) {
+              const celestial = (shopAdv && Array.isArray(shopAdv.evaluatedBoosters) ? shopAdv.evaluatedBoosters : [])
+                .find(b => (b.name || "").includes("Celest") && b.canAfford && (Number(b.cost) || 0) > 0);
               if (celestial) {
                 savingPack = { name: celestial.name, cost: Number(celestial.cost) || 5 };
               }
@@ -5197,7 +5203,10 @@ end
               const need = Math.max(0, topVoucher.cost + (topVoucher.keepAfter || 12) - cash);
               this.updateStatus(`攒钱买券: ${topVoucher.name} (还需 $${need})`, false);
             }
-            const shouldBuyCard = bestCard && bestCard.canAfford && bestCard.hasSlot &&
+            // v161: let (was const) — the fund-skip / fund-hold / negative-money
+            // guards below reassign this flag; with const every skip branch
+            // threw "Assignment to constant variable" and wedged the step.
+            let shouldBuyCard = bestCard && bestCard.canAfford && bestCard.hasSlot &&
               // v151: with an empty/weak bench, a cheap consumable must not
               // intercept the wallet. Gate diag: The Star 65C/$3 bought at
               // ante2 with jokers=0 left $1 while the shelf's Scholar (50J)
@@ -5304,14 +5313,24 @@ end
             // keeps the pack target reachable (cash - cost >= pack cost+2,
             // or cost <= 2 pocket change). With the pack on the shelf the
             // exemption is untouched — the fund converts to the pack.
+            // v161: extend the hold to ALL joker buys, not just 82+. diag161
+            // (5 deaths, 1/5 with-leveled-hands — first Straight lv2 + first
+            // Saturn buy, but 44/60 gates still money=$0; LAST BUYS repeatedly
+            // "Jolly Joker score:85" then "$0"): the strong-buy line was moved
+            // but the mid band (45-81) kept leaking the same fund — v157's
+            // sub-82 skip only fires when cash-cost < 4, so a $3-4 Jolly at
+            // wallet $5-6 passed the check and re-zeroed the wallet. The pack
+            // price band IS the fund: while cold with no Celestial on the
+            // shelf, any joker costing more than pocket change must leave
+            // the pack target (cost+2) intact.
             if (shouldBuyCard && bestCard && !bestCard.isConsumable && coldChain &&
-                bestCard.score >= 82 && !savingPack &&
-                (Number(bestCard.cost) || 0) > 2) {
+                !savingPack && (Number(bestCard.cost) || 0) > 2) {
               const hls2 = state.hand_levels || {};
               const anyAboveOne2 = Object.values(hls2).some(lvl => (Array.isArray(lvl) ? lvl[0] : lvl) > 1);
               const packCost = 6; // Celestial packs are $4-8; a fixed conservative target
               if (!anyAboveOne2 && cash - (Number(bestCard.cost) || 0) < packCost + 2) {
-                console.log("[AutoPilot] Level-chain fund hold: skipping 82+ joker buy", bestCard.name,
+                console.log("[AutoPilot] Level-chain fund hold: skipping joker buy", bestCard.name,
+                  "score", bestCard.score,
                   "cost", bestCard.cost, "would leave $", cash - (Number(bestCard.cost) || 0),
                   "below the pack target with hand_levels empty");
                 shouldBuyCard = false;
@@ -5388,9 +5407,13 @@ end
                         // pack outranks voucher saving (see savingVoucher def).
                         (coldChain && (bestBooster.name || "").includes("Celest") &&
                          bestBooster.canAfford) ||
-                        // v159: saving-for-pack completion — once the pack
-                        // fund has accrued (cash >= cost+1), buy it NOW
-                        // before any other spend leaks the fund.
+                        // v161: the fund-hold suppresses mid jokers while the
+                        // pack fund accumulates, but savingPack only fires
+                        // when the Celestial itself is on the shelf. When the
+                        // shelf's top booster is that affordable Celestial,
+                        // buy it now — waiting lets the next joker evaluation
+                        // leak the fund first (diag161: gates showed
+                        // affordable Celestial packs skipped for score).
                         (savingPack && (bestBooster.name || "").includes("Celest") &&
                          bestBooster.canAfford &&
                          cash >= savingPack.cost + 1))) {
