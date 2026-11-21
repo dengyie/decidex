@@ -126,8 +126,11 @@ jobs:
                 # to GitHub; Huawei pulls through it over plain mesh SSH
                 # (no public TLS for the middlebox to kill). Key
                 # huawei-deploy-mesh is authorized on the VM.
-                for mr in 1 2 3; do
-                  if ssh -o BatchMode=yes -o ConnectTimeout=10 \
+                # mesh RTT is ~200ms with jitter spikes to ~400ms over tun0;
+                # ConnectTimeout=10 timed out on the first live run.
+                for mr in 1 2 3 4 5; do
+                  if ssh -o BatchMode=yes -o ConnectTimeout=45 \
+                      -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
                       mango@10.144.144.83 \
                       "curl -fsSL --retry 2 --max-time 180 -o /tmp/dx-relay.tar.gz https://github.com/dengyie/decidex/archive/refs/heads/main.tar.gz && cat /tmp/dx-relay.tar.gz" \
                       > /tmp/decidex-main.tar.gz 2>/tmp/mesh_err.log \
@@ -137,7 +140,7 @@ jobs:
                     break
                   fi
                   echo "mesh relay attempt $mr failed: $(tail -1 /tmp/mesh_err.log 2>/dev/null)"
-                  sleep 15
+                  sleep 20
                 done
               fi
               if [ "$tarball_ok" -ne 1 ]; then
