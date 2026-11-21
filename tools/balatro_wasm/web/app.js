@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v161";
+  const ASSET_VERSION = "v162";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=161";
-  const ASSET_WASM_URL = "love.wasm.bin?v=161";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=162";
+  const ASSET_WASM_URL = "love.wasm.bin?v=162";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -897,7 +897,7 @@ end
       } else {
         console.log("[DecideX] Loading love.js dynamically...");
         const script = document.createElement("script");
-        script.src = "love.js?v=161";
+        script.src = "love.js?v=162";
         script.onload = () => {
           if (typeof Love === "function") {
             try {
@@ -5323,17 +5323,38 @@ end
             // price band IS the fund: while cold with no Celestial on the
             // shelf, any joker costing more than pocket change must leave
             // the pack target (cost+2) intact.
+            // v162: survival exemption for the mid band. diag162 (5/5 deaths
+            // money=$0, 0/5 leveled, fund-hold 0 triggers — the wallet never
+            // even reached the pack band; death margins 3696/4000 (92%),
+            // 4860/5000 (97%), 19336/22000 (88%)): the fund discipline is
+            // upstream of the real killer. Runs die CLOSE — one extra +mult
+            // or +chips joker converts those near-misses into clears and
+            // every clear pays $3-5 + interest, which IS the fund. So a
+            // mid-band (>=45) joker with REAL output stats on a weak bench
+            // must not be starved by the pack target: keep a pocket dollar,
+            // let the buy through. Pure utility (no output stats) and
+            // non-weak benches still hold the fund.
             if (shouldBuyCard && bestCard && !bestCard.isConsumable && coldChain &&
                 !savingPack && (Number(bestCard.cost) || 0) > 2) {
               const hls2 = state.hand_levels || {};
               const anyAboveOne2 = Object.values(hls2).some(lvl => (Array.isArray(lvl) ? lvl[0] : lvl) > 1);
               const packCost = 6; // Celestial packs are $4-8; a fixed conservative target
               if (!anyAboveOne2 && cash - (Number(bestCard.cost) || 0) < packCost + 2) {
-                console.log("[AutoPilot] Level-chain fund hold: skipping joker buy", bestCard.name,
-                  "score", bestCard.score,
-                  "cost", bestCard.cost, "would leave $", cash - (Number(bestCard.cost) || 0),
-                  "below the pack target with hand_levels empty");
-                shouldBuyCard = false;
+                const xtr2 = (bestCard.extra && typeof bestCard.extra === "object") ? bestCard.extra : null;
+                const outChips = Math.max(Number(bestCard.chips) || 0, (xtr2 && (Number(xtr2.chips) || Number(xtr2.chip_mod)) || 0));
+                const outMult = Math.max(Number(bestCard.mult) || 0, (xtr2 && Number(xtr2.mult) || 0));
+                const outXmult = Math.max(Number(bestCard.xmult) || 1, (xtr2 && Number(xtr2.x_mult || xtr2.xmult || xtr2.Xmult)) || 1);
+                const realOutput2 = outChips >= 30 || outMult >= 5 || outXmult > 1.0;
+                if (!(bestCard.score >= 45 && realOutput2 && weakBench && cash - (Number(bestCard.cost) || 0) >= 1)) {
+                  console.log("[AutoPilot] Level-chain fund hold: skipping joker buy", bestCard.name,
+                    "score", bestCard.score,
+                    "cost", bestCard.cost, "would leave $", cash - (Number(bestCard.cost) || 0),
+                    "below the pack target with hand_levels empty");
+                  shouldBuyCard = false;
+                } else {
+                  console.log("[AutoPilot] Survival override: mid-band output joker", bestCard.name,
+                    "cost", bestCard.cost, "on weak bench clears the fund-hold (dies-close beats dies-poor)");
+                }
               }
             }
 
