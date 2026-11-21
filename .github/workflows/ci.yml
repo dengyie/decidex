@@ -41,70 +41,67 @@ jobs:
 
 
   deploy:
-    # Post-deploy verification against the live production box. Production
-    # itself is deployed by the pull-side reconciler on the Huawei host
-    # (decidex-deploy-sync.timer: polls the GitHub API every 15 min, pulls
-    # a main tarball over dual public endpoints / dev-VM mesh relay, runs
-    # serve.py --check/--release-check, restarts the service). This job
-    # used to fetch+reset a checkout here over Huawei->GitHub HTTPS, but
-    # that path kills large TLS streams for hours at a time (gnutls -110
-    # / SSL unexpected eof), which kept the job red while production was
-    # already correct. Verification now runs against the reconciler's
-    # checkout instead of re-provisioning one.
+    # External production verification: the runner probes the public site
+    # (https://balatro.mangoqwq.com) and asserts it serves exactly the
+    # assets this commit ships. Zero secrets — the old SSH-based verify
+    # pointed at PROD_HOST/PROD_SSH_KEY secrets that resolve to a machine
+    # that is NOT the Huawei production box (Huawei sshd journals show no
+    # CI logins, ever), so every SSH verify failed or verified the wrong
+    # host. Deployment itself is owned by the pull-side reconciler on the
+    # Huawei host (decidex-deploy-sync.timer: polls the GitHub API every
+    # 15 min, pulls a main tarball over dual public endpoints / dev-VM
+    # mesh relay, runs serve.py --check/--release-check, restarts).
     name: Production Verify
     needs: test
     if: github.repository == 'dengyie/decidex' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
 
     steps:
-      - name: Run Verification Suite on Production Host
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.PROD_HOST }}
-          username: ${{ secrets.PROD_USER }}
-          key: ${{ secrets.PROD_SSH_KEY }}
-          port: ${{ secrets.PROD_PORT || 22 }}
-          # The remote verification suite runs the full pytest matrix on a
-          # small box; the action's 10m default kills it mid-run.
-          command_timeout: 30m
-          script: |
-            set -e
-            echo "🔍 Verifying production deployment state..."
-            PROD_DIR=/opt/decidex-hs
-            cd "$PROD_DIR"
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-            # 1. Service health
-            systemctl is-active --quiet decidex-balatro-web || { echo "❌ service inactive"; exit 1; }
-            curl -fsS -o /dev/null http://127.0.0.1:8091/play || { echo "❌ /play not serving"; exit 1; }
-            echo "✅ service active, /play 200"
+      - name: Verify Production Serves This Commit's Assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="https://balatro.mangoqwq.com"
 
-            # 2. Deployed commit matches origin/main (reconciler lag up to
-            #    15 min is fine; a mismatch older than that is not).
-            MARKER_SHA=$(cat "$PROD_DIR/.deploy-sync/deployed.sha" 2>/dev/null || echo none)
-            ORIGIN_SHA=$(curl -fsSL --max-time 30 \
-              "https://api.github.com/repos/dengyie/decidex/commits/main" \
-              | grep -o '"sha": *"[0-9a-f]\{40\}"' | head -1 | grep -o '[0-9a-f]\{40\}')
-            echo "marker=$MARKER_SHA origin=$ORIGIN_SHA"
-            if [ "$MARKER_SHA" != "$ORIGIN_SHA" ]; then
-              # Trigger the reconciler once and give it a window to catch up.
-              systemctl start decidex-deploy-sync.service || true
-              for i in 1 2 3 4 5 6; do
-                sleep 30
-                MARKER_SHA=$(cat "$PROD_DIR/.deploy-sync/deployed.sha" 2>/dev/null || echo none)
-                [ "$MARKER_SHA" = "$ORIGIN_SHA" ] && break
-              done
-            fi
-            if [ "$MARKER_SHA" != "$ORIGIN_SHA" ]; then
-              echo "❌ production marker still behind origin/main after reconciler nudge"
-              exit 1
-            fi
-            echo "✅ production aligned with origin/main ($MARKER_SHA)"
+          # The version triple is the release contract: whatever this
+          # commit's app.js/index.html advertise is what production must
+          # serve. Parse it from the checked-out sources so a wrong or
+          # stale deployment fails here with a concrete diff.
+          LOCAL_VER=$(grep -oE 'ASSET_VERSION = "v[0-9]+"' \
+            tools/balatro_wasm/web/app.js | grep -oE 'v[0-9]+')
+          LOCAL_LOVE_SIZE=$(grep -oE 'EXPECTED_LOVE_SIZE = [0-9]+' \
+            tools/balatro_wasm/web/app.js | grep -oE '[0-9]+')
+          LOCAL_WASM_SIZE=$(grep -oE 'EXPECTED_WASM_SIZE = [0-9]+' \
+            tools/balatro_wasm/web/app.js | grep -oE '[0-9]+')
+          echo "local contract: $LOCAL_VER love=$LOCAL_LOVE_SIZE wasm=$LOCAL_WASM_SIZE"
 
-            # 3. Asset manifest checks on the deployed tree.
-            .venv/bin/python tools/balatro_wasm/serve.py --check
-            .venv/bin/python tools/balatro_wasm/serve.py --release-check
+          # 1. Service health (public).
+          curl -fsS --max-time 30 "$BASE/api/health" | grep -q '"ok": *true' \
+            || { echo "❌ /api/health not ok"; exit 1; }
+          echo "✅ /api/health ok"
 
-            # 4. Full test matrix against the deployed checkout.
-            echo "🧪 Running remote verification test suite..."
-            .venv/bin/pytest tests
-            echo "✅ DecideX production verification completed successfully!"
+          # 2. /play advertises the same version.
+          SERVED=$(curl -fsS --max-time 30 "$BASE/play" | grep -oE 'app.js\?v=[0-9]+' | head -1)
+          EXPECTED="app.js?v=${LOCAL_VER#v}"
+          echo "served: $SERVED (expected: $EXPECTED)"
+          [ "$SERVED" = "$EXPECTED" ] \
+            || { echo "❌ /play serves $SERVED, expected $EXPECTED"; exit 1; }
+          echo "✅ /play advertises $LOCAL_VER"
+
+          # 3. Asset sizes match this commit's expectations (HEAD, no
+          #    download — reconciler lag beyond 15 min shows up here).
+          LOVE_LEN=$(curl -fsSI --max-time 30 "$BASE/balatro.love.zip?$LOCAL_VER" \
+            | tr -d '\r' | grep -i '^content-length:' | grep -oE '[0-9]+')
+          WASM_LEN=$(curl -fsSI --max-time 30 "$BASE/love.wasm.bin?$LOCAL_VER" \
+            | tr -d '\r' | grep -i '^content-length:' | grep -oE '[0-9]+')
+          echo "served: love=$LOVE_LEN wasm=$WASM_LEN"
+          [ "$LOVE_LEN" = "$LOCAL_LOVE_SIZE" ] \
+            || { echo "❌ love.zip is $LOVE_LEN, expected $LOCAL_LOVE_SIZE"; exit 1; }
+          [ "$WASM_LEN" = "$LOCAL_WASM_SIZE" ] \
+            || { echo "❌ love.wasm.bin is $WASM_LEN, expected $LOCAL_WASM_SIZE"; exit 1; }
+          echo "✅ asset sizes match (reconciler has caught up)"
+
+          echo "✅ DecideX production verification completed successfully!"
