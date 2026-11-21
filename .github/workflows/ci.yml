@@ -97,9 +97,33 @@ jobs:
 
             if [ "$fetch_ok" -ne 1 ]; then
               echo "git fetch failed after 5 attempts; falling back to tarball re-provision"
-              curl -fsSL --retry 3 --max-time 300 \
-                -o /tmp/decidex-main.tar.gz \
-                "https://codeload.github.com/dengyie/decidex/tar.gz/refs/heads/main" || exit 1
+              tarball_ok=0
+              for tb in 1 2 3 4 5 6; do
+                # Alternate endpoints: codeload (dedicated tarball host) and
+                # github.com/archive (same CDN family as the short probes
+                # that consistently return 200).
+                if [ $((tb % 2)) -eq 1 ]; then
+                  TB_URL="https://codeload.github.com/dengyie/decidex/tar.gz/refs/heads/main"
+                else
+                  TB_URL="https://github.com/dengyie/decidex/archive/refs/heads/main.tar.gz"
+                fi
+                echo "tarball attempt $tb: $TB_URL"
+                if curl -fsSL --retry 2 --max-time 300 -o /tmp/decidex-main.tar.gz "$TB_URL"; then
+                  # Guard against a truncated download passing -f: the
+                  # repo tarball must be at least a few MB.
+                  TB_SIZE=$(stat -c%s /tmp/decidex-main.tar.gz 2>/dev/null || echo 0)
+                  if [ "$TB_SIZE" -gt 1000000 ]; then
+                    tarball_ok=1
+                    break
+                  fi
+                  echo "tarball too small ($TB_SIZE bytes); retrying"
+                fi
+                sleep 20
+              done
+              if [ "$tarball_ok" -ne 1 ]; then
+                echo "tarball fallback failed after 6 attempts; aborting deploy"
+                exit 1
+              fi
               # Extract version tree
               rm -rf /tmp/decidex-main-src
               mkdir -p /tmp/decidex-main-src
