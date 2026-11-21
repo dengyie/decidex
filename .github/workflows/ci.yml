@@ -121,7 +121,27 @@ jobs:
                 sleep 20
               done
               if [ "$tarball_ok" -ne 1 ]; then
-                echo "tarball fallback failed after 6 attempts; aborting deploy"
+                echo "public tarball endpoints failed; trying mesh relay via dev VM"
+                # The dev VM (10.144.144.83, EasyTier mesh) has a clean path
+                # to GitHub; Huawei pulls through it over plain mesh SSH
+                # (no public TLS for the middlebox to kill). Key
+                # huawei-deploy-mesh is authorized on the VM.
+                for mr in 1 2 3; do
+                  if ssh -o BatchMode=yes -o ConnectTimeout=10 \
+                      mango@10.144.144.83 \
+                      "curl -fsSL --retry 2 --max-time 180 -o /tmp/dx-relay.tar.gz https://github.com/dengyie/decidex/archive/refs/heads/main.tar.gz && cat /tmp/dx-relay.tar.gz" \
+                      > /tmp/decidex-main.tar.gz 2>/tmp/mesh_err.log \
+                  && [ "$(stat -c%s /tmp/decidex-main.tar.gz 2>/dev/null || echo 0)" -gt 1000000 ]; then
+                    tarball_ok=1
+                    echo "mesh relay succeeded (attempt $mr)"
+                    break
+                  fi
+                  echo "mesh relay attempt $mr failed: $(tail -1 /tmp/mesh_err.log 2>/dev/null)"
+                  sleep 15
+                done
+              fi
+              if [ "$tarball_ok" -ne 1 ]; then
+                echo "tarball fallback failed after all endpoints; aborting deploy"
                 exit 1
               fi
               # Extract version tree
