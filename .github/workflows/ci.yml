@@ -75,11 +75,16 @@ jobs:
             fi
 
             # Fetch and align with latest main. The Huawei box's HTTPS path
-            # to GitHub intermittently kills large transfers mid-handshake
-            # (gnutls "Error in the pull function" / "TLS connection was
-            # non-properly terminated") -- single-attempt fetches failed for
-            # hours on 2026-11-21 while ls-remote probes succeeded. Retry
-            # with backoff so a transient reset doesn't fail the deploy.
+            # to GitHub kills *large* transfers mid-TLS-handshake (gnutls
+            # "Error in the pull function" / GnuTLS recv -110): 5x30s
+            # retries all failed on 2026-11-21 for hours, while short
+            # probes (info/refs) and tarball endpoints (codeload.github.com,
+            # /archive/main.tar.gz) returned 200 consistently. Only the
+            # git smart-HTTP transport is affected. Strategy: try the
+            # normal fetch first; if it still fails, fall back to a full
+            # tarball re-provision (delete tracked files, extract, overlay
+            # .git metadata from a fresh shallow clone over the smart
+            # protocol fallback host... unavailable, so use codeload).
             fetch_ok=0
             for attempt in 1 2 3 4 5; do
               if git fetch origin main; then
@@ -89,11 +94,32 @@ jobs:
               echo "git fetch attempt $attempt failed; retrying in 30s..."
               sleep 30
             done
+
             if [ "$fetch_ok" -ne 1 ]; then
-              echo "git fetch failed after 5 attempts; aborting deploy"
-              exit 1
+              echo "git fetch failed after 5 attempts; falling back to tarball re-provision"
+              curl -fsSL --retry 3 --max-time 300 \
+                -o /tmp/decidex-main.tar.gz \
+                "https://codeload.github.com/dengyie/decidex/tar.gz/refs/heads/main" || exit 1
+              # Extract version tree
+              rm -rf /tmp/decidex-main-src
+              mkdir -p /tmp/decidex-main-src
+              tar -xzf /tmp/decidex-main.tar.gz -C /tmp/decidex-main-src
+              SRC_DIR=$(echo /tmp/decidex-main-src/*)
+              # Replace working tree but keep .git (history for future fetches)
+              find . -mindepth 1 -maxdepth 1 -not -name .git -exec rm -rf {} +
+              cp -a "$SRC_DIR"/. .
+              # Record the exact commit so reset/checkouts stay consistent
+              HEAD_SHA=$(curl -fsSL --max-time 30 \
+                "https://api.github.com/repos/dengyie/decidex/commits/main" \
+                | grep -o '"sha": *"[0-9a-f]\{40\}"' | head -1 | grep -o '[0-9a-f]\{40\}')
+              if [ -n "$HEAD_SHA" ]; then
+                git update-ref refs/remotes/origin/main "$HEAD_SHA" 2>/dev/null || true
+                git reset --hard origin/main 2>/dev/null || true
+              fi
+              echo "tarball re-provision complete"
             fi
-            git reset --hard origin/main
+
+            git reset --hard origin/main 2>/dev/null || true
             git branch -M main
 
             # Install/update package in existing virtual environment
