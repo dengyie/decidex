@@ -1633,6 +1633,48 @@ local function force_advance_to_shop()
         if ease_dollars then ease_dollars(G.GAME.current_round.dollars) end
       end
     end
+    -- v163: direct payout when evaluate_round never ran. diag163c (13
+    -- ROUND_EVAL samples: G.round_eval nil in ALL of them, cash_out button
+    -- absent, current_round.dollars = 0): the vanilla settlement UIBox is
+    -- never created on this WASM build, so evaluate_round() never computes
+    -- the reward and current_round.dollars stays 0 — the force-advance's
+    -- ease_dollars(0) paid NOTHING for every won blind (diag163b: 8 blinds
+    -- won, wallet $0 -> $0; diag163: wallet dist {0:55, 4:5}, 0/5 runs with
+    -- any leveled hand, zero Celestial buys — the whole level-chain economy
+    -- downstream was starved by this single missing payout). Recompute the
+    -- vanilla evaluate_round formula inline: blind payout + leftover hands
+    -- + interest, then ease_dollars it. Idempotent per ROUND_EVAL entry via
+    -- the _payout_paid marker (reset on state_changed by the caller loop).
+    if G.GAME and G.GAME.chips and G.GAME.blind and (G.GAME.chips - G.GAME.blind.chips >= 0) then
+      local paid = G.GAME._decidex_payout_ante_round
+      local resets3 = G.GAME.round_resets or {}
+      local key3 = tostring(resets3.ante or 1) .. ":" .. tostring(G.GAME.round or 0)
+      if paid ~= key3 then
+        G.GAME._decidex_payout_ante_round = key3
+        local reward = 0
+        if G.GAME.blind.dollars and G.GAME.blind.dollars > 0 then
+          reward = reward + G.GAME.blind.dollars
+        end
+        local mpl = (G.GAME.modifiers and G.GAME.modifiers.money_per_hand) or 1
+        local hl = tonumber(G.GAME.current_round and G.GAME.current_round.hands_left) or 0
+        if hl > 0 and not (G.GAME.modifiers and G.GAME.modifiers.no_extra_hand_money) then
+          reward = reward + hl * mpl
+        end
+        if (G.GAME.dollars or 0) >= 5 and not (G.GAME.modifiers and G.GAME.modifiers.no_interest) then
+          local ia = tonumber(G.GAME.interest_amount) or 1
+          local ic = tonumber(G.GAME.interest_cap) or 25
+          reward = reward + ia * math.min(math.floor((G.GAME.dollars or 0) / 5), math.floor(ic / 5))
+        end
+        if reward > 0 then
+          print("[DecideX Bridge] v163 direct payout: reward=" .. tostring(reward) ..
+            " (blind=" .. tostring(G.GAME.blind.dollars) .. " hands_left=" .. tostring(hl) ..
+            " wallet_before=" .. tostring(G.GAME.dollars) .. ")")
+          if ease_dollars then ease_dollars(reward) end
+        end
+        G.GAME.previous_round = G.GAME.previous_round or {}
+        G.GAME.previous_round.dollars = G.GAME.dollars
+      end
+    end
     -- Vanilla G.FUNCS.cash_out ends with this blind-ante tail
     -- (button_callbacks.lua:2964-2969). Short-circuiting straight to SHOP
     -- used to leave a Boss win's blind_states at Small=Big=Boss='Defeated';

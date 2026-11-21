@@ -510,12 +510,12 @@ end
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
   const EXPECTED_LOVE_SIZE = 56375416;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v162";
+  const ASSET_VERSION = "v163";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=162";
-  const ASSET_WASM_URL = "love.wasm.bin?v=162";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=163";
+  const ASSET_WASM_URL = "love.wasm.bin?v=163";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -897,7 +897,7 @@ end
       } else {
         console.log("[DecideX] Loading love.js dynamically...");
         const script = document.createElement("script");
-        script.src = "love.js?v=162";
+        script.src = "love.js?v=163";
         script.onload = () => {
           if (typeof Love === "function") {
             try {
