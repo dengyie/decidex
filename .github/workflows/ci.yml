@@ -74,8 +74,25 @@ jobs:
               git remote set-url origin https://github.com/dengyie/decidex.git
             fi
 
-            # Fetch and align with latest main
-            git fetch origin main
+            # Fetch and align with latest main. The Huawei box's HTTPS path
+            # to GitHub intermittently kills large transfers mid-handshake
+            # (gnutls "Error in the pull function" / "TLS connection was
+            # non-properly terminated") -- single-attempt fetches failed for
+            # hours on 2026-11-21 while ls-remote probes succeeded. Retry
+            # with backoff so a transient reset doesn't fail the deploy.
+            fetch_ok=0
+            for attempt in 1 2 3 4 5; do
+              if git fetch origin main; then
+                fetch_ok=1
+                break
+              fi
+              echo "git fetch attempt $attempt failed; retrying in 30s..."
+              sleep 30
+            done
+            if [ "$fetch_ok" -ne 1 ]; then
+              echo "git fetch failed after 5 attempts; aborting deploy"
+              exit 1
+            fi
             git reset --hard origin/main
             git branch -M main
 
