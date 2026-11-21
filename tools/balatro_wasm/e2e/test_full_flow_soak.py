@@ -90,7 +90,10 @@ DWELL_BUDGETS = {
     # joker/tarot chains legitimately take 46s+ (soak20 801s self-recovered
     # at exactly 46s), so 45s flagged a healthy recovery as a stall.
     "PLAY_TAROT": 60,
-    "SHOP": 60,
+    # Deep-ante shops with pack purchases + voucher browsing legitimately
+    # exceed 60s (v163+ economy makes AutoPilot buy packs every shop);
+    # 75s matches the pack-family budgets.
+    "SHOP": 75,
     "TAROT_PACK": 75,
     "PLANET_PACK": 75,
     "SPECTRAL_PACK": 75,

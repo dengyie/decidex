@@ -41,13 +41,23 @@ jobs:
 
 
   deploy:
-    name: Deploy to Production
+    # Post-deploy verification against the live production box. Production
+    # itself is deployed by the pull-side reconciler on the Huawei host
+    # (decidex-deploy-sync.timer: polls the GitHub API every 15 min, pulls
+    # a main tarball over dual public endpoints / dev-VM mesh relay, runs
+    # serve.py --check/--release-check, restarts the service). This job
+    # used to fetch+reset a checkout here over Huawei->GitHub HTTPS, but
+    # that path kills large TLS streams for hours at a time (gnutls -110
+    # / SSL unexpected eof), which kept the job red while production was
+    # already correct. Verification now runs against the reconciler's
+    # checkout instead of re-provisioning one.
+    name: Production Verify
     needs: test
     if: github.repository == 'dengyie/decidex' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
 
     steps:
-      - name: Trigger Remote Deployment via SSH
+      - name: Run Verification Suite on Production Host
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.PROD_HOST }}
@@ -59,127 +69,42 @@ jobs:
           command_timeout: 30m
           script: |
             set -e
-            echo "🚀 Starting automated deployment for DecideX..."
-            TARGET_DIR="${{ secrets.DEPLOY_PATH || '/data/decidex' }}"
-            mkdir -p "$TARGET_DIR"
-            cd "$TARGET_DIR"
+            echo "🔍 Verifying production deployment state..."
+            PROD_DIR=/opt/decidex-hs
+            cd "$PROD_DIR"
 
-            if [ ! -d .git ]; then
-              git init
-            fi
+            # 1. Service health
+            systemctl is-active --quiet decidex-balatro-web || { echo "❌ service inactive"; exit 1; }
+            curl -fsS -o /dev/null http://127.0.0.1:8091/play || { echo "❌ /play not serving"; exit 1; }
+            echo "✅ service active, /play 200"
 
-            if ! git remote | grep -q "^origin$"; then
-              git remote add origin https://github.com/dengyie/decidex.git
-            else
-              git remote set-url origin https://github.com/dengyie/decidex.git
-            fi
-
-            # Fetch and align with latest main. The Huawei box's HTTPS path
-            # to GitHub kills *large* transfers mid-TLS-handshake (gnutls
-            # "Error in the pull function" / GnuTLS recv -110): 5x30s
-            # retries all failed on 2026-11-21 for hours, while short
-            # probes (info/refs) and tarball endpoints (codeload.github.com,
-            # /archive/main.tar.gz) returned 200 consistently. Only the
-            # git smart-HTTP transport is affected. Strategy: try the
-            # normal fetch first; if it still fails, fall back to a full
-            # tarball re-provision (delete tracked files, extract, overlay
-            # .git metadata from a fresh shallow clone over the smart
-            # protocol fallback host... unavailable, so use codeload).
-            fetch_ok=0
-            for attempt in 1 2 3 4 5; do
-              if git fetch origin main; then
-                fetch_ok=1
-                break
-              fi
-              echo "git fetch attempt $attempt failed; retrying in 30s..."
-              sleep 30
-            done
-
-            if [ "$fetch_ok" -ne 1 ]; then
-              echo "git fetch failed after 5 attempts; falling back to tarball re-provision"
-              tarball_ok=0
-              for tb in 1 2 3 4 5 6; do
-                # Alternate endpoints: codeload (dedicated tarball host) and
-                # github.com/archive (same CDN family as the short probes
-                # that consistently return 200).
-                if [ $((tb % 2)) -eq 1 ]; then
-                  TB_URL="https://codeload.github.com/dengyie/decidex/tar.gz/refs/heads/main"
-                else
-                  TB_URL="https://github.com/dengyie/decidex/archive/refs/heads/main.tar.gz"
-                fi
-                echo "tarball attempt $tb: $TB_URL"
-                if curl -fsSL --retry 2 --max-time 300 -o /tmp/decidex-main.tar.gz "$TB_URL"; then
-                  # Guard against a truncated download passing -f: the
-                  # repo tarball must be at least a few MB.
-                  TB_SIZE=$(stat -c%s /tmp/decidex-main.tar.gz 2>/dev/null || echo 0)
-                  if [ "$TB_SIZE" -gt 1000000 ]; then
-                    tarball_ok=1
-                    break
-                  fi
-                  echo "tarball too small ($TB_SIZE bytes); retrying"
-                fi
-                sleep 20
+            # 2. Deployed commit matches origin/main (reconciler lag up to
+            #    15 min is fine; a mismatch older than that is not).
+            MARKER_SHA=$(cat "$PROD_DIR/.deploy-sync/deployed.sha" 2>/dev/null || echo none)
+            ORIGIN_SHA=$(curl -fsSL --max-time 30 \
+              "https://api.github.com/repos/dengyie/decidex/commits/main" \
+              | grep -o '"sha": *"[0-9a-f]\{40\}"' | head -1 | grep -o '[0-9a-f]\{40\}')
+            echo "marker=$MARKER_SHA origin=$ORIGIN_SHA"
+            if [ "$MARKER_SHA" != "$ORIGIN_SHA" ]; then
+              # Trigger the reconciler once and give it a window to catch up.
+              systemctl start decidex-deploy-sync.service || true
+              for i in 1 2 3 4 5 6; do
+                sleep 30
+                MARKER_SHA=$(cat "$PROD_DIR/.deploy-sync/deployed.sha" 2>/dev/null || echo none)
+                [ "$MARKER_SHA" = "$ORIGIN_SHA" ] && break
               done
-              if [ "$tarball_ok" -ne 1 ]; then
-                echo "public tarball endpoints failed; trying mesh relay via dev VM"
-                # The dev VM (10.144.144.83, EasyTier mesh) has a clean path
-                # to GitHub; Huawei pulls through it over plain mesh SSH
-                # (no public TLS for the middlebox to kill). Key
-                # huawei-deploy-mesh is authorized on the VM.
-                # mesh RTT is ~200ms with jitter spikes to ~400ms over tun0;
-                # ConnectTimeout=10 timed out on the first live run.
-                for mr in 1 2 3 4 5; do
-                  if ssh -o BatchMode=yes -o ConnectTimeout=45 \
-                      -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
-                      mango@10.144.144.83 \
-                      "curl -fsSL --retry 2 --max-time 180 -o /tmp/dx-relay.tar.gz https://github.com/dengyie/decidex/archive/refs/heads/main.tar.gz && cat /tmp/dx-relay.tar.gz" \
-                      > /tmp/decidex-main.tar.gz 2>/tmp/mesh_err.log \
-                  && [ "$(stat -c%s /tmp/decidex-main.tar.gz 2>/dev/null || echo 0)" -gt 1000000 ]; then
-                    tarball_ok=1
-                    echo "mesh relay succeeded (attempt $mr)"
-                    break
-                  fi
-                  echo "mesh relay attempt $mr failed: $(tail -1 /tmp/mesh_err.log 2>/dev/null)"
-                  sleep 20
-                done
-              fi
-              if [ "$tarball_ok" -ne 1 ]; then
-                echo "tarball fallback failed after all endpoints; aborting deploy"
-                exit 1
-              fi
-              # Extract version tree
-              rm -rf /tmp/decidex-main-src
-              mkdir -p /tmp/decidex-main-src
-              tar -xzf /tmp/decidex-main.tar.gz -C /tmp/decidex-main-src
-              SRC_DIR=$(echo /tmp/decidex-main-src/*)
-              # Replace working tree but keep .git (history for future fetches)
-              find . -mindepth 1 -maxdepth 1 -not -name .git -exec rm -rf {} +
-              cp -a "$SRC_DIR"/. .
-              # Record the exact commit so reset/checkouts stay consistent
-              HEAD_SHA=$(curl -fsSL --max-time 30 \
-                "https://api.github.com/repos/dengyie/decidex/commits/main" \
-                | grep -o '"sha": *"[0-9a-f]\{40\}"' | head -1 | grep -o '[0-9a-f]\{40\}')
-              if [ -n "$HEAD_SHA" ]; then
-                git update-ref refs/remotes/origin/main "$HEAD_SHA" 2>/dev/null || true
-                git reset --hard origin/main 2>/dev/null || true
-              fi
-              echo "tarball re-provision complete"
             fi
-
-            git reset --hard origin/main 2>/dev/null || true
-            git branch -M main
-
-            # Install/update package in existing virtual environment
-            if [ ! -x .venv/bin/pip ]; then
-              python3 -m venv .venv
+            if [ "$MARKER_SHA" != "$ORIGIN_SHA" ]; then
+              echo "❌ production marker still behind origin/main after reconciler nudge"
+              exit 1
             fi
-            .venv/bin/pip install -e ".[dev]"
+            echo "✅ production aligned with origin/main ($MARKER_SHA)"
 
-            # Require externally provisioned proprietary assets and verify their manifest.
-            python3 tools/balatro_wasm/serve.py --check
-            python3 tools/balatro_wasm/serve.py --release-check
+            # 3. Asset manifest checks on the deployed tree.
+            .venv/bin/python tools/balatro_wasm/serve.py --check
+            .venv/bin/python tools/balatro_wasm/serve.py --release-check
 
-            # Run production verification tests; absence is a hard deployment failure.
+            # 4. Full test matrix against the deployed checkout.
             echo "🧪 Running remote verification test suite..."
             .venv/bin/pytest tests
-            echo "✅ DecideX production deployment completed successfully!"
+            echo "✅ DecideX production verification completed successfully!"
