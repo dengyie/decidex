@@ -508,14 +508,14 @@ end
 
   // Core persistent cache identifiers (versioned to ensure patch alignment)
   // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
-  const EXPECTED_LOVE_SIZE = 56376175;
+  const EXPECTED_LOVE_SIZE = 56377703;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v164";
+  const ASSET_VERSION = "v165";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=164";
-  const ASSET_WASM_URL = "love.wasm.bin?v=164";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=165";
+  const ASSET_WASM_URL = "love.wasm.bin?v=165";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -897,7 +897,7 @@ end
       } else {
         console.log("[DecideX] Loading love.js dynamically...");
         const script = document.createElement("script");
-        script.src = "love.js?v=164";
+        script.src = "love.js?v=165";
         script.onload = () => {
           if (typeof Love === "function") {
             try {
@@ -1882,9 +1882,29 @@ end
               evalRes.totalScore = Math.floor(evalRes.totalScore * 0.001);
               evalRes.violation = "附带废牌包含高价值人头牌/小丑协同资产/顺子连张/对子/同花组件";
             } else if (!constraints.requires5Cards && !(constraints.hasSquareJoker && chosen.length === 4)) {
-              // Even with clean low junk, prefer pure hand unless zero discards and cannot clear
+              // v165: junk-riding rebalance. A filtering play IS a free
+              // discard — the old unconditional 0.15^junk penalty shut that
+              // channel off entirely, so junk sat in hand (acceptance
+              // feedback: "没有在出牌时候顺便把废牌也弃掉"). Now the
+              // penalty only applies when riding junk would FAIL the blind:
+              // a play that still clears need after the junk tax is nearly
+              // as good as the pure play, and the junk leaves the hand for
+              // free (better redraws next hand). Only when discards are
+              // plentiful AND the taxed play can no longer clear need does
+              // the old heavy penalty stand.
+              const blindNeed = Math.max(0, Number(state.blind?.chips || 300) - Number(state.blind?.scored || 0));
               if (Number(state.discards_left || 0) > 0) {
-                evalRes.totalScore = Math.floor(evalRes.totalScore * Math.pow(0.15, junkCount));
+                const taxed = Math.floor(evalRes.totalScore * Math.pow(0.15, junkCount));
+                if (evalRes.totalScore >= blindNeed) {
+                  // Clears the blind even with a mild tax — prefer the pure
+                  // play only marginally so the junk still rides when the
+                  // pure hand is not strictly better.
+                  evalRes.totalScore = Math.max(taxed, Math.floor(evalRes.totalScore * 0.9));
+                } else {
+                  // Cannot clear need either way — keep the free-discard
+                  // channel but nudge pure plays ahead on equal footing.
+                  evalRes.totalScore = Math.floor(evalRes.totalScore * Math.pow(0.85, junkCount));
+                }
               } else if (evalRes.totalScore >= Number(state.blind?.chips || 300)) {
                 evalRes.totalScore = Math.floor(evalRes.totalScore * 0.95);
               }
@@ -2058,11 +2078,19 @@ end
     const need = Math.max(0, blindGoal - scored);
     const constraints = detectConstraints(state.jokers, state.blind);
 
+    // v165: scoring-aware protection. Cards the chosen best play NEEDS are
+    // never discard candidates — the old ladder only protected pairs/trips
+    // generically, so it could discard exactly the card the intended play
+    // was built around. Object identity, not rank equality, so one of two
+    // same-rank cards stays discardable.
+    const playCardSet = new Set((bestPlay && bestPlay.cards) || []);
+
     // 0. Top Priority: Discard Boss-debuffed cards (The Window/The Club/The Goad/The Head/etc.)
     const debuffedCards = hand.filter(c =>
-      c.debuff ||
+      !playCardSet.has(c) &&
+      (c.debuff ||
       (constraints.debuffedSuit && c.suit === constraints.debuffedSuit) ||
-      (constraints.debuffFaceCards && ["J", "Q", "K"].includes(c.rank))
+      (constraints.debuffFaceCards && ["J", "Q", "K"].includes(c.rank)))
     );
     if (debuffedCards.length > 0 && discardsLeft >= 1 && (!bestPlay || bestPlay.totalScore < need)) {
       const toDiscard = debuffedCards.slice(0, 5);
@@ -2094,7 +2122,7 @@ end
       if (constraints.debuffedSuit && suit === constraints.debuffedSuit) continue;
       if (cards.length >= 4 && cards.length < 5) {
         const keepSet = new Set(cards);
-        const junk = hand.filter(c => !keepSet.has(c) && !isProtectedHeldCard(c, state.jokers));
+        const junk = hand.filter(c => !keepSet.has(c) && !isProtectedHeldCard(c, state.jokers) && !playCardSet.has(c));
         const toDiscard = junk.sort((a, b) => (RANK_VALUES[a.rank] || 0) - (RANK_VALUES[b.rank] || 0)).slice(0, 5);
         if (toDiscard.length > 0) {
           const suitName = { "S": "黑桃", "H": "红桃", "D": "方片", "C": "梅花" }[suit] || suit;
@@ -2127,7 +2155,7 @@ end
               keepCards.push(c);
             }
           }
-          const junk = hand.filter(c => !keepCards.includes(c) && !isProtectedHeldCard(c, state.jokers));
+          const junk = hand.filter(c => !keepCards.includes(c) && !isProtectedHeldCard(c, state.jokers) && !playCardSet.has(c));
           const toDiscard = junk.slice(0, 5);
           if (toDiscard.length > 0) {
             return {
@@ -2143,7 +2171,7 @@ end
 
     // 3. Keep pairs/trips, discard uncoordinated low singletons (strictly protecting held cards)
     if (multiCards.length > 0 && singleCards.length > 0) {
-      const safeSingletons = singleCards.filter(c => !isProtectedHeldCard(c, state.jokers));
+      const safeSingletons = singleCards.filter(c => !isProtectedHeldCard(c, state.jokers) && !playCardSet.has(c));
       if (safeSingletons.length > 0) {
         const toDiscard = safeSingletons.sort((a, b) => (RANK_VALUES[a.rank] || 0) - (RANK_VALUES[b.rank] || 0)).slice(0, Math.min(5, safeSingletons.length));
         return {
@@ -2155,11 +2183,12 @@ end
       }
     }
 
-    // 4. Default: Discard lowest 3 uncoordinated cards (filtering out protected cards)
-    const discardable = hand.filter(c => !isProtectedHeldCard(c, state.jokers));
+    // 4. Default: Discard lowest junk (filtering out protected cards and
+    // v165: the cards the chosen best play needs).
+    const discardable = hand.filter(c => !isProtectedHeldCard(c, state.jokers) && !playCardSet.has(c));
     const pool = discardable.length > 0 ? discardable : hand;
     const sortedHand = [...pool].sort((a, b) => (RANK_VALUES[a.rank] || 0) - (RANK_VALUES[b.rank] || 0));
-    const toDiscard = sortedHand.slice(0, Math.min(4, sortedHand.length));
+    const toDiscard = sortedHand.slice(0, Math.min(5, sortedHand.length));
     return {
       target: "清理低点底牌",
       reason: `弃除点数最小的 ${toDiscard.length} 张杂牌，刷新手牌深度，等待下一轮高阶牌型`,
@@ -2582,6 +2611,26 @@ end
           badgeClass: "arb-discard",
           title: "🗑️ 战略弃牌 (升级成型)",
           reason: `现有对子/三条单打仅得 ${bestPlay.totalScore} 分 (不足目标 45%)，建议弃杂牌挖葫芦或四条`,
+          cards: bestDiscard.cards
+        };
+      }
+
+      // v165: generic junk-swap gate. The old waterfall only discarded for
+      // a named intent (debuffed / flush / straight / pair) — the default
+      // ditch_junk cleanup NEVER fired, so weak hands burned every hand
+      // with no redraw (diag155: discards_left=4 unused). If the best play
+      // can't realistically reach the blind but there is room to redraw,
+      // swap the junk now.
+      if (bestDiscard.intent === "ditch_junk"
+          && bestPlay.totalScore < need * 0.6
+          && discardsLeft >= 1
+          && handsLeft >= 2) {
+        return {
+          verdict: "DISCARD",
+          confidence: "STRATEGIC",
+          badgeClass: "arb-discard",
+          title: "🗑️ 战略弃牌 (换血清理)",
+          reason: `当前最佳出牌仅 ${bestPlay.totalScore.toLocaleString()} 分 (不足目标 60%)，还有 ${discardsLeft} 次弃牌 + ${handsLeft} 次出牌，弃 ${bestDiscard.cards.length} 张废牌换取更优牌型的期望更高`,
           cards: bestDiscard.cards
         };
       }

@@ -1258,6 +1258,59 @@ def test_pack_dead_end_no_usable_card_no_skip_escalates_to_force_leave():
     assert "等待补充包就绪..." in js_content
 
 
+def test_pack_crash_cleanup_orphan_sweep_and_skip_fast_close():
+    """v165: acceptance-feedback pack-UI fixes in the Lua bridge.
+
+    Three independent leak paths keep pack cards visible over the hand UI
+    after the game has moved on:
+
+    1. use_card mid-body crash: vanilla removes the card from G.pack_cards
+       synchronously but only QUEUES its dissolve at the end of the body;
+       a crash (Grim/Incantation "interval is empty", Event Guard drops)
+       leaves it area-less over the hand forever. The bridge must dissolve
+       the card on the spot when the pcall fails, and track dispatched
+       cards so a maintenance sweep can catch anything that slips through.
+    2. Skipped packs: vanilla's skip close chain NEVER lands on this build
+       (0/7 self-restores). A successful skip must arm a fast-close that
+       abandons the pack 1.5s later if the state didn't advance.
+    3. Orphan sweep: dispatched pack cards that are (a) not removed, (b)
+       not dissolving, (c) in NO card area after the pack state ended must
+       be dissolved by decidex_maintenance.
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    # 1a. Crash cleanup right on the pcall failure path of select_pack_card.
+    #     v165b: start_dissolve's first arg is the COLOUR TABLE — passing a
+    #     bare `true` froze the game loop (sprite.lua:103 indexed the
+    #     boolean). Must be nil (vanilla default palette) or guarded.
+    assert "select_pack_card crash-cleanup failed" in content
+    assert "if c.start_dissolve then c:start_dissolve(nil, true)" in content
+    assert "c:start_dissolve(true)" not in content
+    # 1b. Dispatched cards are tracked for the sweep.
+    assert "_G._decidex_pack_card_tracker" in content
+    assert "table.insert(_G._decidex_pack_card_tracker, c)" in content
+    # 2. Skip fast-close: armed on skip success, fires abandon after 1.5s.
+    assert "_G._decidex_skip_started" in content
+    assert "skip close chain never landed; abandoning pack" in content
+    # 3. Orphan sweep only outside pack states, and REMOVES (never
+    #    start_dissolve) area-less cards — dissolve here re-enters the
+    #    shader path that crashed the love event loop in soak1.
+    assert "orphaned pack card(s) over the hand" in content
+    assert "not is_pack_state()" in content
+    sweep_idx = content.find("orphaned pack card(s) over the hand")
+    sweep_block = content[sweep_idx - 2500:sweep_idx]
+    assert "c:start_dissolve" not in sweep_block
+    assert "c:remove()" in sweep_block
+
+    # The fast-close/sweep block must sit in decidex_maintenance (after the
+    # consumed-pack auto-close call) so it ticks every frame.
+    maint_idx = content.find("local function decidex_maintenance()")
+    assert maint_idx >= 0
+    tail = content[maint_idx:]
+    assert "pcall(auto_close_consumed_pack)" in tail
+    assert tail.find("pcall(auto_close_consumed_pack)") < tail.find("skip close chain never landed")
+
+
 def test_scoring_applies_joker_effects_in_order():
     """Vanilla evaluate_play applies each joker's +mult before its ×mult,
     left-to-right. The old code accumulated all xmult and multiplied at the

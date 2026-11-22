@@ -230,6 +230,69 @@ GOLDEN_CASES = [
         ],
         "expect": {"verdict": "DISCARD"},
     },
+    # --- v165 junk-riding rebalance & scoring-aware discards ---
+    {
+        # With discards available and the blind clearable, a filtering play
+        # (pair + 1 junk) now ranks JUST below the pure pair instead of
+        # being crushed by 0.15^junk (old: 64*0.15=9).
+        "name": "findBestPlays_filtering_play_stays_close_when_clearing",
+        "fn": "findBestPlays",
+        "args": [{"hand": [card("A", "S", 0), card("A", "H", 1), card("2", "D", 2),
+                           card("5", "C", 3), card("9", "S", 4)],
+                  "jokers": [], "blind": {"chips": 300, "scored": 0},
+                  "hands_left": 4, "discards_left": 3}],
+        "expect": {"handName": "Pair", "totalScore": 64},
+    },
+    {
+        # v165: findBestDiscards must never discard a card the chosen play
+        # needs (object-identity protection). The best play uses the pair of
+        # Aces; the ladder dumps the three singletons instead.
+        "name": "findBestDiscards_protects_play_cards",
+        "fn": "findBestDiscards",
+        "args": [
+            {"hand": [card("A", "S", 0), card("A", "H", 1), card("2", "D", 2),
+                      card("5", "C", 3), card("9", "S", 4)],
+             "jokers": [], "blind": {"chips": 300, "scored": 0},
+             "hands_left": 4, "discards_left": 3},
+            {"handName": "Pair", "totalScore": 64,
+             "cards": [card("A", "S", 0), card("A", "H", 1)]},
+        ],
+        "expect": {"intent": "pair_upgrade", "n_cards": 3},
+    },
+    {
+        # v165: the default ditch_junk intent now fires the DISCARD verdict
+        # when the best play is far below the need and a redraw is possible.
+        "name": "arbitrate_discards_ditch_junk_when_weak",
+        "fn": "arbitrateAction",
+        "args": [
+            {"blind": {"chips": 3000, "scored": 0}, "hands_left": 3, "discards_left": 2, "jokers": []},
+            {"handName": "High Card", "totalScore": 50, "cards": [card("2", "D", 0)]},
+            {"intent": "ditch_junk", "reason": "x", "cards": [card("2", "D", 0), card("4", "C", 1), card("7", "H", 2)]},
+        ],
+        "expect": {"verdict": "DISCARD", "confidence": "STRATEGIC"},
+    },
+    {
+        # ...but not on the last hand (v154 rule stays), not with 0 discards,
+        # and not when the play is within 60% of the need.
+        "name": "arbitrate_no_ditch_junk_on_last_hand",
+        "fn": "arbitrateAction",
+        "args": [
+            {"blind": {"chips": 3000, "scored": 0}, "hands_left": 1, "discards_left": 2, "jokers": []},
+            {"handName": "High Card", "totalScore": 50, "cards": [card("2", "D", 0)]},
+            {"intent": "ditch_junk", "reason": "x", "cards": [card("2", "D", 0), card("4", "C", 1)]},
+        ],
+        "expect": {"verdict": "PLAY", "confidence": "CRITICAL"},
+    },
+    {
+        "name": "arbitrate_no_ditch_junk_when_close_to_need",
+        "fn": "arbitrateAction",
+        "args": [
+            {"blind": {"chips": 3000, "scored": 0}, "hands_left": 3, "discards_left": 2, "jokers": []},
+            {"handName": "High Card", "totalScore": 2000, "cards": [card("2", "D", 0)]},
+            {"intent": "ditch_junk", "reason": "x", "cards": [card("2", "D", 0), card("4", "C", 1)]},
+        ],
+        "expect": {"verdict": "PLAY"},
+    },
     # --- v136 boss-blind gates (previously detected but never enforced) ---
     {
         # The Flint: level base halved exactly (vanilla mod_chips/mod_mult
@@ -375,6 +438,11 @@ def test_scoring_golden_values(results, case):
     # is that the TOP candidate matches the expectation.
     if isinstance(result, list):
         result = result[0]
+
+    # findBestDiscards/arbitrateAction return dicts with a "cards" list; a
+    # synthetic "n_cards" expectation asserts its length.
+    if "n_cards" in case["expect"]:
+        assert len(result["cards"]) == case["expect"].pop("n_cards")
 
     for key, value in case["expect"].items():
         actual = result.get(key)

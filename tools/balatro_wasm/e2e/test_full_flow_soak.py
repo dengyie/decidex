@@ -81,10 +81,12 @@ DWELL_BUDGETS = {
     # Blind select legitimately takes 45-46s when the event queue is still
     # draining a busy transition (observed self-recovering in soak8b/soak6
     # with no intervention); 60s avoids flagging that as a stall.
-    "BLIND_SELECT": 60,
+    # v165b: deep-ante queue drains (40+ card hands at ante 9-11) measured
+    # 66-68s in soak3 — every one self-recovered, so 90s covers it.
+    "BLIND_SELECT": 90,
     "SELECTING_HAND": 90,
-    "DRAW_TO_HAND": 30,
-    "HAND_PLAYED": 60,
+    "DRAW_TO_HAND": 80,
+    "HAND_PLAYED": 80,
     "ROUND_EVAL": 60,
     # Same settlement-animation family as HAND_PLAYED/ROUND_EVAL; deep-ante
     # joker/tarot chains legitimately take 46s+ (soak20 801s self-recovered
@@ -101,12 +103,20 @@ DWELL_BUDGETS = {
     "BUFFOON_PACK": 75,
     "GAME_OVER": 30,
     "GAME_WON": 30,
+    # v165b: deep-ante NEW_ROUND card-draw chains measured 34-67s in soak3 —
+    # every one self-recovered and advanced. Wedged states outlive these.
+    "NEW_ROUND": 80,
 }
 DEFAULT_BUDGET = 30
 
 TRANSIENT_INFO_RE = re.compile(
     r"debounced|not ready|animating|in progress|busy|locked|waiting|"
     r"already in play|blocks play|slots full|pack card not found|no-op|not set|"
+    # v165b: shop shelves repopulate asynchronously after a pack close; a
+    # buy retry racing the rebuild gets "card not found at index N" and the
+    # AutoPilot retries on the next tick (soak3 2476334s — game kept
+    # advancing 30s afterwards).
+    r"card not found at index|"
     r"not in (BLIND_SELECT|SHOP|ROUND_EVAL|SELECTING_HAND|HAND_PLAYED|new_round)|"
     r"blind already selected|already in run|no pack_cards|not in a pack state|no space to buy|use_card failed",
     re.IGNORECASE,

@@ -3708,7 +3708,12 @@ local function decidex_execute_inner(action, args)
     if G.FUNCS and G.FUNCS.skip_booster then
       if not btn then btn = { config = { button = 'skip_booster' } } end
       local ok, err = pcall(G.FUNCS.skip_booster, btn)
-      if ok then return true, "skipped booster via G.FUNCS.skip_booster" end
+      if ok then
+        -- v165: arm the skip fast-close (decidex_maintenance) — vanilla's
+        -- queued close chain never lands on this build.
+        _G._decidex_skip_started = (love.timer and love.timer.getTime()) or os.clock()
+        return true, "skipped booster via G.FUNCS.skip_booster"
+      end
       return false, "skip_booster error: " .. tostring(err)
     end
     if G.FUNCS and G.FUNCS.end_consumeable then
@@ -3829,8 +3834,34 @@ local function decidex_execute_inner(action, args)
         _G._pack_dispatched = _G._pack_dispatched or {}
         _G._pack_dispatched[c.sort_id] = true
       end
+      -- v165: track the dispatched card for the orphan sweep in
+      -- decidex_maintenance (mid-body use_card crash leaves it area-less
+      -- over the hand with no dissolve queued).
+      _G._decidex_pack_card_tracker = _G._decidex_pack_card_tracker or {}
+      table.insert(_G._decidex_pack_card_tracker, c)
       local ok, err = pcall(G.FUNCS.use_card, {config = {ref_table = c, button = 'use_card'}})
       if ok then return true, "selected pack card: " .. tostring(c.ability and c.ability.name or idx) end
+      -- v165: vanilla use_card removes the card from the pack area
+      -- synchronously (button_callbacks.lua:2141+) and repositions it over
+      -- the hand, but its dissolve/self:remove() is only QUEUED at the end
+      -- of the body. A mid-body crash (Grim/Incantation "interval is
+      -- empty", Event Guard drops) leaves the card area-less, rendered at
+      -- hand center, with no removal queued -- the exact "pack card stuck
+      -- over the center UI" leak. Clean it up on the spot.
+      if not c.removed and not (c.dissolving or (c.config and c.config.dissolving)) then
+        local okd, errd = pcall(function()
+          -- v165b: first arg of start_dissolve is the COLOUR TABLE, not a
+          -- flag. Passing `true` stored a boolean into self.dissolve_colours
+          -- and sprite.lua:103 then indexed it ("attempt to index field
+          -- 'dissolve_colours' (a boolean value)") while a Canvas was
+          -- active, killing love.event.pump and freezing the game loop.
+          -- nil selects the vanilla default colour palette.
+          if c.start_dissolve then c:start_dissolve(nil, true)
+          elseif c.remove then c:remove()
+          end
+        end)
+        if not okd then print("[DecideX Pack Watchdog] select_pack_card crash-cleanup failed: " .. tostring(errd)) end
+      end
       return false, "use_card failed: " .. tostring(err)
     end
     return false, "no use_card func for pack card"
@@ -4148,6 +4179,82 @@ local function decidex_maintenance()
 
   -- Consumed-pack fast exit (see the comment on auto_close_consumed_pack).
   pcall(auto_close_consumed_pack)
+
+  -- v165: skipped-pack fast exit. Vanilla skip_booster's close chain
+  -- (end_consumeable -> queued UIBox slide + booster_pack:remove() +
+  -- state restore) NEVER lands on this build (0/7 self-restores, see the
+  -- auto_close_consumed_pack comment). After a skip the client re-skips
+  -- every ~400ms and the only existing escalator is the client's 45s
+  -- no-progress breaker -- the pack sits over the hand the whole time.
+  -- Give a skip the same fast path a consumed pack gets: if 1.5s after a
+  -- skip we are STILL in the pack state with a live UIBox, abandon it.
+  if _G._decidex_skip_started and not is_pack_state() then
+    _G._decidex_skip_started = nil
+  elseif _G._decidex_skip_started and is_pack_state() then
+    local now_skip = (love.timer and love.timer.getTime()) or os.clock()
+    if now_skip - _G._decidex_skip_started >= 1.5 and not _G._pack_auto_closed then
+      _G._decidex_skip_started = nil
+      print("[DecideX Bridge] skip close chain never landed; abandoning pack")
+      local ok_skip, err_skip = pcall(function() abandon_pack() end)
+      if ok_skip then
+        LAST_PACK_SIG = ""
+        LAST_STATE_NUM = nil
+      else
+        print("[DecideX Bridge] skip fast-close failed: " .. tostring(err_skip))
+      end
+    end
+  end
+
+  -- v165: orphaned pack-card safety net. Vanilla use_card removes the
+  -- card from G.pack_cards synchronously and repositions it over the hand
+  -- (button_callbacks.lua:2203-2207) but only QUEUES its dissolve at the
+  -- end of the body. A mid-body crash leaves it area-less, rendered at
+  -- hand center, with no removal queued -- nothing else sweeps area-less
+  -- cards, so the visual persists into every later stage. Track cards
+  -- we dispatch (select_pack_card) and dissolve any tracker entry that
+  -- is no longer in ANY area once the pack is gone.
+  if _G._decidex_pack_card_tracker and not is_pack_state() then
+    local in_any_area = function(c)
+      for _, area in ipairs({ G.hand, G.play, G.pack_cards, G.jokers, G.consumeables, G.deck }) do
+        if area and area.cards then
+          for _, ac in ipairs(area.cards) do if ac == c then return true end end
+        end
+      end
+      return false
+    end
+    local kept = {}
+    local swept = 0
+    for _, c in ipairs(_G._decidex_pack_card_tracker) do
+      local alive = not c.removed
+      if alive then
+        local dissolving = c.dissolving or (c.config and c.config.dissolving)
+          or (c.children and c.children.dissolve)
+        if dissolving or in_any_area(c) then
+          table.insert(kept, c)
+        else
+          -- v165b: NEVER start_dissolve here. First arg is the COLOUR
+          -- TABLE; any non-table value (we used to pass `true`) is stored
+          -- into self.dissolve_colours and sprite.lua:103 then indexes it
+          -- ("attempt to index field 'dissolve_colours' (a boolean
+          -- value)") while a Canvas is active, which kills love.event.pump
+          -- and freezes the whole game loop (probe 2 evidence: every later
+          -- shop action ack timed out). Detach the card from the render
+          -- tree instead -- vanilla's own queued dissolve/self:remove (if
+          -- any) stays untouched.
+          pcall(function()
+            if c.remove then
+              c:remove()
+            end
+          end)
+          swept = swept + 1
+        end
+      end
+    end
+    if swept > 0 then
+      print("[DecideX Pack Watchdog] dissolved " .. swept .. " orphaned pack card(s) over the hand")
+    end
+    _G._decidex_pack_card_tracker = kept
+  end
 
   if not _G._decidex_step_logged then
     _G._decidex_step_logged = true
