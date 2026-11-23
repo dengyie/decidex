@@ -30,7 +30,10 @@ import os
 import re
 import time
 
-from playwright.async_api import async_playwright
+try:
+    from playwright.async_api import async_playwright
+except ImportError:  # regex-parity tests import this module without playwright
+    async_playwright = None
 
 from harness_support import (
     TERMINAL_LATCH_READ,
@@ -325,4 +328,6 @@ class Soak:
 
 
 if __name__ == "__main__":
+    if async_playwright is None:
+        raise SystemExit("playwright is required to run the soak (pip install playwright)")
     asyncio.run(Soak().run())
