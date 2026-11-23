@@ -13,6 +13,8 @@ Approximations (documented, deterministic):
   * xmult ordering is approximated as cards-then-jokers;
   * jokers outside :data:`KNOWN_JOKERS` contribute only their reported static
     chips/mult/xmult (the bridge reads those off the live joker object).
+
+本模块用于 replay/分析；线上运行的策略实现位于 tools/balatro_wasm/web/app.js，服务端 advisor 经鉴权 /api/execute auto 通道仍可被调用执行。
 """
 
 from __future__ import annotations

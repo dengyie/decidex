@@ -37,7 +37,9 @@ from harness_support import (
     TERMINAL_LATCH_SCRIPT,
     positive_finite_float,
     positive_viewport,
+    effective_stall_budget,
     scale_dwell_budget,
+    classify_action_rejection,
 )
 
 BASE_URL = os.environ.get("BALATRO_SOAK_URL", "http://127.0.0.1:8099/")
@@ -109,16 +111,20 @@ DWELL_BUDGETS = {
 }
 DEFAULT_BUDGET = 30
 
+# Single source of truth for "transient rejection" classification is the
+# JS isTransient / isStateMismatch pair in tools/balatro_wasm/web/app.js
+# (~line 4558). This regex must mirror it word for word:
+#   - "use_card failed" is deliberately NOT transient (the vanilla crash
+#     behind it, "interval is empty" on an empty hand, is a broken decision
+#     the caller must see);
+#   - the state-mismatch alternation is folded in here because Python has
+#     no separate latch for it (JS keeps isStateMismatch apart to avoid
+#     consuming the pack-select fail-streak budget).
 TRANSIENT_INFO_RE = re.compile(
-    r"debounced|not ready|animating|in progress|busy|locked|waiting|"
-    r"already in play|blocks play|slots full|pack card not found|no-op|not set|"
-    # v165b: shop shelves repopulate asynchronously after a pack close; a
-    # buy retry racing the rebuild gets "card not found at index N" and the
-    # AutoPilot retries on the next tick (soak3 2476334s — game kept
-    # advancing 30s afterwards).
-    r"card not found at index|"
-    r"not in (BLIND_SELECT|SHOP|ROUND_EVAL|SELECTING_HAND|HAND_PLAYED|new_round)|"
-    r"blind already selected|already in run|no pack_cards|not in a pack state|no space to buy|use_card failed",
+    r"not ready|animating|debounced|in progress|busy|locked|waiting|"
+    r"already in play|blocks play|slots full|pack card not found|no pack_cards|"
+    r"not in a pack state|no space to buy|no-op|not set|acknowledgement timed out|"
+    r"not in (BLIND_SELECT|SHOP|ROUND_EVAL|SELECTING_HAND|HAND_PLAYED|new_round)",
     re.IGNORECASE,
 )
 
@@ -130,20 +136,29 @@ class Soak:
         self.stalls = []          # (t, state, dwell, note)
         self.page_errors = []
         self.action_failures = []
+        self.benign_rejections = []  # (t, info) — bridge-emitted, client self-recovers
         self.games_completed = 0
         self.antes_seen = set()
         self.blinds_seen = []     # (ante, blind) on-deck tuples
         self.state_events = []    # (t, state) transitions
         self.watchdog_events = [] # (t, text)
         self.stall_dumped = False
+        self._stall_worst = 0.0   # best dwell seen for the current state visit
 
     def on_console(self, msg):
         text = msg.text
         now = time.monotonic()
-        if "[DECIDEX_ACTION_RESULT]" in text and "ok=false" in text:
-            info = text.split("info=", 1)[1] if "info=" in text else ""
-            if not TRANSIENT_INFO_RE.search(info):
+        verdict = classify_action_rejection(text, TRANSIENT_INFO_RE)
+        if verdict != "none":
+            info = text.split("info=", 1)[1].strip() if "info=" in text else ""
+            if verdict == "hard":
                 self.action_failures.append((f"{now:.0f}s", text[:220]))
+            else:
+                # Transient (JS-mirrored) or benign (bridge-emitted,
+                # client self-recovers): recorded for observability, never
+                # a verdict failure.
+                if verdict == "benign":
+                    self.benign_rejections.append((f"{now:.0f}s", info[:160]))
             return
         if any(k in text for k in ("[DecideX Pack Watchdog]", "[DecideX Event Guard]",
                                    "[DecideX Frame Guard]", "[AutoPilot Watchdog]",
@@ -233,6 +248,7 @@ class Soak:
                     prev_state = sname
                     state_since = time.monotonic()
                     self.stall_dumped = False
+                    self._stall_worst = 0.0
 
                 ante = st.get("ante")
                 if ante:
@@ -244,18 +260,31 @@ class Soak:
                         self.blinds_seen.append(key)
 
                 dwell = time.monotonic() - state_since
-                # Oversized hands make healthy states legitimately slower.
+                # Stall decision uses the flat 1.3x grace only; the hand-scale
+                # stretch (scale_dwell_budget) is observability-only now, or a
+                # 49-card hand silently doubled every stall budget.
+                budget = effective_stall_budget(DWELL_BUDGETS.get(sname, DEFAULT_BUDGET))
                 hand_n = len(st.get("hand") or []) if isinstance(st.get("hand"), list) else 0
-                budget = scale_dwell_budget(DWELL_BUDGETS.get(sname, DEFAULT_BUDGET), hand_n)
-                # 10% grace so a budget-line dwell (76s vs 75, 46s vs 45)
-                # is not reported as a stall: the budgets mean "wedged",
-                # and soaks 20/21 both self-recovered 1s past the line.
-                if dwell > budget * 1.1 and not self.stall_dumped:
+                slow_budget = scale_dwell_budget(DWELL_BUDGETS.get(sname, DEFAULT_BUDGET), hand_n)
+                # Every worsening beyond the budget appends to the timeline
+                # (diagnosability), but the heavy js_snapshot dump fires once
+                # per state visit.
+                if dwell > budget:
+                    # Append a new timeline record only when the stall has
+                    # worsened by a meaningful step (>=10s), not on every
+                    # 2s poll of a steady wedge — otherwise one 20-min wedge
+                    # alone adds ~600 near-identical records to the rollup.
+                    # The snapshot dump still fires once per state visit.
+                    if dwell - self._stall_worst >= 10:
+                        self._stall_worst = dwell
+                        note = f"state={sname} dwell={dwell:.0f}s budget={budget}s hand_n={hand_n}"
+                        self.stalls.append((f"{t:.0f}s", note))
+                if dwell > budget and not self.stall_dumped:
                     self.stall_dumped = True
                     js_pack_n = len((st.get("pack_cards") or [])) if isinstance(st.get("pack_cards"), list) else "?"
-                    note = f"state={sname} dwell={dwell:.0f}s budget={budget}s js_snapshot_pack_n={js_pack_n}"
-                    self.stalls.append((f"{t:.0f}s", note))
-                    print(f"[Soak] *** STALL *** {t:.0f}s {note}", flush=True)
+                    print(f"[Soak] *** STALL *** {t:.0f}s state={sname} dwell={dwell:.0f}s "
+                          f"stall_budget={budget}s slow_healthy_budget={slow_budget:.0f}s "
+                          f"js_snapshot_pack_n={js_pack_n}", flush=True)
                     await page.evaluate("() => window.__soakDump && window.__soakDump()")
 
             terminal = await page.evaluate(TERMINAL_LATCH_READ)
@@ -270,6 +299,7 @@ class Soak:
         print(f"  state_transitions={len(self.state_events)}")
         print(f"  page_errors={self.page_errors}")
         print(f"  action_failures={self.action_failures}")
+        print(f"  benign_rejections={len(self.benign_rejections)} (client self-recovers)")
         print(f"  stalls={self.stalls}")
         wd = {}
         for _, text in self.watchdog_events:

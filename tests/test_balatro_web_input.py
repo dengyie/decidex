@@ -558,6 +558,168 @@ def test_sso_logout_drops_both_cookies(server_pw, monkeypatch):
     assert "mango_game_session=" in cookies_str
 
 
+def test_sso_cookie_domain_is_configured_value(server_pw, monkeypatch):
+    """The SSO Set-Cookie must carry the Domain= the deployment chose:
+    the default (.mangoqwq.com) in the normal case, and the
+    DECIDEX_COOKIE_DOMAIN override when the env var is set — so a
+    stinging-cookie fix upstream can never silently widen the domain."""
+    base, _ = server_pw
+    monkeypatch.setattr(app, "_SSO_SECRET", "test-sso-secret-xyz")
+    monkeypatch.setattr(app, "COOKIE_DOMAIN", ".mangoqwq.com")
+    code, _, headers = _post(base, "/api/login", {}, password=PASSWORD, user=USER)
+    assert code == 200
+    cookies = [str(c) for c in headers.get_all("Set-Cookie", [])]
+    sso = [c for c in cookies if c.startswith(f"{app._SSO_COOKIE}=")]
+    assert sso, f"no SSO cookie in login response: {cookies}"
+    assert f"Domain={app.COOKIE_DOMAIN}" in sso[0]
+    assert "Secure" in sso[0] and "HttpOnly" in sso[0]
+
+    # Override must propagate: a non-default domain reaches the wire verbatim.
+    monkeypatch.setattr(app, "COOKIE_DOMAIN", ".test.example.com")
+    code, _, headers = _post(base, "/api/login", {}, password=PASSWORD, user=USER)
+    assert code == 200
+    cookies = [str(c) for c in headers.get_all("Set-Cookie", [])]
+    sso = [c for c in cookies if c.startswith(f"{app._SSO_COOKIE}=")]
+    assert sso and "Domain=.test.example.com" in sso[0]
+
+
+def test_logout_drops_sso_cookie_on_configured_domain(server_pw, monkeypatch):
+    """Logout's SSO expiry cookie must target the same Domain= the login
+    cookie was set on, or the browser keeps the authenticated cookie alive."""
+    base, _ = server_pw
+    monkeypatch.setattr(app, "_SSO_SECRET", "test-sso-secret-xyz")
+    monkeypatch.setattr(app, "COOKIE_DOMAIN", ".mangoqwq.com")
+    sso_tok = app._create_sso_token("mango", secret="test-sso-secret-xyz")
+    code, _, headers = _post(base, "/api/logout", {}, cookie=f"{app._SSO_COOKIE}={sso_tok}")
+    assert code == 200
+    cookies = [str(c) for c in headers.get_all("Set-Cookie", [])]
+    sso = [c for c in cookies if c.startswith(f"{app._SSO_COOKIE}=;")]
+    assert sso, f"no SSO drop cookie in logout response: {cookies}"
+    assert "Domain=.mangoqwq.com" in sso[0]
+    assert "Max-Age=0" in sso[0]
+
+
+# ---- SSO replay / forged-secret rejection ----------------------------------
+
+def test_sso_replay_with_wrong_secret_rejected(server_pw, monkeypatch):
+    """A token minted under a different secret (e.g. replayed from another
+    deployment, or a forged one with a guessed key) must fail the HMAC check
+    and grant nothing — not even /api/session."""
+    base, captured = server_pw
+    monkeypatch.setattr(app, "_SSO_SECRET", "the-real-secret")
+    foreign_tok = app._create_sso_token("mango_operator", secret="attacker-secret")
+    foreign_cookie = f"{app._SSO_COOKIE}={foreign_tok}"
+
+    code, raw_body, _ = _get(base, "/api/session", cookie=foreign_cookie)
+    body = json.loads(raw_body.decode())
+    assert code == 200
+    assert body.get("authenticated") is False
+    assert body.get("sso") is False
+
+    for path, body in (("/api/input/click", {"x": 1, "y": 1}),
+                       ("/api/input/key", {"key": "escape"}),
+                       ("/api/execute", {"action": "play"})):
+        code, _, _ = _post(base, path, body, cookie=foreign_cookie)
+        assert code == 401, f"{path} accepted a wrong-secret SSO token"
+    assert captured == []
+
+
+def test_sso_expired_token_rejects_input_and_execute(server_pw, monkeypatch):
+    """The existing SSO tests cover /api/session and /api/input/click; here the
+    expiry gate must also deny the key-injection and execute surfaces."""
+    base, captured = server_pw
+    secret = "test-sso-secret-xyz"
+    monkeypatch.setattr(app, "_SSO_SECRET", secret)
+    expired_cookie = f"{app._SSO_COOKIE}={app._create_sso_token('mango', secret=secret, ttl=-10)}"
+
+    code, _, _ = _post(base, "/api/input/key", {"key": "escape"}, cookie=expired_cookie)
+    assert code == 401
+    code, body, _ = _post(base, "/api/execute", {"action": "play"}, cookie=expired_cookie)
+    assert code == 401 and body.get("error") == "unauthorized"
+    assert captured == []
+
+
+# ---- CSRF on every input surface --------------------------------------------
+
+def test_csrf_missing_rejected_on_key_and_execute(server_pw):
+    """Companion to test_input_requires_csrf_header / 
+    test_execute_requires_csrf_with_session_cookie: the keystroke surface must
+    be guarded the same way as the click surface."""
+    base, captured = server_pw
+    cookie = _login(base, PASSWORD)
+    code, _, _ = _post(base, "/api/input/key", {"key": "escape"}, cookie=cookie, csrf=False)
+    assert code == 403
+    code, body, _ = _post(base, "/api/input/key", {"key": "escape"}, cookie=cookie, csrf=True)
+    assert code == 200
+    assert captured
+
+
+def test_csrf_wrong_header_value_rejected(server_pw):
+    """An attacker-controlled page can set arbitrary headers on cross-site
+    fetches? No — it cannot (forbidden header), but a wrong value must also
+    fail closed in case a future header ever becomes settable."""
+    base, captured = server_pw
+    cookie = _login(base, PASSWORD)
+    code, _, _ = _post(base, "/api/input/click", {"x": 1, "y": 1}, cookie=cookie,
+                       csrf=False)  # _post(csrf=False) omits the header entirely
+    assert code == 403
+    # Now with a *wrong* value, not just a missing one.
+    headers = {"Content-Type": "application/json", "Cookie": cookie,
+               "X-Requested-With": "evil-site"}
+    req = urllib.request.Request(base + "/api/input/click",
+                                 data=json.dumps({"x": 1, "y": 1}).encode(),
+                                 headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            code = r.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+    assert code == 403
+    assert captured == []
+
+
+# ---- unauthenticated input surfaces -----------------------------------------
+
+def test_key_requires_auth(server):
+    base, captured = server
+    code, body, _ = _post(base, "/api/input/key", {"key": "escape"})
+    assert code == 401
+    assert body.get("error") == "unauthorized"
+    assert captured == []
+
+
+def test_execute_requires_auth_with_sso_like_garbage_cookie(server):
+    """A cookie that merely *looks* like an SSO token must not authenticate."""
+    base, captured = server
+    code, body, _ = _post(base, "/api/execute", {"action": "play"},
+                          cookie=f"{app._SSO_COOKIE}=abc.def")
+    assert code == 401
+    assert body.get("error") == "unauthorized"
+    assert captured == []
+
+
+# ---- action / area whitelist -------------------------------------------------
+
+def test_dispatch_game_action_whitelist_rejects_variants(monkeypatch, tmp_path):
+    """_dispatch_game_action is the final gate before Lua eval; every name not
+    in VALID_GAME_ACTIONS must be dropped even if it reaches this deep."""
+    monkeypatch.setattr(app, "Path", lambda p: tmp_path / "balatro_eval.lua" if "balatro_eval" in str(p) else Path(p))
+    for act in ("malicious_action", "drop_table", "play; os.execute", "PLAY", ""):
+        assert app._dispatch_game_action(act, {"index": 0}) is False, act
+        assert app._dispatch_game_action(act, None) is False, act
+    # nothing may have been written to the eval path for rejected actions
+    assert not (tmp_path / "balatro_eval.lua").exists()
+    # area whitelist: only VALID_AREAS entries pass
+    for area in ("evil", "../../etc", "shop_jokers"):
+        if area in app.VALID_AREAS:
+            assert app._dispatch_game_action("buy_card", {"index": 0, "area": area}) is True
+        else:
+            assert app._dispatch_game_action("buy_card", {"index": 0, "area": area}) is False, area
+    # sanity: the whitelist sets the dispatch relies on are non-empty
+    assert app.VALID_GAME_ACTIONS
+    assert "play" in app.VALID_GAME_ACTIONS and "shop_jokers" in app.VALID_AREAS
+
+
 # ---- /api/execute direct game control tests ---------------------------------
 
 def test_execute_unauthorized_requires_auth(server):

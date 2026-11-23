@@ -1604,9 +1604,39 @@ local function populate_empty_pack()
   return ok
 end
 
+-- Pure reward calculation for the v163 direct payout, kept separate from the
+-- state-mutating force-advance so a failed payout leaves no stale idempotency
+-- marker behind and the next tick can retry. Mirrors vanilla evaluate_round:
+-- blind payout + leftover hands * money_per_hand + interest.
+local function compute_round_payout_reward()
+  if not (G and G.GAME and G.GAME.chips and G.GAME.blind) then return nil end
+  if (G.GAME.chips - G.GAME.blind.chips) < 0 then return nil end
+  local reward = 0
+  if G.GAME.blind.dollars and G.GAME.blind.dollars > 0 then
+    reward = reward + G.GAME.blind.dollars
+  end
+  local mpl = (G.GAME.modifiers and G.GAME.modifiers.money_per_hand) or 1
+  local hl = tonumber(G.GAME.current_round and G.GAME.current_round.hands_left) or 0
+  if hl > 0 and not (G.GAME.modifiers and G.GAME.modifiers.no_extra_hand_money) then
+    reward = reward + hl * mpl
+  end
+  if (G.GAME.dollars or 0) >= 5 and not (G.GAME.modifiers and G.GAME.modifiers.no_interest) then
+    local ia = tonumber(G.GAME.interest_amount) or 1
+    local ic = tonumber(G.GAME.interest_cap) or 25
+    reward = reward + ia * math.min(math.floor((G.GAME.dollars or 0) / 5), math.floor(ic / 5))
+  end
+  return reward
+end
+
+-- Returns (ok, err) instead of swallowing failures behind an unconditional
+-- `return true`: a mid-payout error used to leave the idempotency marker set
+-- while the money was never paid, permanently starving that round's reward
+-- and everything downstream. Callers re-enter every tick, so a failed
+-- advance simply retries; the marker is only written AFTER the payout and
+-- the previous_round bookkeeping have both landed.
 local function force_advance_to_shop()
-  if not (G and G.STATES and G.STATE == G.STATES.ROUND_EVAL) then return false end
-  pcall(function()
+  if not (G and G.STATES and G.STATE == G.STATES.ROUND_EVAL) then return false, "not in ROUND_EVAL" end
+  local ok_adv, err_adv = pcall(function()
     if G.round_eval then
       G.round_eval:remove()
       G.round_eval = nil
@@ -1641,30 +1671,19 @@ local function force_advance_to_shop()
     -- ease_dollars(0) paid NOTHING for every won blind (diag163b: 8 blinds
     -- won, wallet $0 -> $0; diag163: wallet dist {0:55, 4:5}, 0/5 runs with
     -- any leveled hand, zero Celestial buys — the whole level-chain economy
-    -- downstream was starved by this single missing payout). Recompute the
-    -- vanilla evaluate_round formula inline: blind payout + leftover hands
-    -- + interest, then ease_dollars it. Idempotent per ROUND_EVAL entry via
-    -- the _payout_paid marker (reset on state_changed by the caller loop).
-    if G.GAME and G.GAME.chips and G.GAME.blind and (G.GAME.chips - G.GAME.blind.chips >= 0) then
+    -- downstream was starved by this single missing payout). Reward is now
+    -- computed by compute_round_payout_reward(); the idempotency marker is
+    -- written only AFTER ease_dollars and previous_round bookkeeping succeed,
+    -- so a mid-payout error can be retried next tick instead of being
+    -- permanently swallowed (the old marker-before-payout order lost the
+    -- whole round's money on any error).
+    local reward = compute_round_payout_reward()
+    if reward then
       local paid = G.GAME._decidex_payout_ante_round
       local resets3 = G.GAME.round_resets or {}
       local key3 = tostring(resets3.ante or 1) .. ":" .. tostring(G.GAME.round or 0)
       if paid ~= key3 then
-        G.GAME._decidex_payout_ante_round = key3
-        local reward = 0
-        if G.GAME.blind.dollars and G.GAME.blind.dollars > 0 then
-          reward = reward + G.GAME.blind.dollars
-        end
-        local mpl = (G.GAME.modifiers and G.GAME.modifiers.money_per_hand) or 1
         local hl = tonumber(G.GAME.current_round and G.GAME.current_round.hands_left) or 0
-        if hl > 0 and not (G.GAME.modifiers and G.GAME.modifiers.no_extra_hand_money) then
-          reward = reward + hl * mpl
-        end
-        if (G.GAME.dollars or 0) >= 5 and not (G.GAME.modifiers and G.GAME.modifiers.no_interest) then
-          local ia = tonumber(G.GAME.interest_amount) or 1
-          local ic = tonumber(G.GAME.interest_cap) or 25
-          reward = reward + ia * math.min(math.floor((G.GAME.dollars or 0) / 5), math.floor(ic / 5))
-        end
         if reward > 0 then
           print("[DecideX Bridge] v163 direct payout: reward=" .. tostring(reward) ..
             " (blind=" .. tostring(G.GAME.blind.dollars) .. " hands_left=" .. tostring(hl) ..
@@ -1673,6 +1692,8 @@ local function force_advance_to_shop()
         end
         G.GAME.previous_round = G.GAME.previous_round or {}
         G.GAME.previous_round.dollars = G.GAME.dollars
+        -- Marker LAST: only a fully completed payout is considered paid.
+        G.GAME._decidex_payout_ante_round = key3
       end
     end
     -- Vanilla G.FUNCS.cash_out ends with this blind-ante tail
@@ -1708,7 +1729,14 @@ local function force_advance_to_shop()
     G.cashing_out = false
     _G._round_eval_enter_time = nil
   end)
-  return true
+  -- Failure surfaces to the caller instead of being swallowed behind an
+  -- unconditional `return true`: callers re-enter every tick, so a failed
+  -- advance simply retries next tick (state was not mutated to SHOP).
+  if not ok_adv then
+    print("[DecideX Bridge] force_advance_to_shop failed: " .. tostring(err_adv))
+    return false, err_adv
+  end
+  return true, nil
 end
 
 -- Remember which blind this run actually played, and in which ante. Keyed
@@ -3661,8 +3689,15 @@ local function decidex_execute_inner(action, args)
     end
     local eval_elapsed = _G._round_eval_enter_time and (now - _G._round_eval_enter_time) or 0
     if eval_elapsed > 4.5 or (not G.round_eval or G.round_eval.REMOVED) then
-      force_advance_to_shop()
-      return true, "force advanced to shop after timeout"
+      -- Propagate the outcome: force_advance_to_shop returns (ok, err) and
+      -- the ROUND_EVAL tick loop retries on failure, but acking success
+      -- here hid the stale state from the client. A false ack flows back as
+      -- a transient rejection and the normal retry path handles it.
+      local ok_adv, err_adv = force_advance_to_shop()
+      if ok_adv then
+        return true, "force advanced to shop after timeout"
+      end
+      return false, "force advance failed: " .. tostring(err_adv)
     end
     return false, "cash_out button not ready yet"
   end
@@ -4049,8 +4084,28 @@ local function report_frame_error(tag, err)
   end
 end
 
+-- Per-item isolation for the maintenance chain: one broken watchdog used to
+-- abort every later block in the same single-pcall body (e.g. a broken
+-- overlay dismissal starved pack populate/trim/auto-close for the rest of
+-- the run). Each block now fails alone, with a rate-limited print (first
+-- occurrence + every 10th) so a repeating error can't flood the log.
+local function safe_maintain(name, fn)
+  local ok, err = pcall(fn)
+  if not ok then
+    local counter = (_G._decidex_maint_errs or {})
+    _G._decidex_maint_errs = counter
+    counter[name] = (counter[name] or 0) + 1
+    local n = counter[name]
+    if n == 1 or n % 10 == 0 then
+      print("[DecideX Maintenance] " .. name .. " error #" .. n .. ": " .. tostring(err))
+    end
+  end
+  return ok
+end
+
 local function decidex_maintenance()
   -- Auto-suppress tutorial popups, locks and pauses, and disable heavy synchronous saves
+  safe_maintain("tutorial_settings", function()
   if G then
     G.F_SKIP_TUTORIAL = true
     G.F_NO_SAVING = true
@@ -4099,8 +4154,10 @@ local function decidex_maintenance()
       if G.SETTINGS then G.SETTINGS.paused = false end
     end
   end
+  end)
 
   -- Defensive cycle & depth guard for UIBox traversal in WASM
+  safe_maintain("uibox_guard", function()
   if not _G._uibox_guard_installed and UIBox and UIBox.get_UIE_by_ID then
     _G._uibox_guard_installed = true
     local orig_get_uie = UIBox.get_UIE_by_ID
@@ -4128,57 +4185,60 @@ local function decidex_maintenance()
     UIBox.get_UIE_by_ID = safe_get_uie
     print("[DecideX Web] UIBox:get_UIE_by_ID cycle/depth guard installed")
   end
+  end)
 
+  safe_maintain("event_handle_guard", function()
   if not _G._decidex_event_handle_guarded and Event then
     pcall(install_emanager_crash_guard)
   end
+  end)
 
   -- can_skip_booster is polled every frame by the pack UI; a stale
   -- G.pack_cards global used to error it 3600 frames in a row.
-  pcall(install_can_skip_booster_guard)
+  safe_maintain("can_skip_booster_guard", install_can_skip_booster_guard)
 
   -- v140: release once-marks whose card has left its dispatch area (see
   -- decidex_once_sweep) — keeps the v134 dedupe live only during the
   -- dispatch-landing window.
-  pcall(decidex_once_sweep)
+  safe_maintain("once_sweep", decidex_once_sweep)
 
   -- v131c: factory markers (installed on the first tick after
   -- UI_definitions.lua defines the create_UIBox_*_pack globals).
-  pcall(install_pack_factory_markers)
+  safe_maintain("pack_factory_markers", install_pack_factory_markers)
 
   -- A Moveable aligned to a dead major aborts G:update every frame.
-  pcall(install_align_to_major_guard)
+  safe_maintain("align_guard", install_align_to_major_guard)
 
   -- A delayed blind-select build inside a pack rewrites blind_states and
   -- crashes its own prompt-box event (see install_blind_select_build_guard).
-  pcall(install_blind_select_build_guard)
+  safe_maintain("blind_select_build_guard", install_blind_select_build_guard)
 
   -- Duplicate pack exits queue duplicate state-restore events that write
   -- nil into G.STATE (staggered over seconds).
-  pcall(install_end_consumeable_dedup)
+  safe_maintain("end_consumeable_dedup", install_end_consumeable_dedup)
 
   -- A nil G.STATE mid-run freezes the whole state machine (see
   -- repair_nil_state); infer it back from the visible UI.
-  pcall(repair_nil_state)
+  safe_maintain("repair_nil_state", repair_nil_state)
 
   -- Pack UI invariants (no pack UI outside pack states, no duplicate
   -- pack UIBoxes during one).
-  pcall(sweep_pack_ui_invariants)
+  safe_maintain("pack_ui_invariants", sweep_pack_ui_invariants)
 
   -- Booster-pack watchdog: recover from a pack whose UI never appeared.
-  pcall(pack_stall_watchdog)
+  safe_maintain("pack_stall_watchdog", pack_stall_watchdog)
 
   -- Refill a rebuilt-but-empty pack area whose vanilla creation events are
   -- dead (must run before the auto-close so a recoverable pack gets its
   -- populate window instead of an instant abandon).
-  pcall(populate_empty_pack)
+  safe_maintain("populate_empty_pack", populate_empty_pack)
 
   -- v131: trim duplicates a LATE vanilla emplace can leave behind after a
   -- bridge populate (our cards + vanilla's would exceed pack_size).
-  pcall(trim_overfull_pack)
+  safe_maintain("trim_overfull_pack", trim_overfull_pack)
 
   -- Consumed-pack fast exit (see the comment on auto_close_consumed_pack).
-  pcall(auto_close_consumed_pack)
+  safe_maintain("auto_close_consumed_pack", auto_close_consumed_pack)
 
   -- v165: skipped-pack fast exit. Vanilla skip_booster's close chain
   -- (end_consumeable -> queued UIBox slide + booster_pack:remove() +
@@ -4188,6 +4248,7 @@ local function decidex_maintenance()
   -- no-progress breaker -- the pack sits over the hand the whole time.
   -- Give a skip the same fast path a consumed pack gets: if 1.5s after a
   -- skip we are STILL in the pack state with a live UIBox, abandon it.
+  safe_maintain("skip_fast_close", function()
   if _G._decidex_skip_started and not is_pack_state() then
     _G._decidex_skip_started = nil
   elseif _G._decidex_skip_started and is_pack_state() then
@@ -4204,6 +4265,7 @@ local function decidex_maintenance()
       end
     end
   end
+  end)
 
   -- v165: orphaned pack-card safety net. Vanilla use_card removes the
   -- card from G.pack_cards synchronously and repositions it over the hand
@@ -4213,6 +4275,7 @@ local function decidex_maintenance()
   -- cards, so the visual persists into every later stage. Track cards
   -- we dispatch (select_pack_card) and dissolve any tracker entry that
   -- is no longer in ANY area once the pack is gone.
+  safe_maintain("orphan_pack_card_sweep", function()
   if _G._decidex_pack_card_tracker and not is_pack_state() then
     local in_any_area = function(c)
       for _, area in ipairs({ G.hand, G.play, G.pack_cards, G.jokers, G.consumeables, G.deck }) do
@@ -4255,6 +4318,7 @@ local function decidex_maintenance()
     end
     _G._decidex_pack_card_tracker = kept
   end
+  end)
 
   if not _G._decidex_step_logged then
     _G._decidex_step_logged = true

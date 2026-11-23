@@ -30,12 +30,23 @@ BLIND_ORDER = {"Small": 1, "Big": 2, "Boss": 3}
 # is stale; the AutoPilot classifies those as transient waits and retries
 # them, so they are not automation failures. Mirrors the isTransient /
 # isStateMismatch patterns in tools/balatro_wasm/web/app.js.
+# Single source of truth for "transient rejection" classification is the
+# JS isTransient / isStateMismatch pair in tools/balatro_wasm/web/app.js
+# (~line 4558). This regex must mirror it word for word; "use_card failed"
+# is deliberately NOT transient (the vanilla crash behind it, "interval is
+# empty" on an empty hand, is a broken decision the caller must see).
 TRANSIENT_INFO_RE = re.compile(
-    r"debounced|not ready|animating|in progress|busy|locked|waiting|"
-    r"already in play|blocks play|slots full|pack card not found|no-op|not set|not in (BLIND_SELECT|SHOP|ROUND_EVAL|"
-    r"SELECTING_HAND|HAND_PLAYED|new_round)",
+    r"not ready|animating|debounced|in progress|busy|locked|waiting|"
+    r"already in play|blocks play|slots full|pack card not found|no pack_cards|"
+    r"not in a pack state|no space to buy|no-op|not set|acknowledgement timed out|"
+    r"not in (BLIND_SELECT|SHOP|ROUND_EVAL|SELECTING_HAND|HAND_PLAYED|new_round)",
     re.IGNORECASE,
 )
+
+# Bridge-emitted rejections the JS client recovers from on its own but that
+# isTransient deliberately does not cover (see harness_support.BENIGN_REJECTION_RE).
+# Counted separately so a self-healing race never fails the run.
+from harness_support import BENIGN_REJECTION_RE, classify_action_rejection
 
 
 async def run():
@@ -45,6 +56,7 @@ async def run():
 
     page_errors = []
     action_failures = []
+    benign_rejections = []
 
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(
@@ -80,9 +92,11 @@ async def run():
                     print(f"[STATE-RAW] {text[:200]}", flush=True)
                 return
             if "[DECIDEX_ACTION_RESULT]" in text and "ok=false" in text:
-                info = text.split("info=", 1)[1] if "info=" in text else ""
-                if not TRANSIENT_INFO_RE.search(info):
+                verdict = classify_action_rejection(text, TRANSIENT_INFO_RE)
+                if verdict == "hard":
                     action_failures.append(text)
+                elif verdict == "benign":
+                    benign_rejections.append(text)
                 print(f"[Console] {text}", flush=True)
                 return
             if (
@@ -167,6 +181,7 @@ async def run():
     print(f"  antes_seen={sorted(seen_antes)}")
     print(f"  page_errors={page_errors}")
     print(f"  action_failures={action_failures}")
+    print(f"  benign_rejections={len(benign_rejections)} (client self-recovers)")
 
     if page_errors:
         print("\n[FAIL] page errors were raised.", flush=True)

@@ -1,6 +1,9 @@
 import asyncio
 from playwright.async_api import async_playwright
 
+from harness_support import emit_probe_verdict, hard_action_failure_info
+from test_full_flow_soak import TRANSIENT_INFO_RE
+
 async def run():
     print("[Online Test] Launching Chromium to test https://balatro.mangoqwq.com ...", flush=True)
     import os
@@ -17,13 +20,20 @@ async def run():
         context = await browser.new_context()
         page = await context.new_page()
 
-        page.on('pageerror', lambda err: print(f"[PageError] {err}", flush=True))
+        page_errors = []
+        action_failures = []
+        page.on('pageerror', lambda err: (page_errors.append(str(err)), print(f"[PageError] {err}", flush=True)))
         page.on('dialog', lambda dialog: (print(f"[Dialog] {dialog.message}", flush=True), asyncio.create_task(dialog.dismiss())))
         page.on('console', lambda msg: print(f"[Console] {msg.text}", flush=True) if (
             (msg.type in ['error', 'warning'] or
              any(x in msg.text for x in ["[AutoPilot]", "[DecideX]", "arbitration", "Error"])) and
             "LONG DT" not in msg.text
         ) else None)
+
+        def on_console_probe(msg):
+            if hard_action_failure_info(msg.text, TRANSIENT_INFO_RE) is not None:
+                action_failures.append(msg.text[:220])
+        page.on('console', on_console_probe)
 
         # Route large 53.7MB balatro.love and 4.6MB love.wasm and app.js from local disk
         local_love_path = os.path.abspath("tools/balatro_wasm/web/balatro.love")
@@ -126,6 +136,25 @@ async def run():
 
         await context.close()
         await browser.close()
+
+        # Verdict: pageerror / hard action failure / progress milestone.
+        # The established bar is the full Small Blind -> Cash Out -> Shop ->
+        # Big Blind cycle (saw_cash_out + saw_shop + saw_big_blind).
+        failures = []
+        if page_errors:
+            failures.append(f"page errors ({len(page_errors)})")
+        if action_failures:
+            failures.append(f"hard action failures ({len(action_failures)})")
+        if not (saw_cash_out and saw_shop and saw_big_blind):
+            failures.append(
+                f"progress milestone not reached "
+                f"(cash_out={saw_cash_out}, shop={saw_shop}, big_blind={saw_big_blind})"
+            )
+        emit_probe_verdict(
+            "online_autopilot",
+            failures,
+            "verified complete loop: Small Blind -> Cash Out -> Shop -> Big Blind",
+        )
 
 if __name__ == "__main__":
     asyncio.run(run())

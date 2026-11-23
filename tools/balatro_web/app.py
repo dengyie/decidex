@@ -114,6 +114,9 @@ GAME_H = int(os.environ.get("BALATRO_GAME_H", "600"))
 # Operator credentials are injected by the deployment environment.
 WEB_USER = os.environ.get("BALATRO_WEB_USER", "")
 WEB_PASSWORD = os.environ.get("BALATRO_WEB_PASSWORD", "")
+# Cross-subdomain SSO cookie scope is deployment-specific; keep the historic
+# default for balatro.mangoqwq.com but let other deployments override it.
+COOKIE_DOMAIN = os.environ.get("DECIDEX_COOKIE_DOMAIN", ".mangoqwq.com")
 _ADVISORS: Dict[str, BalatroAdvisor] = {}
 _CACHE: Dict[str, Any] = {}
 _META_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
@@ -1160,14 +1163,14 @@ class Handler(BaseHTTPRequestHandler):
                 if _SSO_SECRET:
                     sso_token = _create_sso_token(str(req.get("user", "")))
                     cookies.append(
-                        f"{_SSO_COOKIE}={sso_token}; Path=/; Domain=.mangoqwq.com; HttpOnly; SameSite=Lax; Secure; Max-Age={_SESSION_TTL}"
+                        f"{_SSO_COOKIE}={sso_token}; Path=/; Domain={COOKIE_DOMAIN}; HttpOnly; SameSite=Lax; Secure; Max-Age={_SESSION_TTL}"
                     )
                 return self._json({"ok": True}, extra={"Set-Cookie": cookies})
             if path == "/api/logout":
                 _drop_session(_cookie_token(self.headers.get("Cookie")))
                 cookies_to_drop = [
                     f"{_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
-                    f"{_SSO_COOKIE}=; Path=/; Domain=.mangoqwq.com; HttpOnly; SameSite=Lax; Secure; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+                    f"{_SSO_COOKIE}=; Path=/; Domain={COOKIE_DOMAIN}; HttpOnly; SameSite=Lax; Secure; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
                 ]
                 return self._json({"ok": True}, extra={"Set-Cookie": cookies_to_drop})
             if path == "/api/recommend":

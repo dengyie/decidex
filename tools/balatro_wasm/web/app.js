@@ -506,16 +506,18 @@ end
   scheduleSaveSync();
   window.addEventListener("beforeunload", syncSaveFileSystem);
 
-  // Core persistent cache identifiers (versioned to ensure patch alignment)
-  // Cache key: balatro-asset-cache-v91 / decidex-balatro-core-v91
-  const EXPECTED_LOVE_SIZE = 56377703;
+  // Core persistent cache identifiers (versioned to ensure patch alignment);
+  // both cache names derive from ASSET_VERSION below, so bumping the version
+  // busts every cache automatically. Sizes are verified against the served
+  // assets on load (see EXPECTED_*_SIZE and tools/check_version_contract.py).
+  const EXPECTED_LOVE_SIZE = 56378672;
   const EXPECTED_WASM_SIZE = 4720510;
-  const ASSET_VERSION = "v165";
+  const ASSET_VERSION = "v166";
   const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;
   const IDB_DB_NAME = "decidex_balatro_store_v2";
   const IDB_STORE_NAME = "game_assets";
-  const ASSET_LOVE_URL = "balatro.love.zip?v=165";
-  const ASSET_WASM_URL = "love.wasm.bin?v=165";
+  const ASSET_LOVE_URL = "balatro.love.zip?v=166";
+  const ASSET_WASM_URL = "love.wasm.bin?v=166";
 
   // IndexedDB Storage Engine (immune to HTTP cache busters and query parameters)
   function openAssetDB() {
@@ -897,7 +899,7 @@ end
       } else {
         console.log("[DecideX] Loading love.js dynamically...");
         const script = document.createElement("script");
-        script.src = "love.js?v=165";
+        script.src = "love.js?v=166";
         script.onload = () => {
           if (typeof Love === "function") {
             try {
@@ -3463,9 +3465,6 @@ end
     return [];
   }
 
-  // Alias for backward compatibility
-  const selectTarotHandTargets = selectConsumableTargets;
-
   // Consumable Evaluation System
   function findBestConsumableToUse(state, skipSet) {
     const cons = state.consumables || [];
@@ -3875,6 +3874,9 @@ end
     const bestDiscard = findBestDiscards(state, currentRecommendation);
     const arbitration = arbitrateAction(state, currentRecommendation, bestDiscard);
     window._currentArbitration = arbitration;
+    // Stamp the snapshot with the current run epoch so the HUD one-click
+    // button can refuse a recommendation computed in a previous run (P3-3).
+    window._lastBestPlayEpoch = window.__decidexRunEpoch || 0;
     if (arbitration && arbitration.cards) {
       window._lastBestPlayCards = arbitration.cards;
     } else {
@@ -3959,7 +3961,7 @@ end
       </div>
       ${jokerBadgesHtml}
       <div class="rec-actions">
-        <button class="btn-act btn-play" onclick="executePlayAction(window._lastBestPlayCards)">▶️ 一键打出推荐牌 (${bestPlay.cards.length}张)</button>
+        <button class="btn-act btn-play" onclick="executeRecommendedPlay()">▶️ 一键打出推荐牌 (${bestPlay.cards.length}张)</button>
       </div>
     `;
     container.appendChild(playBox);
@@ -4036,7 +4038,16 @@ end
       const evalPath = "/tmp/balatro_eval.lua";
       try { FS.unlink(ackPath); } catch (_) {}
       FS.writeFile(evalPath, `-- DECIDEX_SEQ:${sequence}\n${luaCode}`);
-      const deadline = Date.now() + 2500;
+      // Success is ONLY the Lua-written `seq|ok` ack. The old weak-success
+      // paths (eval file gone for 80ms, or timeout with eval already
+      // consumed) resolved actions the Lua side may have never run or may
+      // still be running, so the caller treated a dead/stalled action as
+      // done and built the next decision on a stale state. Slow acks are
+      // still honoured: once eval is consumed the deadline extends to 10s
+      // total waiting for the ack; past that we reject with a transient
+      // "acknowledgement timed out" and the caller retries.
+      const baseDeadline = Date.now() + 2500;
+      let deadline = baseDeadline;
       let evalConsumedTime = null;
       const poll = () => {
         try {
@@ -4048,7 +4059,8 @@ end
           }
         } catch (_) {}
 
-        // Check if Lua has consumed and unlinked /tmp/balatro_eval.lua
+        // If Lua has consumed the eval file but the ack has not landed yet,
+        // extend the deadline once to 10s total instead of resolving early.
         let evalExists = true;
         try {
           evalExists = FS.analyzePath(evalPath).exists;
@@ -4056,13 +4068,11 @@ end
         if (!evalExists) {
           if (!evalConsumedTime) {
             evalConsumedTime = Date.now();
-          } else if (Date.now() - evalConsumedTime >= 80) {
-            return resolve(sequence);
+            deadline = baseDeadline + 7500;
           }
         }
 
         if (Date.now() >= deadline) {
-          if (!evalExists || evalConsumedTime) return resolve(sequence);
           return reject(new Error(`Lua ${label} acknowledgement timed out`));
         }
         setTimeout(poll, 40);
@@ -4093,6 +4103,25 @@ end
   }
 
   // Programmatic execution via serialized Emscripten virtual FS mailbox
+  // HUD one-click entry with epoch validation (P3-3): a recommendation
+  // computed in a previous run must never be dispatched — the run-epoch edge
+  // already nulls the cached artifacts, and this re-check guards against the
+  // button being clicked in the same tick the epoch advanced. On mismatch the
+  // stale cards are dropped and the caller is told to wait for the next
+  // snapshot's fresh analysis.
+  window.executeRecommendedPlay = function () {
+    const snapshotEpoch = window._lastBestPlayEpoch;
+    const currentEpoch = window.__decidexRunEpoch || 0;
+    if (snapshotEpoch !== undefined && snapshotEpoch !== currentEpoch) {
+      console.warn(`[DecideX] Recommendation stale (snapshot epoch ${snapshotEpoch} != run epoch ${currentEpoch}); discarding`);
+      window._lastBestPlayCards = null;
+      window._currentArbitration = null;
+      reportActionDispatchFailure("play", new Error("recommendation from a previous run; waiting for fresh analysis"), null);
+      return Promise.resolve(false);
+    }
+    return window.executePlayAction(window._lastBestPlayCards);
+  };
+
   window.executePlayAction = function (cards) {
     if (!window.Module || !window.Module.FS) return unavailableAction("play");
     const st = currentGameState || window._lastDecidexState;
@@ -4527,8 +4556,32 @@ end
       // is fine, the client's view is one step behind. Treating it as a hard
       // failure used to burn the 12-strike budget and auto-pause the run.
       const isStateMismatch = /not in (BLIND_SELECT|SHOP|ROUND_EVAL|SELECTING_HAND|HAND_PLAYED|new_round)/i.test(errStr);
+      // "use_card failed" is deliberately NOT transient here: the vanilla
+      // crash behind it ("interval is empty" on an empty hand) is a real
+      // broken decision the caller must see, not a readiness gate. Card-level
+      // dedupe ("duplicate ... in progress") is handled separately below.
       const isTransient = isStateMismatch ||
-        /not ready|animating|debounced|in progress|busy|locked|waiting|already in play|blocks play|slots full|pack card not found|no pack_cards|not in a pack state|no space to buy|use_card failed|no-op|not set|acknowledgement timed out/i.test(errStr);
+        /not ready|animating|debounced|in progress|busy|locked|waiting|already in play|blocks play|slots full|pack card not found|no pack_cards|not in a pack state|no space to buy|no-op|not set|acknowledgement timed out/i.test(errStr);
+      // Futile-retry circuit breaker — SHARED failure path, deliberately
+      // OUTSIDE the isTransient branch: B2 moved "use_card failed" out of the
+      // transient regex (an interval-is-empty crash must be visible), which
+      // silently excluded poisoned-pack crashes from the old in-branch
+      // breaker and let a pack be eaten card by card down to the 12-strike
+      // auto-pause. For select_pack_card this covers EVERY rejection class,
+      // not just slots-full: a poisoned pack (contents of the wrong set
+      // after an abandon race) makes the client pick cards whose vanilla use
+      // crashes and each crash still removes the card from the pack, so
+      // retrying forever eats the pack card by card (probe_diag_v110: 30s+
+      // of pure churn). A state mismatch is NOT the pack's fault and must
+      // not consume strikes.
+      if (action === "select_pack_card" && !isStateMismatch) {
+        this._packSelectFailStreak = (this._packSelectFailStreak || 0) + 1;
+        if (this._packSelectFailStreak >= 3) {
+          this._packSelectFailStreak = 0;
+          this._skipCurrentPack = true;
+          console.warn(`[AutoPilot] select_pack_card rejected 3x (${errStr.slice(0, 90)}); forcing pack leave`);
+        }
+      }
       if (isTransient) {
         console.log(`[AutoPilot] Dispatch transient wait for ${action}: ${errStr}`);
         // Clear the in-flight lock for EVERY action on a transient rejection,
@@ -4546,25 +4599,6 @@ end
         this._busyTimestamp = null;
         this.pendingState = null;
         this.busy = false;
-        // Futile-retry circuit breaker: the same action rejected transiently
-        // three times in a row is not "waiting for readiness" anymore, it is
-        // a decision the game will keep refusing. For select_pack_card this
-        // covers EVERY rejection class, not just slots-full: a poisoned pack
-        // (contents of the wrong set after an abandon race) makes the client
-        // pick cards whose vanilla use crashes ("use_card failed: ...
-        // interval is empty" — Grim/Incantation on an empty hand) and each
-        // crash still removes the card from the pack, so retrying forever
-        // eats the pack card by card (probe_diag_v110: 30s+ of pure churn;
-        // the v110 smoke's 83s TAROT_PACK stall). A state mismatch is NOT
-        // the pack's fault and must not consume strikes.
-        if (action === "select_pack_card" && !isStateMismatch) {
-          this._packSelectFailStreak = (this._packSelectFailStreak || 0) + 1;
-          if (this._packSelectFailStreak >= 3) {
-            this._packSelectFailStreak = 0;
-            this._skipCurrentPack = true;
-            console.warn(`[AutoPilot] select_pack_card rejected 3x (${errStr.slice(0, 90)}); forcing pack leave`);
-          }
-        }
         // v136 use_card rejection breaker. The bridge marks a card BEFORE
         // running vanilla use_card, so "duplicate ... in progress" means the
         // effect is already queued — retrying that card can never help and
@@ -4655,6 +4689,26 @@ end
       if (stateChanged) {
         this._actionFailureStreak = 0;
       }
+      // Run-epoch tracking: a new run (MENU/SPLASH edge into an in-run state,
+      // or any re-entry into MENU/SPLASH after one) invalidates every cached
+      // decision artifact computed against the PREVIOUS run — findBestPlays'
+      // memo and the HUD's stored arbitration/recommended cards would
+      // otherwise survive into the fresh run and offer cards that no longer
+      // exist (P3-3). The cache itself is signature-keyed, but the signature
+      // does not include run identity, so two runs with an identical opening
+      // hand collide.
+      const isMenu = sname === "MENU" || sname === "SPLASH";
+      const wasMenu = this._epochWasMenu;
+      this._epochWasMenu = isMenu;
+      if ((wasMenu && !isMenu && this._epochWasInRun) || (!wasMenu && isMenu && this._epochWasInRun)) {
+        window.__decidexRunEpoch = (window.__decidexRunEpoch || 0) + 1;
+        if (findBestPlays._cache) findBestPlays._cache.sig = null;
+        window._currentArbitration = null;
+        window._lastBestPlayCards = null;
+        this._lastPlayPrediction = null;
+        console.log(`[AutoPilot] Run epoch -> ${window.__decidexRunEpoch}; decision caches invalidated`);
+      }
+      if (sname && sname !== "MENU" && sname !== "SPLASH") this._epochWasInRun = true;
       if (!this.enabled) return;
 
       // A successful skip_blind advances blind_on_deck (Small -> Big) while

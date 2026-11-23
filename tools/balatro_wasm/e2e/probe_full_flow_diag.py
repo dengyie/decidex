@@ -32,6 +32,7 @@ from harness_support import (
     TERMINAL_LATCH_SCRIPT,
     positive_finite_float,
     positive_viewport,
+    effective_stall_budget,
     scale_dwell_budget,
 )
 
@@ -91,7 +92,6 @@ DWELL_BUDGETS = {
     "BUFFOON_PACK": 75,
 }
 DEFAULT_BUDGET = 75
-STALL_GRACE = 1.1
 
 JS_DIAG = """() => {
   const ap = window.AutoPilot || {};
@@ -263,11 +263,14 @@ async def run():
                 except Exception as e:
                     print(f"[Probe:JS] diag failed: {e}", flush=True)
             dwell = time.monotonic() - probe.state_since
-            # Oversized hands make healthy states legitimately slower; scale the
-            # budget so a big-hand round is not reported as a wedge.
+            # Stall decision uses the flat 1.3x grace only; the hand-scale
+            # stretch is observability-only (a 49-card hand used to silently
+            # double every stall budget and hide real wedges).
             hand_n = len(st.get("hand") or []) if isinstance(st.get("hand"), list) else 0
-            budget = scale_dwell_budget(DWELL_BUDGETS.get(sname, DEFAULT_BUDGET), hand_n)
-            if dwell > budget * STALL_GRACE and not probe.stall_dumped:
+            base_budget = DWELL_BUDGETS.get(sname, DEFAULT_BUDGET)
+            budget = effective_stall_budget(base_budget)
+            slow_budget = scale_dwell_budget(base_budget, hand_n)
+            if dwell > budget and not probe.stall_dumped:
                 probe.stall_dumped = True
                 await probe.on_stall(page, sname, dwell, budget, t)
             if probe.games >= MIN_GAMES:

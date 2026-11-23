@@ -4,6 +4,8 @@ Blind Selection and Tag Skipping Evaluation Engine for Balatro DecideX.
 Models the mathematical expected value (EV) tradeoff between:
   1. Selecting the blind (earning prize money, hands left bonus, interest, and visiting the Shop).
   2. Skipping the blind (earning the Tag reward, but forfeiting round cash and shop visit).
+
+本模块用于 replay/分析；线上运行的策略实现位于 tools/balatro_wasm/web/app.js，服务端 advisor 经鉴权 /api/execute auto 通道仍可被调用执行。
 """
 
 from __future__ import annotations

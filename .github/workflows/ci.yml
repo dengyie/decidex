@@ -39,6 +39,10 @@ jobs:
         run: |
           python tools/balatro_wasm/serve.py --check
 
+      - name: Cross-check version contract (app.js / index.html / manifest / version.json)
+        run: |
+          python tools/check_version_contract.py
+
 
   deploy:
     # External production verification: the runner probes the public site
@@ -65,43 +69,8 @@ jobs:
         run: |
           set -euo pipefail
           BASE="https://balatro.mangoqwq.com"
-
-          # The version triple is the release contract: whatever this
-          # commit's app.js/index.html advertise is what production must
-          # serve. Parse it from the checked-out sources so a wrong or
-          # stale deployment fails here with a concrete diff.
-          LOCAL_VER=$(grep -oE 'ASSET_VERSION = "v[0-9]+"' \
-            tools/balatro_wasm/web/app.js | grep -oE 'v[0-9]+')
-          LOCAL_LOVE_SIZE=$(grep -oE 'EXPECTED_LOVE_SIZE = [0-9]+' \
-            tools/balatro_wasm/web/app.js | grep -oE '[0-9]+')
-          LOCAL_WASM_SIZE=$(grep -oE 'EXPECTED_WASM_SIZE = [0-9]+' \
-            tools/balatro_wasm/web/app.js | grep -oE '[0-9]+')
-          echo "local contract: $LOCAL_VER love=$LOCAL_LOVE_SIZE wasm=$LOCAL_WASM_SIZE"
-
-          # 1. Service health (public).
-          curl -fsS --max-time 30 "$BASE/api/health" | grep -q '"ok": *true' \
-            || { echo "❌ /api/health not ok"; exit 1; }
-          echo "✅ /api/health ok"
-
-          # 2. /play advertises the same version.
-          SERVED=$(curl -fsS --max-time 30 "$BASE/play" | grep -oE 'app.js\?v=[0-9]+' | head -1)
-          EXPECTED="app.js?v=${LOCAL_VER#v}"
-          echo "served: $SERVED (expected: $EXPECTED)"
-          [ "$SERVED" = "$EXPECTED" ] \
-            || { echo "❌ /play serves $SERVED, expected $EXPECTED"; exit 1; }
-          echo "✅ /play advertises $LOCAL_VER"
-
-          # 3. Asset sizes match this commit's expectations (HEAD, no
-          #    download — reconciler lag beyond 15 min shows up here).
-          LOVE_LEN=$(curl -fsSI --max-time 30 "$BASE/balatro.love.zip?$LOCAL_VER" \
-            | tr -d '\r' | grep -i '^content-length:' | grep -oE '[0-9]+')
-          WASM_LEN=$(curl -fsSI --max-time 30 "$BASE/love.wasm.bin?$LOCAL_VER" \
-            | tr -d '\r' | grep -i '^content-length:' | grep -oE '[0-9]+')
-          echo "served: love=$LOVE_LEN wasm=$WASM_LEN"
-          [ "$LOVE_LEN" = "$LOCAL_LOVE_SIZE" ] \
-            || { echo "❌ love.zip is $LOVE_LEN, expected $LOCAL_LOVE_SIZE"; exit 1; }
-          [ "$WASM_LEN" = "$LOCAL_WASM_SIZE" ] \
-            || { echo "❌ love.wasm.bin is $WASM_LEN, expected $LOCAL_WASM_SIZE"; exit 1; }
-          echo "✅ asset sizes match (reconciler has caught up)"
-
-          echo "✅ DecideX production verification completed successfully!"
+          # The pull-side reconciler on Huawei deploys up to 15 min after
+          # push; give it one full period + margin before declaring the
+          # version check failed (30s poll granularity inside the script).
+          export PRODUCTION_VERIFY_WAIT_SECONDS=1200
+          bash tools/ci/production_verify.sh "$BASE"

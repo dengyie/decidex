@@ -10,6 +10,8 @@ Public surface mirrors decidex.hearthstone:
 
 Compliance: read-only. The advisor recommends; it never actuates the game
 client. The bridge mod (tools/balatro_bridge) only *observes* and dumps state.
+
+本模块用于 replay/分析；线上运行的策略实现位于 tools/balatro_wasm/web/app.js，服务端 advisor 经鉴权 /api/execute auto 通道仍可被调用执行。
 """
 
 from .advisor import BalatroAdvisor, Recommendation, build_evidence

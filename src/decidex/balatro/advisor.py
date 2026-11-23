@@ -8,6 +8,8 @@ Standard DecideX pipeline enhanced with Four Pillars Synergy & Hazard Constraint
   4. Model      -> DecisionEngine.step: Evaluates criteria and returns calibrated verdict.
   5. Guard      -> CalibratedDecisionGuard: Enforces legality and confidence thresholds.
   6. Fallback   -> rules.choose_safe_default: Deterministic synergy-aware safe default policy.
+
+本模块用于 replay/分析；线上运行的策略实现位于 tools/balatro_wasm/web/app.js，服务端 advisor 经鉴权 /api/execute auto 通道仍可被调用执行。
 """
 
 from __future__ import annotations

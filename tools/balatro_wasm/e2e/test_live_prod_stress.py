@@ -3,6 +3,9 @@ import os
 from pathlib import Path
 from playwright.async_api import async_playwright
 
+from harness_support import emit_probe_verdict, hard_action_failure_info
+from test_full_flow_soak import TRANSIENT_INFO_RE
+
 SCREENSHOT_DIR = Path("tools/balatro_wasm/screenshots")
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -21,13 +24,21 @@ async def run():
         context = await browser.new_context(viewport={'width': 1280, 'height': 720})
         page = await context.new_page()
 
-        page.on('pageerror', lambda err: print(f"[PageError] {err}", flush=True))
+        page_errors = []
+        action_failures = []
+        page.on('pageerror', lambda err: (page_errors.append(str(err)), print(f"[PageError] {err}", flush=True)))
         page.on('dialog', lambda dialog: (print(f"[Dialog] {dialog.message}", flush=True), asyncio.create_task(dialog.dismiss())))
         page.on('console', lambda msg: print(f"[Console] {msg.text}", flush=True) if (
             (msg.type in ['error', 'warning'] or
              any(x in msg.text for x in ["[AutoPilot]", "[DecideX]", "Action", "cashed out", "toggled shop", "bought"])) and
             "LONG DT" not in msg.text
         ) else None)
+
+        def on_console_probe(msg):
+            info = hard_action_failure_info(msg.text, TRANSIENT_INFO_RE)
+            if info is not None:
+                action_failures.append(msg.text[:220])
+        page.on('console', on_console_probe)
 
         print("[Live Prod Test] Navigating to https://balatro.mangoqwq.com ...", flush=True)
         await page.goto("https://balatro.mangoqwq.com", wait_until="domcontentloaded", timeout=45000)
@@ -133,6 +144,23 @@ async def run():
         await context.close()
         await browser.close()
         print("[Live Prod Test] Done. Screenshots saved in:", SCREENSHOT_DIR, flush=True)
+
+        # Verdict: pageerror / hard action failure / progress milestone.
+        # The original milestone is reaching Round 2 gameplay ("round2_hand"
+        # screenshot captured); a full break-loop success is preferred but
+        # the screenshot milestone is the established bar for this probe.
+        failures = []
+        if page_errors:
+            failures.append(f"page errors ({len(page_errors)})")
+        if action_failures:
+            failures.append(f"hard action failures ({len(action_failures)})")
+        if "round2_hand" not in screenshot_taken:
+            failures.append("progress milestone not reached (Round 2 hand never seen)")
+        emit_probe_verdict(
+            "live_prod_stress",
+            failures,
+            f"multi-round live gameplay verified, screenshots={sorted(screenshot_taken)}",
+        )
 
 if __name__ == "__main__":
     asyncio.run(run())

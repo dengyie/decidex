@@ -8,6 +8,8 @@ Action id conventions (stable, greppable):
   buy:<item_type>:<idx>   buy shop item (jokers, boosters, vouchers)
   toggle_shop             exit shop and proceed to next round
   reorder:<i0>-<i1>-...   reorder jokers for optimal multiplier sequence
+
+本模块用于 replay/分析；线上运行的策略实现位于 tools/balatro_wasm/web/app.js，服务端 advisor 经鉴权 /api/execute auto 通道仍可被调用执行。
 """
 
 from __future__ import annotations
@@ -203,9 +205,6 @@ def select_consumable_targets(
 
     return []
 
-
-# Maintain backward compatibility alias
-select_tarot_targets = select_consumable_targets
 
 VOUCHER_BASE_SCORES: Dict[str, float] = {
     "Antimatter": 95.0,

@@ -2,6 +2,9 @@ import asyncio
 from pathlib import Path
 from playwright.async_api import async_playwright
 
+from harness_support import emit_probe_verdict, hard_action_failure_info
+from test_full_flow_soak import TRANSIENT_INFO_RE
+
 SCREENSHOT_DIR = Path("tools/balatro_wasm/screenshots")
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -20,10 +23,14 @@ async def run():
         context = await browser.new_context(viewport={'width': 1280, 'height': 720})
         page = await context.new_page()
 
-        page.on('pageerror', lambda err: print(f"[PageError] {err}", flush=True))
+        page_errors = []
+        action_failures = []
+        page.on('pageerror', lambda err: (page_errors.append(str(err)), print(f"[PageError] {err}", flush=True)))
         page.on('dialog', lambda dialog: (print(f"[Dialog] {dialog.message}", flush=True), asyncio.create_task(dialog.dismiss())))
         def on_console(msg):
             t = msg.text
+            if hard_action_failure_info(t, TRANSIENT_INFO_RE) is not None:
+                action_failures.append(t[:220])
             if any(skip in t for skip in ['LONG DT', 'AudioContext', 'GL_INVALID', 'favicon']):
                 return
             if 'CRITICAL' in t or 'ERROR' in t or 'AutoPilot' in t or 'DECIDEX_ACTION_RESULT' in t or 'DECIDEX_STATE' in t:
@@ -101,6 +108,22 @@ async def run():
         await context.close()
         await browser.close()
         print(f"[Live Prod Boss Stress Test] Finished. Max Ante: {max_ante}, Max Round: {max_round}", flush=True)
+
+        # Verdict: pageerror / hard action failure / progress milestone.
+        # The established bar for this probe is reaching the Boss Blind
+        # (Round 3 SELECTING_HAND, evidenced by boss_blind_reached.png).
+        failures = []
+        if page_errors:
+            failures.append(f"page errors ({len(page_errors)})")
+        if action_failures:
+            failures.append(f"hard action failures ({len(action_failures)})")
+        if max_round < 3:
+            failures.append(f"progress milestone not reached (max_round={max_round}, need >= 3)")
+        emit_probe_verdict(
+            "live_prod_boss_stress",
+            failures,
+            f"reached Ante {max_ante} Round {max_round} (Boss Blind path exercised)",
+        )
 
 if __name__ == "__main__":
     asyncio.run(run())

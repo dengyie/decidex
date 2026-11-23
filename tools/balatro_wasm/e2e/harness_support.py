@@ -41,9 +41,98 @@ def scale_dwell_budget(budget: float, hand_size: int) -> float:
     past ~12 cards a healthy state can legitimately outlive the normal budget.
     Without this, an endless run with a 49-card hand reports "slow" as
     "wedged" (observed: 3 false stalls in one 2-game soak).
+
+    Observability-only since the stall-budget dedup: hand-scale stretching
+    multiplied the false-negative risk (a 49-card hand doubled every budget,
+    so a real stall had to sit for 60s before being reported). Use
+    effective_stall_budget for stall *decisions*; keep this only for
+    "slow but healthy" reporting.
     """
     extra = max(0, int(hand_size or 0) - 12)
     return min(budget * 2.0, budget * (1.0 + extra * 0.04))
+
+
+# Fixed 30% grace on top of the base dwell budget for stall decisions.
+# The old path multiplied the base budget by a hand-size factor AND a grace
+# factor, so deep-ante 49-card hands got a 2.2x inflated budget and a true
+# wedge sat undetected for minutes. The base budgets already encode the
+# worst observed *healthy* dwell per state (46-80s); a flat 30% grace covers
+# timer jitter without scaling with hand count.
+STALL_GRACE_FACTOR = 1.3
+
+
+def effective_stall_budget(budget: float) -> float:
+    """Stall-decision budget: base budget * fixed 1.3 grace, no hand scaling.
+
+    `budget` is the per-state DWELL_BUDGETS entry (0 allowed -> 0: a zero
+    budget wedges immediately, grace cannot revive it).
+    """
+    return round(max(0.0, float(budget)) * STALL_GRACE_FACTOR)
+
+
+def hard_action_failure_info(text: str, transient_re) -> str | None:
+    """Return the info payload if a DECIDEX_ACTION_RESULT line is a hard failure.
+
+    `transient_re` is the caller's transient classifier (the soak's
+    TRANSIENT_INFO_RE, mirrored from app.js). Rejections it matches are
+    ignored exactly as the soak classifier ignores them; bridge-emitted
+    benign rejections (BENIGN_REJECTION_RE) are ignored the way the JS
+    client ignores them; everything else with ok=false is a real action
+    failure that must fail the probe.
+    """
+    if classify_action_rejection(text, transient_re) == "hard":
+        return text.split("info=", 1)[1].strip() if "info=" in text else ""
+    return None
+
+
+# Bridge-emitted rejections the JS client recovers from on its own but that
+# its isTransient regex deliberately does NOT cover (app.js handles them in
+# the adjacent benign-notice branch of onActionDispatchFailure / the
+# log-only onActionResult path). The soak used to classify them as hard
+# failures, contradicting the self-recovery evidence in its own comments
+# (soak3: "card not found at index ... game kept advancing 30s afterwards").
+# These are recorded separately as benign rejections, never as verdict
+# failures.
+BENIGN_REJECTION_RE = re.compile(
+    r"card not found at index \d+"          # buy/use retry racing area rebuild
+    r"|blind already selected \(animating\)"  # skip_blind racing select animation
+    r"|already in run",                       # start_run on an already-running run
+    re.IGNORECASE,
+)
+
+
+def classify_action_rejection(text: str, transient_re) -> str:
+    """Classify a console line that may be a DECIDEX_ACTION_RESULT rejection.
+
+    Returns one of:
+      "none"     — not an ok=false action result
+      "transient" — matches the JS-mirrored transient classifier
+      "benign"   — bridge-emitted, client self-recovers (BENIGN_REJECTION_RE)
+      "hard"     — everything else: a real failure for the verdict
+    """
+    if "[DECIDEX_ACTION_RESULT]" not in text or "ok=false" not in text:
+        return "none"
+    info = text.split("info=", 1)[1] if "info=" in text else ""
+    if transient_re.search(info):
+        return "transient"
+    if BENIGN_REJECTION_RE.search(info):
+        return "benign"
+    return "hard"
+
+
+def emit_probe_verdict(name: str, failures: list[str], pass_detail: str) -> None:
+    """Print one PASS/FAIL line and exit 1 on any accumulated failure.
+
+    Mirrors test_full_flow_soak.py's verdict rollup. Print-only probes used
+    to exit 0 even when a pageerror or a hard action failure was printed;
+    routing their verdict through here makes the exit code honest. Callers
+    accumulate human-readable reasons (page errors, hard action failures,
+    unmet progress milestones) and hand them here.
+    """
+    if failures:
+        print(f"\n[FAIL] {name}: {', '.join(failures)}", flush=True)
+        raise SystemExit(1)
+    print(f"\n[PASS] {name}: {pass_detail}", flush=True)
 
 
 # Install after the page's app.js has defined onBalatroStateUpdate and before

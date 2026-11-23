@@ -2,6 +2,9 @@ import asyncio
 import os
 from playwright.async_api import async_playwright
 
+from harness_support import emit_probe_verdict, hard_action_failure_info
+from test_full_flow_soak import TRANSIENT_INFO_RE
+
 # Some workstations resolve public hostnames through a TUN-mode proxy
 # (Clash Verge fake-IP DNS). curl honours it, Chromium does not, so the
 # browser needs the mixed proxy passed explicitly.
@@ -28,13 +31,20 @@ async def run():
         context = await p.chromium.launch_persistent_context(**launch_kwargs)
         page = context.pages[0] if context.pages else await context.new_page()
 
-        page.on('pageerror', lambda err: print(f"[PageError] {err}", flush=True))
+        page_errors = []
+        action_failures = []
+        page.on('pageerror', lambda err: (page_errors.append(str(err)), print(f"[PageError] {err}", flush=True)))
         page.on('dialog', lambda dialog: (print(f"[Dialog] {dialog.message}", flush=True), asyncio.create_task(dialog.dismiss())))
         page.on('console', lambda msg: print(f"[Console] {msg.text}", flush=True) if (
             (msg.type in ['error', 'warning'] or
              any(x in msg.text for x in ["[AutoPilot]", "[DecideX]", "Action", "cashed out", "toggled shop"])) and
             "LONG DT" not in msg.text
         ) else None)
+
+        def on_console_probe(msg):
+            if hard_action_failure_info(msg.text, TRANSIENT_INFO_RE) is not None:
+                action_failures.append(msg.text[:220])
+        page.on('console', on_console_probe)
 
         print("[Real Online Test] Navigating to https://balatro.mangoqwq.com ...", flush=True)
         await page.goto("https://balatro.mangoqwq.com", wait_until="domcontentloaded", timeout=45000)
@@ -109,6 +119,26 @@ async def run():
             print(f"\n[SUMMARY] saw_round_eval={saw_round_eval}, saw_cash_out={saw_cash_out}, saw_shop={saw_shop}, saw_cycle_back={saw_cycle_back}", flush=True)
 
         await context.close()
+
+        # Verdict: pageerror / hard action failure / progress milestone.
+        # The established bar is the full genuine-production cycle:
+        # Play -> Round Eval -> Shop -> Next Blind.
+        failures = []
+        if page_errors:
+            failures.append(f"page errors ({len(page_errors)})")
+        if action_failures:
+            failures.append(f"hard action failures ({len(action_failures)})")
+        if not saw_cycle_back:
+            failures.append(
+                f"progress milestone not reached "
+                f"(round_eval={saw_round_eval}, cash_out={saw_cash_out}, "
+                f"shop={saw_shop}, cycle_back={saw_cycle_back})"
+            )
+        emit_probe_verdict(
+            "real_online_autopilot",
+            failures,
+            "verified genuine production cycle: Play -> Round Eval -> Shop -> Next Blind",
+        )
 
 if __name__ == "__main__":
     asyncio.run(run())

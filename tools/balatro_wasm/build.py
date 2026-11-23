@@ -66,16 +66,49 @@ def check_bridge_copies_in_sync() -> None:
         )
 
 
+def _apply(content: str, old: str, new: str, label: str) -> str:
+    """Asserted str.replace: a needle that matches nothing is a broken patch.
+
+    Every str.replace in the patch functions used to apply silently: when an
+    upstream Balatro update changed the surrounding text, the patch simply
+    stopped landing and the crash it guarded came back in production with no
+    build-time signal. Raise instead.
+    """
+    if old not in content:
+        raise RuntimeError(f"build patch '{label}': needle not found in source "
+                           f"(upstream changed?): {old[:120]!r}")
+    return content.replace(old, new, 1)
+
+
+def _apply_once(content: str, old: str, new: str, label: str) -> str:
+    """Idempotent _apply: skip when the patched text is already in place."""
+    if new in content:
+        return content
+    return _apply(content, old, new, label)
+
+
+def _subn(content: str, pattern: str, repl, label: str, count: int = 0,
+          flags: int = 0) -> str:
+    """Asserted re.subn: a pattern that matches nothing is a broken patch."""
+    new_content, n = re.subn(pattern, repl, content, count=count, flags=flags)
+    if n == 0:
+        raise RuntimeError(f"build patch '{label}': regex matched nothing "
+                           f"(upstream changed?): {pattern[:120]!r}")
+    return new_content
+
+
 def patch_hologram_shader(content: str) -> str:
     """
     WebGL 1.0 (GLSL ES 1.00) requires constant loop conditions.
     Replace dynamic variable bounds with constant integers.
     """
     pattern_i = r"for\s*\(\s*int\s+i\s*=\s*-glow_samples\s*;\s*i\s*<=\s*glow_samples\s*;\s*\+\+i\s*\)"
-    content = re.sub(pattern_i, "for (int i = -4; i <= 4; ++i)", content)
+    content = _subn(content, pattern_i, "for (int i = -4; i <= 4; ++i)",
+                    "hologram_shader:i-loop")
 
     pattern_j = r"for\s*\(\s*int\s+j\s*=\s*-glow_samples\s*;\s*j\s*<=\s*glow_samples\s*;\s*\+\+j\s*\)"
-    content = re.sub(pattern_j, "for (int j = -4; j <= 4; ++j)", content)
+    content = _subn(content, pattern_j, "for (int j = -4; j <= 4; ++j)",
+                    "hologram_shader:j-loop")
     return content
 
 
@@ -87,10 +120,14 @@ def patch_globals(content: str) -> str:
     synchronous file deflate serialization and modal tutorial popups in browser.
     Force screenmode = 'Windowed' to completely disable fullscreen.
     """
-    content = content.replace("self.F_SOUND_THREAD = true", "self.F_SOUND_THREAD = false")
-    content = content.replace("self.F_SKIP_TUTORIAL = false", "self.F_SKIP_TUTORIAL = true")
-    content = content.replace("self.F_NO_SAVING = false", "self.F_NO_SAVING = true")
-    content = content.replace("screenmode = 'Borderless',", "screenmode = 'Windowed',")
+    content = _apply(content, "self.F_SOUND_THREAD = true",
+                     "self.F_SOUND_THREAD = false", "globals:F_SOUND_THREAD")
+    content = _apply(content, "self.F_SKIP_TUTORIAL = false",
+                     "self.F_SKIP_TUTORIAL = true", "globals:F_SKIP_TUTORIAL")
+    content = _apply(content, "self.F_NO_SAVING = false",
+                     "self.F_NO_SAVING = true", "globals:F_NO_SAVING")
+    content = _apply(content, "screenmode = 'Borderless',",
+                     "screenmode = 'Windowed',", "globals:screenmode")
     return content
 
 
@@ -112,31 +149,6 @@ def patch_main(content: str, require_update_hook: bool = True) -> str:
     if 'require "web_patches"' not in content:
         content = prefix + content
 
-    content = content.replace(
-        'require "challenges"',
-        'require "challenges"\nprint("[Balatro Trace] 2. all modules required, G.SEED=" .. tostring(G and G.SEED))'
-    )
-    content = content.replace(
-        'function love.run()',
-        'print("[Balatro Trace] 3. love.run registering")\nfunction love.run()'
-    )
-    content = content.replace(
-        'function love.load()',
-        'function love.load()\nprint("[Balatro Trace] 4. love.load started")'
-    )
-    content = content.replace(
-        'G:start_up()',
-        'print("[Balatro Trace] 5. calling G:start_up()")\nG:start_up()\nprint("[Balatro Trace] 6. G:start_up() completed")'
-    )
-    # The DecideX bridge must observe the game's state AFTER the game has
-    # processed the frame. Running it before G:update makes every emitted
-    # snapshot one frame stale: the bridge reads G.STATE before the game
-    # advances it, so a transition (e.g. SHOP -> BLIND_SELECT scheduled via
-    # an E_MANAGER 'after' event with delay 0.5) is reported late or missed
-    # entirely. The client then keeps acting on a stale snapshot and its
-    # action is rejected by the bridge's state guard ("not in BLIND_SELECT"),
-    # which used to end in a 12-strike auto-pause that halted the whole run.
-    #
     # The match is deliberately regex-based and whitespace tolerant: the
     # upstream main.lua indents G:update(dt) with spaces, and a literal
     # "\tG:update(dt)\nend" needle silently matches nothing (which leaves
@@ -149,6 +161,55 @@ def patch_main(content: str, require_update_hook: bool = True) -> str:
     if not update_fn:
         if require_update_hook:
             raise RuntimeError("patch_main: could not locate love.update in main.lua")
+        # Unit-test fixtures may omit love.update entirely; without it there
+        # is no hook to place and none of the trace needles are required.
+        return content
+
+    content = _apply(
+        content,
+        'require "challenges"',
+        'require "challenges"\nprint("[Balatro Trace] 2. all modules required, G.SEED=" .. tostring(G and G.SEED))',
+        "main:trace-2",
+    )
+    content = _apply(
+        content,
+        'function love.run()',
+        'print("[Balatro Trace] 3. love.run registering")\nfunction love.run()',
+        "main:trace-3",
+    )
+    content = _apply(
+        content,
+        'function love.load()',
+        'function love.load()\nprint("[Balatro Trace] 4. love.load started")',
+        "main:trace-4",
+    )
+    content = _apply(
+        content,
+        'G:start_up()',
+        'print("[Balatro Trace] 5. calling G:start_up()")\nG:start_up()\nprint("[Balatro Trace] 6. G:start_up() completed")',
+        "main:trace-5",
+    )
+    # The trace inserts above shifted every offset in `content`, so the
+    # update_fn match must be RE-taken here: splicing the DECIDEX_STEP hook
+    # with stale match offsets cut the splice window out of the middle of
+    # the file (the built main.lua started love.quit as "ction love.quit()"
+    # and mangled the comment before love.update -- a Syntax error at boot).
+    # The DecideX bridge must observe the game's state AFTER the game has
+    # processed the frame. Running it before G:update makes every emitted
+    # snapshot one frame stale: the bridge reads G.STATE before the game
+    # advances it, so a transition (e.g. SHOP -> BLIND_SELECT scheduled via
+    # an E_MANAGER 'after' event with delay 0.5) is reported late or missed
+    # entirely. The client then keeps acting on a stale snapshot and its
+    # action is rejected by the bridge's state guard ("not in BLIND_SELECT"),
+    # which used to end in a 12-strike auto-pause that halted the whole run.
+    update_fn = re.search(
+        r"(function\s+love\.update\s*\(\s*dt\s*\).*?)(?=\nfunction\s|\Z)",
+        content,
+        re.DOTALL,
+    )
+    if not update_fn:
+        if require_update_hook:
+            raise RuntimeError("patch_main: could not locate love.update in main.lua (post-trace)")
         return content
     body = update_fn.group(1)
     if "DECIDEX_STEP" in body:
@@ -189,9 +250,11 @@ def patch_main(content: str, require_update_hook: bool = True) -> str:
     content = content[: update_fn.start(1)] + patched_body + content[update_fn.end(1) :]
 
     # Completely bypass luasteam / Steamworks init on web
-    content = content.replace(
+    content = _apply(
+        content,
         "if os == 'OS X' or os == 'Windows' then",
-        "if false and (os == 'OS X' or os == 'Windows') then"
+        "if false and (os == 'OS X' or os == 'Windows') then",
+        "main:luasteam-bypass",
     )
 
     # Wrap love.run's inner per-frame loop in xpcall so Emscripten main loop never aborts on Lua errors
@@ -205,29 +268,32 @@ def patch_main(content: str, require_update_hook: bool = True) -> str:
         "\tlocal __main_step = function()\n"
         "\t\trun_time = love.timer.getTime()\n"
     )
-    if orig_run_pattern in content:
-        content = content.replace(orig_run_pattern, new_run_step)
-        orig_end = (
-            "\t\trun_time = math.min(love.timer.getTime() - run_time, 0.1)\n"
-            "\t\tG.FPS_CAP = G.FPS_CAP or 500\n"
-            "\t\tif run_time < 1./G.FPS_CAP then love.timer.sleep(1./G.FPS_CAP - run_time) end\n"
-            "\tend\n"
-            "end\n"
-        )
-        new_end = (
-            "\t\trun_time = math.min(love.timer.getTime() - run_time, 0.1)\n"
-            "\t\tG.FPS_CAP = G.FPS_CAP or 500\n"
-            "\t\tif run_time < 1./G.FPS_CAP then love.timer.sleep(1./G.FPS_CAP - run_time) end\n"
-            "\tend\n"
-            "\treturn function()\n"
-            "\t\txpcall(__main_step, function(msg)\n"
-            "\t\t\tprint('[BALATRO FRAME ERROR]: ' .. tostring(msg))\n"
-            "\t\t\tprint(debug.traceback())\n"
-            "\t\tend)\n"
-            "\tend\n"
-            "end\n"
-        )
-        content = content.replace(orig_end, new_end)
+    # Fail loudly when the run-loop prologue is missing: skipping this wrap
+    # silently removes the [BALATRO FRAME ERROR] containment and lets a Lua
+    # error abort the Emscripten main loop — the exact production failure
+    # class this whole hardening pass exists to prevent.
+    content = _apply(content, orig_run_pattern, new_run_step, "main:love-run-step")
+    orig_end = (
+        "\t\trun_time = math.min(love.timer.getTime() - run_time, 0.1)\n"
+        "\t\tG.FPS_CAP = G.FPS_CAP or 500\n"
+        "\t\tif run_time < 1./G.FPS_CAP then love.timer.sleep(1./G.FPS_CAP - run_time) end\n"
+        "\tend\n"
+        "end\n"
+    )
+    new_end = (
+        "\t\trun_time = math.min(love.timer.getTime() - run_time, 0.1)\n"
+        "\t\tG.FPS_CAP = G.FPS_CAP or 500\n"
+        "\t\tif run_time < 1./G.FPS_CAP then love.timer.sleep(1./G.FPS_CAP - run_time) end\n"
+        "\tend\n"
+        "\treturn function()\n"
+        "\t\txpcall(__main_step, function(msg)\n"
+        "\t\t\tprint('[BALATRO FRAME ERROR]: ' .. tostring(msg))\n"
+        "\t\t\tprint(debug.traceback())\n"
+        "\t\t\tend)\n"
+        "\tend\n"
+        "end\n"
+    )
+    content = _apply(content, orig_end, new_end, "main:love-run-xpcall")
 
     # Patch love.errhand to avoid infinite-loop freezing browser on uncaught Lua errors
     errhand_pattern = r'function love\.errhand\(msg\).*?\nend\n'
@@ -241,7 +307,7 @@ def patch_main(content: str, require_update_hook: bool = True) -> str:
         '    return\n'
         'end\n'
     )
-    content = re.sub(errhand_pattern, errhand_replacement, content, flags=re.DOTALL)
+    content = _subn(content, errhand_pattern, errhand_replacement, "main:errhand", flags=re.DOTALL)
     return content
 
 
@@ -251,9 +317,11 @@ def patch_conf(content: str) -> str:
     Ensure fullscreen is explicitly disabled in window configuration.
     """
     if "t.window.usedpiscale" not in content:
-        content = content.replace(
+        content = _apply(
+            content,
             "t.window.minheight = 100",
-            "t.window.minheight = 100\n    t.window.usedpiscale = false\n    t.window.fullscreen = false"
+            "t.window.minheight = 100\n    t.window.usedpiscale = false\n    t.window.fullscreen = false",
+            "conf:usedpiscale",
         )
     return content
 
@@ -263,25 +331,35 @@ def patch_common_events(content: str) -> str:
     Ensure asynchronous scoring animation events in add_round_eval_row
     do not crash when cash_out has already cleaned up G.round_eval.
     """
-    content = content.replace(
+    content = _apply(
+        content,
         "function add_round_eval_row(config)",
-        "function add_round_eval_row(config)\n    if not (G and G.round_eval and not G.round_eval.REMOVED) then return end"
+        "function add_round_eval_row(config)\n    if not (G and G.round_eval and not G.round_eval.REMOVED) then return end",
+        "common_events:add_round_eval_row-guard",
     )
-    content = content.replace(
+    content = _apply(
+        content,
         "func = function() \n                        local spacer =",
-        "func = function() \n                        if not (G and G.round_eval and not G.round_eval.REMOVED) then return true end\n                        local spacer ="
+        "func = function() \n                        if not (G and G.round_eval and not G.round_eval.REMOVED) then return true end\n                        local spacer =",
+        "common_events:spacer-guard",
     )
-    content = content.replace(
+    content = _apply(
+        content,
         "func = function()\n                --Add the far left text and context first:",
-        "func = function()\n                if not (G and G.round_eval and not G.round_eval.REMOVED) then return true end\n                --Add the far left text and context first:"
+        "func = function()\n                if not (G and G.round_eval and not G.round_eval.REMOVED) then return true end\n                --Add the far left text and context first:",
+        "common_events:far-left-guard",
     )
-    content = content.replace(
+    content = _apply(
+        content,
         "func = function()\n                    G.round_eval:add_child(",
-        "func = function()\n                    if not (G and G.round_eval and not G.round_eval.REMOVED) then return true end\n                    G.round_eval:add_child("
+        "func = function()\n                    if not (G and G.round_eval and not G.round_eval.REMOVED) then return true end\n                    G.round_eval:add_child(",
+        "common_events:add_child-guard",
     )
-    content = content.replace(
+    content = _apply(
+        content,
         "func = function()\n                        if i%30 == 1 then",
-        "func = function()\n                        if not (G and G.round_eval and not G.round_eval.REMOVED) then return true end\n                        if i%30 == 1 then"
+        "func = function()\n                        if not (G and G.round_eval and not G.round_eval.REMOVED) then return true end\n                        if i%30 == 1 then",
+        "common_events:i30-guard",
     )
     return content
 
@@ -291,25 +369,35 @@ def patch_game(content: str) -> str:
     Ensure G.shop, G.round_eval, and UI elements do not trigger nil-indexing crashes
     during rapid transitions or delayed animations.
     """
-    content = content.replace(
+    content = _apply(
+        content,
         "G.shop.alignment.offset.y = -5.3",
-        "if G.shop and G.shop.alignment and G.shop.alignment.offset then G.shop.alignment.offset.y = -5.3 end"
+        "if G.shop and G.shop.alignment and G.shop.alignment.offset then G.shop.alignment.offset.y = -5.3 end",
+        "game:shop-align-y",
     )
-    content = content.replace(
+    content = _apply(
+        content,
         "G.shop.alignment.offset.x = 0",
-        "if G.shop and G.shop.alignment and G.shop.alignment.offset then G.shop.alignment.offset.x = 0 end"
+        "if G.shop and G.shop.alignment and G.shop.alignment.offset then G.shop.alignment.offset.x = 0 end",
+        "game:shop-align-x",
     )
-    content = content.replace(
+    content = _apply(
+        content,
         "if math.abs(G.shop.T.y - G.shop.VT.y) < 3 then",
-        "if not (G and G.shop and not G.shop.REMOVED and G.shop.T and G.shop.VT) then return true end\n                            if math.abs(G.shop.T.y - G.shop.VT.y) < 3 then"
+        "if not (G and G.shop and not G.shop.REMOVED and G.shop.T and G.shop.VT) then return true end\n                            if math.abs(G.shop.T.y - G.shop.VT.y) < 3 then",
+        "game:shop-ty-guard",
     )
-    content = content.replace(
+    content = _apply(
+        content,
         "if G.round_eval.alignment.offset.y ~= -7.8 then",
-        "if not (G and G.round_eval and not G.round_eval.REMOVED and G.round_eval.alignment and G.round_eval.alignment.offset) then return true end\n                        if G.round_eval.alignment.offset.y ~= -7.8 then"
+        "if not (G and G.round_eval and not G.round_eval.REMOVED and G.round_eval.alignment and G.round_eval.alignment.offset) then return true end\n                        if G.round_eval.alignment.offset.y ~= -7.8 then",
+        "game:round-eval-align-guard",
     )
-    content = content.replace(
+    content = _apply(
+        content,
         "if math.abs(G.round_eval.T.y - G.round_eval.VT.y) < 3 then",
-        "if not (G and G.round_eval and not G.round_eval.REMOVED and G.round_eval.T and G.round_eval.VT) then return true end\n                            if math.abs(G.round_eval.T.y - G.round_eval.VT.y) < 3 then"
+        "if not (G and G.round_eval and not G.round_eval.REMOVED and G.round_eval.T and G.round_eval.VT) then return true end\n                            if math.abs(G.round_eval.T.y - G.round_eval.VT.y) < 3 then",
+        "game:round-eval-ty-guard",
     )
     return content
 
@@ -432,11 +520,11 @@ def patch_button_callbacks(content: str) -> str:
             "          if G.SHOP_SIGN then pcall(function() G.SHOP_SIGN:remove() end) end\n"
             "          G.SHOP_SIGN = nil"
         )
-        content = content.replace(old_clean, new_clean)
+        content = _apply(content, old_clean, new_clean, "button_callbacks:toggle_shop-fallback")
 
     old_snap = "G.CONTROLLER:snap_to({node = G.shop:get_UIE_by_ID('next_round_button')})"
     new_snap = "if G.shop then G.CONTROLLER:snap_to({node = G.shop:get_UIE_by_ID('next_round_button')}) end"
-    content = content.replace(old_snap, new_snap)
+    content = _apply(content, old_snap, new_snap, "button_callbacks:snap_to")
 
     old_consume = (
         "                  if G.shop then \n"
@@ -450,20 +538,26 @@ def patch_button_callbacks(content: str) -> str:
         "                    G.shop.alignment.offset.py = nil\n"
         "                  end"
     )
-    content = content.replace(old_consume, new_consume)
+    content = _apply(content, old_consume, new_consume, "button_callbacks:consume-align")
 
     # Force Windowed mode and forbid fullscreen in apply_window_changes
-    content = content.replace(
+    content = _apply(
+        content,
         "{fullscreen = G.SETTINGS.WINDOW.screenmode ~= 'Windowed',",
-        "{fullscreen = false,"
+        "{fullscreen = false,",
+        "button_callbacks:fullscreen",
     )
-    content = content.replace(
+    content = _apply(
+        content,
         "fullscreentype = (G.SETTINGS.WINDOW.screenmode == 'Borderless' and 'desktop') or (G.SETTINGS.WINDOW.screenmode == 'Fullscreen' and 'exclusive') or nil,",
-        "fullscreentype = nil,"
+        "fullscreentype = nil,",
+        "button_callbacks:fullscreentype",
     )
-    content = content.replace(
+    content = _apply(
+        content,
         "G.SETTINGS.WINDOW.screenmode = (G.SETTINGS.QUEUED_CHANGE and G.SETTINGS.QUEUED_CHANGE.screenmode) or G.SETTINGS.WINDOW.screenmode or 'Windowed'",
-        "G.SETTINGS.WINDOW.screenmode = 'Windowed'"
+        "G.SETTINGS.WINDOW.screenmode = 'Windowed'",
+        "button_callbacks:screenmode",
     )
 
     # Bulletproof G.FUNCS.wipe_off against nil G.screenwipe crashes
@@ -474,19 +568,19 @@ def patch_button_callbacks(content: str) -> str:
         "        G.screenwipe.children.particles.max = 0\n"
         "      end"
     )
-    content = content.replace(old_wipe_particles, new_wipe_particles)
+    content = _apply(content, old_wipe_particles, new_wipe_particles, "button_callbacks:wipe-particles")
 
     old_wipe_ref_black = "ref_table = G.screenwipe.colours.black,"
     new_wipe_ref_black = "ref_table = (G.screenwipe and G.screenwipe.colours and G.screenwipe.colours.black) or {},"
-    content = content.replace(old_wipe_ref_black, new_wipe_ref_black)
+    content = _apply(content, old_wipe_ref_black, new_wipe_ref_black, "button_callbacks:wipe-black")
 
     old_wipe_ref_white = "ref_table = G.screenwipe.colours.white,"
     new_wipe_ref_white = "ref_table = (G.screenwipe and G.screenwipe.colours and G.screenwipe.colours.white) or {},"
-    content = content.replace(old_wipe_ref_white, new_wipe_ref_white)
+    content = _apply(content, old_wipe_ref_white, new_wipe_ref_white, "button_callbacks:wipe-white")
 
     old_wipe_text = "if G.screenwipe:get_UIE_by_ID('text') then"
     new_wipe_text = "if G.screenwipe and G.screenwipe.get_UIE_by_ID and G.screenwipe:get_UIE_by_ID('text') then"
-    content = content.replace(old_wipe_text, new_wipe_text)
+    content = _apply(content, old_wipe_text, new_wipe_text, "button_callbacks:wipe-text")
 
     old_wipe_cleanup = (
         "      G.screenwipe.children.particles:remove()\n"
@@ -504,7 +598,7 @@ def patch_button_callbacks(content: str) -> str:
         "        G.screenwipe = nil\n"
         "      end"
     )
-    content = content.replace(old_wipe_cleanup, new_wipe_cleanup)
+    content = _apply(content, old_wipe_cleanup, new_wipe_cleanup, "button_callbacks:wipe-cleanup")
 
     # v141: ghost-source fix — the queued use_card restore event
     # (button_callbacks.lua:2248) unconditionally writes
@@ -531,7 +625,7 @@ def patch_button_callbacks(content: str) -> str:
         "                G.TAROT_INTERRUPT=nil\n"
         "                G.CONTROLLER.locks.use = false"
     )
-    content = content.replace(old_restore_state, new_restore_state)
+    content = _apply(content, old_restore_state, new_restore_state, "button_callbacks:restore-state")
 
     # v141: end_consumeable queues "G.booster_pack:remove()" at +0.2s; if
     # the bridge abandoned the pack before the event fires,
@@ -553,7 +647,8 @@ def patch_button_callbacks(content: str) -> str:
         "        return true\n"
         "      end}))"
     )
-    content = content.replace(old_end_consumeable_remove, new_end_consumeable_remove)
+    content = _apply(content, old_end_consumeable_remove, new_end_consumeable_remove,
+                     "button_callbacks:end_consumeable-remove")
 
     return content
 
@@ -583,7 +678,7 @@ def patch_event(content: str) -> str:
         "    end\n"
         "    _results.blocking, _results.completed = self.blocking, self.complete"
     )
-    content = content.replace(old_handle, new_handle)
+    content = _apply(content, old_handle, new_handle, "event:handle-guard")
     return content
 
 
@@ -639,9 +734,8 @@ def patch_card_conversion_guards(content: str) -> str:
             "G.E_MANAGER:add_event(Event({trigger = 'after',delay = 0.15,func = function() if G.hand.highlighted[i] then G.hand.highlighted[i]:flip();play_sound('tarot2', percent, 0.6);G.hand.highlighted[i]:juice_up(0.3, 0.3) end;return true end }))",
         ),
     ]
-    for old, new in guards:
-        if old in content:
-            content = content.replace(old, new)
+    for idx, (old, new) in enumerate(guards):
+        content = _apply(content, old, new, f"card_conversion_guards:guard-{idx}")
     return content
 
 
@@ -789,17 +883,55 @@ def build_balatro_love(
     stats["wrapper_size"] = wrapper_path.stat().st_size
     stats["wrapper_sha256"] = hashlib.sha256(wrapper_path.read_bytes()).hexdigest()
 
+    # 5b. Write web/version.json AFTER the wrapper refresh above, so
+    # wrapper_size/wrapper_sha256 describe the archive actually on disk
+    # (writing it earlier recorded 0/empty forever).
+    # check_version_contract.py (and anyone debugging a cache mismatch)
+    # reads this file; app.js hard-codes EXPECTED_*_SIZE / ASSET_VERSION.
+    asset_version = None
+    app_js = output_path.parent / "app.js"
+    if app_js.exists():
+        m = re.search(r'const ASSET_VERSION = "(v\d+)"', app_js.read_text(encoding="utf-8"))
+        if m:
+            asset_version = m.group(1)
+    # love.wasm is an external artifact (not built here), but recording its
+    # actual on-disk bytes/sha keeps the version.json schema consistent:
+    # every key in this file has THIS writer, and app.js EXPECTED_WASM_SIZE
+    # becomes checkable against the file the wrapper zip actually serves.
+    wasm_path = output_path.parent / "love.wasm"
+    if wasm_path.is_file():
+        stats["wasm_size"] = wasm_path.stat().st_size
+        stats["wasm_sha256"] = hashlib.sha256(wasm_path.read_bytes()).hexdigest()
+    version_info = {
+        "version": asset_version,
+        "love_size": stats["output_size"],
+        "love_sha256": stats["output_sha256"],
+        "wasm_size": stats.get("wasm_size", 0),
+        "wasm_sha256": stats.get("wasm_sha256", ""),
+        "wrapper_size": stats["wrapper_size"],
+        "wrapper_sha256": stats["wrapper_sha256"],
+    }
+    version_path = output_path.parent / "version.json"
+    version_path.write_text(json.dumps(version_info, indent=2) + "\n", encoding="utf-8")
+    if verbose:
+        print(f"[*] Wrote version contract: {version_path} (version={asset_version})")
+
     # 6. Refresh release-assets.json so the shipped digests always describe
     # the build that is actually on disk. A stale manifest makes
     # serve.py --release-check fail the deploy for the wrong reason.
+    # min_size is written as the EXACT byte size (not a ratcheting min of the
+    # old value): the old min() let a shrunken/corrupt build satisfy the
+    # manifest, and the never-decreasing floor drifted from reality.
     manifest_path = TOOLS_DIR / "release-assets.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if asset_version:
+            manifest["decidex_version"] = asset_version
         for entry in manifest.get("assets", []):
             asset_path = output_path.parent / str(entry.get("filename", ""))
             if asset_path.is_file():
                 entry["sha256"] = hashlib.sha256(asset_path.read_bytes()).hexdigest()
-                entry["min_size"] = min(int(entry.get("min_size", 0)), asset_path.stat().st_size)
+                entry["min_size"] = asset_path.stat().st_size
         manifest_path.write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         if verbose:

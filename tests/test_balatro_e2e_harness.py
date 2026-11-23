@@ -13,6 +13,7 @@ sys.path.insert(0, str(E2E_DIR))
 from harness_support import (  # noqa: E402
     TERMINAL_LATCH_READ,
     TERMINAL_LATCH_SCRIPT,
+    effective_stall_budget,
     positive_finite_float,
     positive_viewport,
     scale_dwell_budget,
@@ -93,3 +94,29 @@ def test_scale_dwell_budget_stretches_for_oversized_hands(hand_size, expected_fa
 
 def test_scale_dwell_budget_never_shrinks():
     assert scale_dwell_budget(75, -3) == 75
+
+
+def test_effective_stall_budget_is_flat_30_percent_grace():
+    assert effective_stall_budget(75) == round(75 * 1.3) == 98
+    assert effective_stall_budget(60) == round(60 * 1.3) == 78
+    assert effective_stall_budget(30) == 39
+    assert effective_stall_budget(80) == 104
+
+
+def test_effective_stall_budget_zero_stays_zero():
+    """A zero budget means 'wedge immediately'; grace cannot revive it."""
+    assert effective_stall_budget(0) == 0
+
+
+def test_effective_stall_budget_ignores_hand_size():
+    """The old hand-scale factor is gone: identical budgets regardless of hand."""
+    assert effective_stall_budget(75) == 98
+    # A 49-card hand does not stretch the stall budget (contrast with
+    # scale_dwell_budget, which doubles it for observability only).
+    assert effective_stall_budget(90) == round(90 * 1.3) == 117
+
+
+def test_effective_stall_budget_large_value_and_negative_clamped():
+    assert effective_stall_budget(1000) == 1300
+    # Defensive: negative inputs clamp to the zero-budget behaviour.
+    assert effective_stall_budget(-5) == 0

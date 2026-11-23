@@ -3,6 +3,9 @@ import os
 from pathlib import Path
 from playwright.async_api import async_playwright
 
+from harness_support import emit_probe_verdict, hard_action_failure_info
+from test_full_flow_soak import TRANSIENT_INFO_RE
+
 SCREENSHOT_DIR = Path("tools/balatro_wasm/screenshots")
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -21,10 +24,14 @@ async def run():
         context = await browser.new_context(viewport={'width': 1280, 'height': 720})
         page = await context.new_page()
 
-        page.on('pageerror', lambda err: print(f"[PageError] {err}", flush=True))
+        page_errors = []
+        action_failures = []
+        page.on('pageerror', lambda err: (page_errors.append(str(err)), print(f"[PageError] {err}", flush=True)))
         page.on('dialog', lambda dialog: (print(f"[Dialog] {dialog.message}", flush=True), asyncio.create_task(dialog.dismiss())))
         def on_console(msg):
             t = msg.text
+            if hard_action_failure_info(t, TRANSIENT_INFO_RE) is not None:
+                action_failures.append(t[:220])
             if any(skip in t for skip in ['LONG DT', 'AudioContext', 'GL_INVALID', 'favicon']):
                 return
             print(f'[{msg.type.upper()}] {t}', flush=True)
@@ -134,6 +141,19 @@ async def run():
         await context.close()
         await browser.close()
         print("[Live Prod Test] Done. Screenshots saved in:", SCREENSHOT_DIR, flush=True)
+
+        failures = []
+        if page_errors:
+            failures.append(f"page errors ({len(page_errors)})")
+        if action_failures:
+            failures.append(f"hard action failures ({len(action_failures)})")
+        if "round2_hand" not in screenshot_taken:
+            failures.append("progress milestone not reached (Round 2 hand never seen)")
+        emit_probe_verdict(
+            "live_prod_full_log",
+            failures,
+            f"multi-round live gameplay verified, screenshots={sorted(screenshot_taken)}",
+        )
 
 if __name__ == "__main__":
     asyncio.run(run())

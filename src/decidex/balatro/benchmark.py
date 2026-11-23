@@ -12,6 +12,8 @@ Evaluates:
   - Constraint Violation Rate (被动小丑破戒规避率, e.g. Ride the Bus)
   - Joker Ordering Optimality (小丑从左到右数学排序优化)
   - Synergy Balance Index (四角大厦阵容平衡度)
+
+本模块用于 replay/分析；线上运行的策略实现位于 tools/balatro_wasm/web/app.js，服务端 advisor 经鉴权 /api/execute auto 通道仍可被调用执行。
 """
 
 from __future__ import annotations

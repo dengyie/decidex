@@ -22,6 +22,8 @@ Certain jokers and boss blinds impose lethal conditions that can immediately rui
      - Finisher Bosses: Verdant Leaf, Amber Acorn, Violet Vessel, Crimson Heart, Cerulean Bell.
 
 This module detects active hazards and enforces strict safety filters on candidate plays and discards.
+
+本模块用于 replay/分析；线上运行的策略实现位于 tools/balatro_wasm/web/app.js，服务端 advisor 经鉴权 /api/execute auto 通道仍可被调用执行。
 """
 
 from __future__ import annotations

@@ -13,6 +13,8 @@ This module enforces:
      - S_TIER_OVERRIDE: God-tier items (Blueprint, Cavendish, Trading Card) bypass interest locks.
      - SURPLUS_ONLY: Standard A/B jokers, packs, and rerolls must use surplus above the interest line.
      - FORBIDDEN: Prevents squandering interest on mediocre items or blind rerolls.
+
+本模块用于 replay/分析；线上运行的策略实现位于 tools/balatro_wasm/web/app.js，服务端 advisor 经鉴权 /api/execute auto 通道仍可被调用执行。
 """
 
 from __future__ import annotations

@@ -1,0 +1,9 @@
+{
+  "version": "v166",
+  "love_size": 56378672,
+  "love_sha256": "f51e35c542689461c00f041d9f481eaaeefe3e37ba66532ace1a3e0a65f71752",
+  "wasm_size": 4720510,
+  "wasm_sha256": "304f195f36d163f3bb2127e7c232fd1fd0791ee2ab61ba003d47096003b53bf1",
+  "wrapper_size": 56179954,
+  "wrapper_sha256": "b073c284e14cf84c3af1450635c96b3ca0a288bfef6e97f299295911bae05802"
+}

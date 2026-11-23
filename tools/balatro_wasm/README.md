@@ -27,9 +27,6 @@ tools/balatro_wasm/
 │   ├── bit.lua               # PUC-Lua 5.1 纯 Lua 位运算垫片 (band/bor/bxor/lshift...)
 │   ├── web_patches.lua       # Mipmaps/伪多线程/平台欺骗/随机数补丁
 │   └── decidex_bridge.lua    # WASM 专属 DecideX 状态桥 (调用 JS 回调)
-├── runtime/                  # LÖVE 11.5 WebAssembly 预编译运行时
-│   ├── love.js               # Emscripten 胶水脚本 (支持 IDBFS 存档与 Canvas 挂载)
-│   └── love.wasm             # 11.5 WASM 二进制核心
 └── web/                      # 纯静态部署交付目录 (可直发 CDN / S3 / Nginx)
     ├── index.html            # 游戏 Canvas + DecideX 悬浮决策 HUD
     ├── balatro.love          # 打包修补后的游戏资源包 (~53.7 MB)

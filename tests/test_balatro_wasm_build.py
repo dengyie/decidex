@@ -95,22 +95,60 @@ def test_patch_hologram_shader():
 
 
 def test_patch_globals():
-    original = "self.F_SOUND_THREAD = true -- audio thread"
+    original = (
+        "self.F_SOUND_THREAD = true -- audio thread\n"
+        "self.F_SKIP_TUTORIAL = false\n"
+        "self.F_NO_SAVING = false\n"
+        "screenmode = 'Borderless',\n"
+    )
     patched = patch_globals(original)
     assert "self.F_SOUND_THREAD = false" in patched
+    assert "self.F_SKIP_TUTORIAL = true" in patched
+    assert "self.F_NO_SAVING = true" in patched
+    assert "screenmode = 'Windowed'," in patched
+
+
+def _main_lua_fixture(update_body="    G:update(dt)\n", extra=""):
+    """Minimal main.lua with every needle patch_main asserts on.
+
+    patch_main now fails loudly when a needle is missing (a silently
+    skipped patch used to ship unguarded crash paths to production), so
+    the fixtures must carry the full upstream surface the patches target.
+    """
+    return (
+        'require "engine/object"\n'
+        'require "challenges"\n'
+        '\n'
+        'function love.load()\n'
+        '    G:start_up()\n'
+        'end\n'
+        '\n'
+        'function love.run()\n'
+        '\t-- Main loop time.\n'
+        '\treturn function()\n'
+        '\t\trun_time = love.timer.getTime()\n'
+        '\t\trun_time = math.min(love.timer.getTime() - run_time, 0.1)\n'
+        '\t\tG.FPS_CAP = G.FPS_CAP or 500\n'
+        '\t\tif run_time < 1./G.FPS_CAP then love.timer.sleep(1./G.FPS_CAP - run_time) end\n'
+        '\tend\n'
+        'end\n'
+        '\n'
+        "if os == 'OS X' or os == 'Windows' then\n"
+        'end\n'
+        '\n'
+        'function love.errhand(msg)\n'
+        '    print(msg)\n'
+        'end\n'
+        '\n'
+        'function love.update( dt )\n'
+        + update_body +
+        'end\n'
+        + extra
+    )
 
 
 def test_patch_main_and_idempotency():
-    original = (
-        'require "engine/object"\n'
-        'require "bit"\n'
-        '\n'
-        'function love.update( dt )\n'
-        '\t--Perf monitoring checkpoint\n'
-        '    timer_checkpoint(nil, \'update\', true)\n'
-        '    G:update(dt)\n'
-        'end\n'
-    )
+    original = _main_lua_fixture()
     patched = patch_main(original)
     assert 'require "web_patches"' in patched
     assert 'require "decidex_bridge"' in patched
@@ -122,6 +160,46 @@ def test_patch_main_and_idempotency():
     assert second.count("DECIDEX_STEP") == patched.count("DECIDEX_STEP")
 
 
+def test_patch_main_splice_does_not_corrupt_trailing_functions():
+    """Trace inserts shift offsets; the DECIDEX_STEP splice must re-match.
+
+    patch_main used to take the love.update regex match BEFORE inserting the
+    [Balatro Trace] lines, then splice the hook with those stale offsets.
+    Every trace insert pushed the real love.update further down, so the
+    stale splice window cut into the following function: the built main.lua
+    shipped "ction love.quit()" (missing "fun") plus a mangled comment, and
+    love.js died at boot with
+    "main.lua:145: '=' expected near 'love'".
+    """
+    original = _main_lua_fixture(extra=(
+        'function love.quit()\n'
+        '\tif G.SOUND_MANAGER then G.SOUND_MANAGER.channel:push({type = "stop"}) end\n'
+        'end\n'
+    ))
+    patched = patch_main(original)
+
+    # Every top-level function header survives byte-intact after the splice.
+    for needle in (
+        "function love.load()",
+        "function love.run()",
+        "function love.errhand(msg)",
+        "function love.update( dt )",
+        "function love.quit()",
+    ):
+        assert needle in patched, f"patched main.lua lost {needle!r}"
+    assert patched.count("function love.quit()") == 1
+    assert patched.count("function love.update( dt )") == 1
+    # A lost "fun" prefix used to leave the orphan "ction love.quit()" line.
+    for line in patched.splitlines():
+        assert not line.lstrip().startswith("ction "), f"orphaned function header: {line!r}"
+
+    # The hook still lands inside love.update's body, after G:update(dt).
+    upd_idx = patched.index("function love.update( dt )")
+    quit_idx = patched.index("function love.quit()")
+    hook_idx = patched.index("if _G.DECIDEX_STEP then _G.DECIDEX_STEP(dt) end")
+    assert upd_idx < hook_idx < quit_idx
+
+
 def test_patch_main_places_decidex_hook_after_game_update():
     """The bridge must tick AFTER G:update(dt), never before.
 
@@ -131,17 +209,11 @@ def test_patch_main_places_decidex_hook_after_game_update():
     snapshot and the bridge rejects the action ("not in BLIND_SELECT"), which
     used to burn the 12-strike budget and auto-pause the whole run.
     """
-    original = (
-        'require "engine/object"\n'
-        '\n'
-        'function love.update( dt )\n'
-        '    G:update(dt)\n'
-        'end\n'
-        '\n'
+    original = _main_lua_fixture(extra=(
         'function love.draw()\n'
         '    G:draw()\n'
         'end\n'
-    )
+    ))
     patched = patch_main(original)
     update_idx = patched.index("function love.update( dt )")
     game_update_idx = patched.index("pcall(G.update, G, dt)", update_idx)
@@ -170,11 +242,7 @@ def test_patch_main_hook_tolerates_indentation_styles():
     must accept both spaces and tabs.
     """
     for indent in ("    ", "\t", "  "):
-        original = (
-            "function love.update( dt )\n"
-            f"{indent}G:update(dt)\n"
-            "end\n"
-        )
+        original = _main_lua_fixture(update_body=f"{indent}G:update(dt)\n")
         patched = patch_main(original)
         assert patched.count("_G.DECIDEX_STEP(dt)") == 1, (
             f"hook not injected for indent {indent!r}"
@@ -183,6 +251,50 @@ def test_patch_main_hook_tolerates_indentation_styles():
             f"G:update not pcall-wrapped for indent {indent!r}"
         )
         assert patched.index("pcall(G.update, G, dt)") < patched.index("_G.DECIDEX_STEP(dt)")
+
+
+def test_patch_main_fails_loudly_on_missing_needles():
+    """A missing upstream needle must fail the build, not skip silently.
+
+    A silently skipped patch ships the unguarded crash path to production
+    with zero build-time signal. Every trace/steam needle patch_main asserts
+    on must be present in the input.
+    """
+    full = _main_lua_fixture()
+    for needle, label in (
+        ('require "challenges"', "main:trace-2"),
+        ("function love.run()", "main:trace-3"),
+        ("function love.load()", "main:trace-4"),
+        ("G:start_up()", "main:trace-5"),
+        ("if os == 'OS X' or os == 'Windows' then", "main:luasteam-bypass"),
+        # The xpcall frame-error containment used to sit behind a plain
+        # `in` check and skip silently on upstream drift — the one patch
+        # class whose loss re-opens the abort-the-Emscripten-loop failure.
+        ("\t-- Main loop time.\n\treturn function()\n", "main:love-run-step"),
+    ):
+        stripped = full.replace(needle, "-- removed for test\n", 1)
+        with pytest.raises(RuntimeError, match=label):
+            patch_main(stripped)
+
+
+def test_patch_globals_fails_loudly_on_missing_needle():
+    with pytest.raises(RuntimeError, match="globals:F_SKIP_TUTORIAL"):
+        patch_globals(
+            "self.F_SOUND_THREAD = true\n"
+            "self.F_SKIP_TUTORIAL = already-patched\n"
+            "self.F_NO_SAVING = false\n"
+            "screenmode = 'Borderless',\n"
+        )
+
+
+def test_patch_hologram_shader_fails_loudly_on_missing_loop():
+    with pytest.raises(RuntimeError, match="hologram_shader:i-loop"):
+        patch_hologram_shader("int glow_samples = 4;\n-- loops already constant\n")
+
+
+def test_patch_conf_fails_loudly_on_missing_needle():
+    with pytest.raises(RuntimeError, match="conf:usedpiscale"):
+        patch_conf("t.window.minheight = 200\n")
 
 
 def test_patch_main_requires_update_hook_in_build_path():
@@ -471,7 +583,10 @@ def test_frontend_arbitration_and_autopilot():
 
     assert "arbitrateAction" in js_content
     assert "AutoPilot" in js_content
-    assert re.search(r"(?:decidex-balatro-core-|balatro-asset-cache-)v\d+", js_content) is not None
+    # Cache names now derive from ASSET_VERSION (no stale literal vNN);
+    # bumping ASSET_VERSION busts both caches automatically.
+    assert 'const CORE_CACHE_NAME = "decidex-balatro-core-" + ASSET_VERSION;' in js_content
+    assert "ASSET_VERSION" in js_content
     assert "executePlayAction" in js_content
     assert "executeDiscardAction" in js_content
 
@@ -681,7 +796,7 @@ def test_bridge_keeps_blind_progression_self_healing():
     assert "local function install_blind_select_build_guard()" in content
     assert "if G.STATES and G.STATE ~= G.STATES.BLIND_SELECT then" in content
     assert "[DecideX Blind Guard] refused blind-select build in " in content
-    assert "pcall(install_blind_select_build_guard)" in content
+    assert 'safe_maintain("blind_select_build_guard", install_blind_select_build_guard)' in content
     # The repair is attempted every frame, and its failure cannot abort the
     # watcher (a Lua error there would freeze the whole autopilot).
     repair_call = content.index("pcall(repair_blind_select_progress)")
@@ -890,8 +1005,8 @@ def test_bridge_has_booster_pack_stall_watchdog():
     ):
         assert factory in rebuild
 
-    # The watchdog must run from the game loop.
-    assert "pcall(pack_stall_watchdog)" in content
+    # The watchdog must run from the game loop (per-item isolated).
+    assert 'safe_maintain("pack_stall_watchdog", pack_stall_watchdog)' in content
 
     # The recovery must be reachable from the action channel too.
     assert 'action == "force_leave_pack"' in content
@@ -1006,14 +1121,14 @@ def test_bridge_guards_can_skip_booster_and_pack_ui_invariants():
     assert "not G.pack_cards.cards or G.pack_cards.REMOVED" in guard
     assert "G.pack_cards = nil" in guard
     maint = content.split("local function decidex_maintenance()", 1)[1].split(chr(10) + "end", 1)[0]
-    assert "pcall(install_can_skip_booster_guard)" in maint
+    assert 'safe_maintain("can_skip_booster_guard", install_can_skip_booster_guard)' in maint
 
     # Invariant sweep: single pack UI inside pack states, none outside.
     assert "local function sweep_pack_ui_invariants()" in content
     sweep = content.split("local function sweep_pack_ui_invariants()", 1)[1].split(chr(10) + "end", 1)[0]
     assert "removed duplicate (orphaned) pack UIBox" in sweep
     assert "removed pack UI outside a pack state" in sweep
-    assert "pcall(sweep_pack_ui_invariants)" in maint
+    assert 'safe_maintain("pack_ui_invariants", sweep_pack_ui_invariants)' in maint
 
     # Rebuild escalation: a second stall in the same episode must abandon
     # instead of rebuilding into another empty area.
@@ -1052,10 +1167,10 @@ def test_bridge_repairs_nil_state_midrun():
         assert ui in body and state in body
     # delete_run's deliberate -1 limbo must never be touched.
     assert "-1" not in body
-    # The repair must run from the maintenance path (pcall'd).
+    # The repair must run from the maintenance path (per-item isolated).
     maint = content.split("local function decidex_maintenance()", 1)[1]
     maint = maint.split("\nend", 1)[0]
-    assert "pcall(repair_nil_state)" in maint
+    assert 'safe_maintain("repair_nil_state", repair_nil_state)' in maint
 
 
 def test_bridge_frame_loop_crash_guard():
@@ -1307,8 +1422,8 @@ def test_pack_crash_cleanup_orphan_sweep_and_skip_fast_close():
     maint_idx = content.find("local function decidex_maintenance()")
     assert maint_idx >= 0
     tail = content[maint_idx:]
-    assert "pcall(auto_close_consumed_pack)" in tail
-    assert tail.find("pcall(auto_close_consumed_pack)") < tail.find("skip close chain never landed")
+    assert 'safe_maintain("auto_close_consumed_pack", auto_close_consumed_pack)' in tail
+    assert tail.find('safe_maintain("auto_close_consumed_pack", auto_close_consumed_pack)') < tail.find("skip close chain never landed")
 
 
 def test_scoring_applies_joker_effects_in_order():
@@ -1636,7 +1751,7 @@ def test_bridge_auto_closes_consumed_pack():
     assert '"pack_closing":' in content
     # Wired into the per-frame maintenance path.
     maint = content.split("local function decidex_maintenance()", 1)[1].split(chr(10) + "end", 1)[0]
-    assert "pcall(auto_close_consumed_pack)" in maint
+    assert 'safe_maintain("auto_close_consumed_pack", auto_close_consumed_pack)' in maint
 
 
 def test_event_guard_prints_are_rate_limited():
@@ -1687,7 +1802,7 @@ def test_bridge_populates_dead_pack_creation():
     assert "LAST_PACK_SIG = \"\"" in body
     # Wired into the per-frame maintenance path.
     maint = content.split("local function decidex_maintenance()", 1)[1].split(chr(10) + "end", 1)[0]
-    assert "pcall(populate_empty_pack)" in maint
+    assert 'safe_maintain("populate_empty_pack", populate_empty_pack)' in maint
     # The rebuild records its timestamp and forces the epoch-carrying emit.
     reb = content.split("local function rebuild_pack_ui()", 1)[1].split(
         chr(10) + "local function populate_empty_pack()", 1)[0]
@@ -1769,7 +1884,7 @@ def test_bridge_kicks_stuck_event_queue():
     # Wired into the per-frame maintenance path (globals may not exist yet
     # when the bridge boots — install latches and retries per tick).
     maint = content.split("local function decidex_maintenance()", 1)[1].split(chr(10) + "end", 1)[0]
-    assert "pcall(install_pack_factory_markers)" in maint
+    assert 'safe_maintain("pack_factory_markers", install_pack_factory_markers)' in maint
 
 
 def test_bridge_and_client_refuse_duplicate_pack_use():
@@ -1853,7 +1968,7 @@ def test_bridge_once_dedupe_covers_buy_sell_use():
     assert "c.sort_id] = true" not in helpers
     assert "_decidex_once_ids[c] = true" in helpers
     # The sweep runs in the per-tick maintenance chain.
-    assert "pcall(decidex_once_sweep)" in content
+    assert 'safe_maintain("once_sweep", decidex_once_sweep)' in content
 
     buy = content.split('if action == "buy_card" or action == "buy_from_shop" then', 1)[1].split(
         chr(10) + '  if action == "reroll_shop"', 1)[0]
@@ -1883,8 +1998,8 @@ def test_bridge_once_dedupe_covers_buy_sell_use():
     assert "#cards <= size" in trim_body
     assert "trimmed " in content  # trim prints its count
     maint = content.split("local function decidex_maintenance()", 1)[1].split(chr(10) + "end", 1)[0]
-    assert "pcall(trim_overfull_pack)" in maint
-    assert "pcall(populate_empty_pack)" in maint
+    assert 'safe_maintain("trim_overfull_pack", trim_overfull_pack)' in maint
+    assert 'safe_maintain("populate_empty_pack", populate_empty_pack)' in maint
 
 
 def test_bridge_sweeps_stale_stage_ui():
@@ -2212,6 +2327,27 @@ def test_vanilla_restore_event_skips_dead_pack_state():
     snapshot is needed on CI.
     """
     content = "\n".join([
+        # toggle_shop's granular fallback pair
+        "          G.shop:remove()\n"
+        "          G.shop = nil\n"
+        "          G.SHOP_SIGN:remove()\n"
+        "          G.SHOP_SIGN = nil",
+        "G.CONTROLLER:snap_to({node = G.shop:get_UIE_by_ID('next_round_button')})",
+        "                  if G.shop then \n"
+        "                    G.shop.alignment.offset.y = G.shop.alignment.offset.py\n"
+        "                    G.shop.alignment.offset.py = nil\n"
+        "                  end",
+        "{fullscreen = G.SETTINGS.WINDOW.screenmode ~= 'Windowed',",
+        "fullscreentype = (G.SETTINGS.WINDOW.screenmode == 'Borderless' and 'desktop') or (G.SETTINGS.WINDOW.screenmode == 'Fullscreen' and 'exclusive') or nil,",
+        "G.SETTINGS.WINDOW.screenmode = (G.SETTINGS.QUEUED_CHANGE and G.SETTINGS.QUEUED_CHANGE.screenmode) or G.SETTINGS.WINDOW.screenmode or 'Windowed'",
+        "      delay(0.3)\n      G.screenwipe.children.particles.max = 0",
+        "ref_table = G.screenwipe.colours.black,",
+        "ref_table = G.screenwipe.colours.white,",
+        "if G.screenwipe:get_UIE_by_ID('text') then",
+        "      G.screenwipe.children.particles:remove()\n"
+        "      G.screenwipe:remove()\n"
+        "      G.screenwipe.children.particles = nil\n"
+        "      G.screenwipe = nil",
         # use_card restore event body (button_callbacks.lua:2246-2250)
         "            func = function()\n"
         "                G.STATE = prev_state\n"

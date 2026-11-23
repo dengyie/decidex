@@ -5,14 +5,15 @@
     {
       "filename": "balatro.love",
       "source": "artifact://balatro-v1.0.0.love",
-      "min_size": 50000000,
-      "sha256": "35d49907ebbaace92a4796aad3787229e094070cd2ad3f07316f507930a27fe5"
+      "min_size": 56378672,
+      "sha256": "f51e35c542689461c00f041d9f481eaaeefe3e37ba66532ace1a3e0a65f71752"
     },
     {
       "filename": "love.wasm",
       "source": "artifact://love-wasm-11.5",
-      "min_size": 4000000,
+      "min_size": 4720510,
       "sha256": "304f195f36d163f3bb2127e7c232fd1fd0791ee2ab61ba003d47096003b53bf1"
     }
-  ]
+  ],
+  "decidex_version": "v166"
 }

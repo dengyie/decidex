@@ -1,6 +1,8 @@
 /**
  * Numerical scoring harness for the browser decision engine.
  *
+ * 本 harness 用于 replay/分析校验；线上运行的策略实现位于 tools/balatro_wasm/web/app.js，服务端 advisor 经鉴权 /api/execute auto 通道仍可被调用执行。
+ *
  * Extracts the pure scoring functions (and their module-level constants)
  * out of tools/balatro_wasm/web/app.js and evaluates JSON test cases passed
  * on stdin: [{ name, fn, args }, ...] -> [{ name, ok, result|error }, ...].
