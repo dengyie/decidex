@@ -1634,6 +1634,12 @@ end
 -- and everything downstream. Callers re-enter every tick, so a failed
 -- advance simply retries; the marker is only written AFTER the payout and
 -- the previous_round bookkeeping have both landed.
+-- Failure print is rate-limited like report_frame_error: the ROUND_EVAL tick
+-- loop re-calls force_advance_to_shop EVERY frame while round_eval is gone,
+-- so an un-throttled print floods stdout at 60 lines/sec when the advance
+-- keeps failing mid-pcall (round-24 review finding; the flood is new in
+-- v166 — the retry loop itself is pre-existing).
+local _decidex_force_adv_err_count = 0
 local function force_advance_to_shop()
   if not (G and G.STATES and G.STATE == G.STATES.ROUND_EVAL) then return false, "not in ROUND_EVAL" end
   local ok_adv, err_adv = pcall(function()
@@ -1733,7 +1739,11 @@ local function force_advance_to_shop()
   -- unconditional `return true`: callers re-enter every tick, so a failed
   -- advance simply retries next tick (state was not mutated to SHOP).
   if not ok_adv then
-    print("[DecideX Bridge] force_advance_to_shop failed: " .. tostring(err_adv))
+    _decidex_force_adv_err_count = _decidex_force_adv_err_count + 1
+    local n = _decidex_force_adv_err_count
+    if n <= 5 or n % 300 == 0 then
+      print("[DecideX Bridge] force_advance_to_shop failed #" .. n .. ": " .. tostring(err_adv))
+    end
     return false, err_adv
   end
   return true, nil

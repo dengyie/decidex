@@ -1767,6 +1767,29 @@ def test_event_guard_prints_are_rate_limited():
     assert "suppressed in last 10s" in content
 
 
+def test_force_advance_failure_print_is_rate_limited():
+    """round-24 finding: the ROUND_EVAL tick loop re-calls
+    force_advance_to_shop EVERY frame while round_eval is gone (bridge tick
+    loop), so the v166 failure print floods stdout at ~60 lines/sec whenever
+    the advance keeps failing mid-pcall. The print must be rate-limited
+    (first few occurrences + every 300th), matching report_frame_error. The
+    counter MUST be declared OUTSIDE the function body or it resets to 0 on
+    every call and the throttle never engages.
+    """
+    content = (PATCHES_DIR / "decidex_bridge.lua").read_text(encoding="utf-8")
+
+    # Counter is module-level, declared before the function definition.
+    before_fn = content.split(chr(10) + "local function force_advance_to_shop()", 1)[0]
+    assert "local _decidex_force_adv_err_count = 0" in before_fn
+    body = content.split("local function force_advance_to_shop()", 1)[1].split(
+        chr(10) + "end", 1)[0]
+    assert "_decidex_force_adv_err_count = _decidex_force_adv_err_count + 1" in body
+    assert "n <= 5 or n % 300 == 0" in body
+    assert "force_advance_to_shop failed #" in body
+    # Still propagates the failure (never swallows it behind a bare print).
+    assert "return false, err_adv" in body
+
+
 def test_bridge_populates_dead_pack_creation():
     """Vanilla creates pack cards in queued events (card.lua:1721, delay
     1.3*sqrt(GAMESPEED)) and emplaces them gated on the pack UIBox sliding
