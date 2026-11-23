@@ -44,12 +44,14 @@ def test_app_js_manifest_version_drift_fails(tmp_path):
     """Rewrite app.js to a different ASSET_VERSION than the manifest."""
     web = tmp_path / "web"
     web.mkdir()
+    import re as _re
     for name in ("app.js", "index.html"):
         src = (WEB_DIR / name).read_text(encoding="utf-8")
-        (web / name).write_text(src.replace('ASSET_VERSION = "v165"', 'ASSET_VERSION = "v999"'), encoding="utf-8")
+        src = _re.sub(r'ASSET_VERSION = "v\d+"', 'ASSET_VERSION = "v999"', src)
+        (web / name).write_text(src, encoding="utf-8")
     mod = _load_module()
     problems = mod.check(web, MANIFEST)
-    assert any("decidex_version" in p and "v999" in p for p in problems), problems
+    assert any("ASSET_VERSION v999" in p for p in problems), problems
 
 
 def test_index_html_prefix_extension_drift_fails(tmp_path):

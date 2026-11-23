@@ -98,10 +98,14 @@ def check(web_dir: Path, manifest_path: Path) -> list[str]:
     except (OSError, ValueError) as exc:
         problems.append(f"release-assets.json unreadable: {exc}")
 
-    # CI checkouts carry no proprietary binaries. When BOTH artifacts are
-    # absent the asset-level (size/sha) checks are skipped and only the
-    # version-cross-check runs; a PARTIAL presence (one file missing) is
-    # still an error, because it means a broken deploy tree.
+    # CI checkouts carry no proprietary binaries. balatro.love is a build
+    # product that lives outside Git (53.7MB); love.wasm IS tracked. So a
+    # bare checkout always has love.wasm but never balatro.love — the
+    # old "any sibling present means the tree is complete" rule flagged
+    # every CI run as a broken deploy tree. Each artifact's asset-level
+    # (size/sha) checks therefore run INDEPENDENTLY: whichever file exists
+    # gets verified against its manifest entry, and absence of the
+    # untracked balatro.love alone is not an error.
     love_path = web_dir / "balatro.love"
     wasm_path = web_dir / "love.wasm"
     artifacts_present = love_path.is_file() and wasm_path.is_file()
@@ -125,13 +129,7 @@ def check(web_dir: Path, manifest_path: Path) -> list[str]:
                 continue
             path = web_dir / filename
             if not path.is_file():
-                if not any_artifact_present:
-                    continue  # artifact-less CI checkout: skip silently
-                problems.append(f"release-assets.json: {filename} missing from web dir "
-                                f"while its sibling is present")
-                continue
-            if not artifacts_present:
-                continue  # partial tree already reported above
+                continue  # untracked build product absent (e.g. CI checkout): per-file checks below run for whatever IS present
             actual_size = path.stat().st_size
             min_size = entry.get("min_size")
             if not isinstance(min_size, int) or min_size <= 0:
