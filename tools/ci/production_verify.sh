@@ -119,11 +119,23 @@ echo "✅ asset sizes match (reconciler has caught up)"
 
 # 4. Full-download sha256 against release-assets.json. Content-Length can
 #    only prove size, not content; this catches a corrupted or swapped
-#    payload of the right length.
-LOVE_SHA=$(curl -fsS --max-time 300 "$BASE/balatro.love.zip?$LOCAL_VER" | sha256sum | awk '{print $1}') \
+#    payload of the right length. Downloaded to a temp file with --retry +
+#    resume: large single-stream downloads from the edge can die mid-body
+#    (curl 18 observed repeatedly from residential networks), and a
+#    truncated stream piped straight into sha256sum would silently hash a
+#    partial payload into a plausible-looking mismatch.
+TMPDIR_V="${TMPDIR:-/tmp}"
+LOVE_TMP="$TMPDIR_V/pv-love.$$"
+WASM_TMP="$TMPDIR_V/pv-wasm.$$"
+trap 'rm -f "$LOVE_TMP" "$WASM_TMP"' EXIT
+curl -fsS --max-time 300 --retry 5 --retry-all-errors -C - -o "$LOVE_TMP" \
+  "$BASE/balatro.love.zip?$LOCAL_VER" \
   || fail "balatro.love.zip download failed"
-WASM_SHA=$(curl -fsS --max-time 300 "$BASE/love.wasm.bin?$LOCAL_VER" | sha256sum | awk '{print $1}') \
+curl -fsS --max-time 300 --retry 5 --retry-all-errors -C - -o "$WASM_TMP" \
+  "$BASE/love.wasm.bin?$LOCAL_VER" \
   || fail "love.wasm.bin download failed"
+LOVE_SHA=$(sha256sum "$LOVE_TMP" | awk '{print $1}')
+WASM_SHA=$(sha256sum "$WASM_TMP" | awk '{print $1}')
 EXPECT_LOVE_SHA=$(python3 - "$MANIFEST" <<'PY'
 import json, sys
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
